@@ -1,0 +1,23 @@
+# 외부 서드파티 클론 (JEOresearch/EyeTracker) — patches/PATCH_NOTES.md 참고해 별도 클론
+external/
+
+# 큰 산출물 (재생성 가능) — README 미디어는 assets/ 만 커밋
+data/
+*.mp4
+*.webm
+*.avi
+
+# 트래커 런타임 출력
+gaze_vector.txt
+output_video.mp4
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 에디터/OS
+.vscode/
+.idea/
+.DS_Store
