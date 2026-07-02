@@ -12,7 +12,8 @@ IR 카메라 도착 전, 연구실 **RealSense D455**로 눈 카메라 자리를
 ![RealSense 시선 추적 데모](assets/realsense_eyetracking.gif)
 
 > 알고리즘: [JEOresearch/EyeTracker](https://github.com/JEOresearch/EyeTracker) (Orlosky 검출기) + numpy2 overflow 수정.
-> RealSense는 임시 대체용이며, 최종 OV9281 밀착 IR 카메라면 더 안정적입니다.
+> RealSense는 임시 대체용이며, 최종 고정 밀착 IR 카메라면 더 안정적일것으로 예상
+> 
 
 ## 한 줄 요약
 ```
