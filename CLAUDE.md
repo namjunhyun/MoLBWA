@@ -18,7 +18,9 @@ p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 자세한 설계는 `docs/00_overview.md` ~ `docs/08_materials_BOM.md`.
 
 ## 하드웨어
-- 눈 카메라: **OV9281(B0332)** 모노 글로벌셔터 + 850nm IR + IR 밴드패스 필터 (**미도착**)
+- 눈 카메라: **GC0308** (Sonix UVC 브리지, `/dev/v4l/by-id`에서 "Sonix"로 탐색) + 850nm IR
+  - ※ 당초 계획한 OV9281에서 **변경됨**. 롤링셔터 / 640×480 / 30fps / 컬러센서.
+  - 검출은 동작 확인. 단 **사케이드는 못 잡는다** → fixation 기반 설계. 상세 `docs/09_visualization.md`.
 - 씬 카메라: **oCamS-1MGN-U** 스테레오 + 내장 IMU
 - 엣지: **Raspberry Pi 5** (캡처+동공검출+스트리밍, 전송 위주)
 - 데스크톱: SLAM + 융합 + 시각화
