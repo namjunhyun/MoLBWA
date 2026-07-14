@@ -66,14 +66,38 @@ python src/uvc_gaze_test.py --live
 python src/gaze_on_scene.py
 ```
 
+## 셋업 (SLAM 시험)
+ORB-SLAM3 / ORB_SLAM3_ROS2는 서드파티(GPLv3/MIT) 레포라 리포에 통째로 커밋하지 않고, 아이트래킹과
+같은 방식으로 클론 + 패치를 적용한다. 자세한 절차는 [patches/orbslam3_patches.md](patches/orbslam3_patches.md),
+oCamS ROS2 드라이버 자체 셋업은 [ros2_ws/src/ocams_ros2/README.md](ros2_ws/src/ocams_ros2/README.md) 참고.
+
+```bash
+# 카메라+IMU 드라이버
+colcon build --packages-select ocams_ros2
+ros2 run ocams_ros2 ocams_stereo_imu_node
+
+# 다른 터미널: ORB-SLAM3 스테레오-이너셜 (LD_LIBRARY_PATH에 ORB_SLAM3/lib 필요)
+ros2 run orbslam3 stereo-inertial \
+  ~/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+  ~/ros2_ws/src/orbslam3_ros2/config/stereo-inertial/oCamS.yaml \
+  false
+# → /orbslam3/pose (geometry_msgs/PoseStamped) + TF map→camera_left 발행
+```
+
 ## 현재 단계
 **0단계 (전부 유선, 데스크톱 직결).**
 - ✅ IR 눈 카메라(GC0308) → 동공 검출 → 3D 시선 벡터
 - ✅ 시선 → 씬 카메라 영상 위 2D 투영 (1점 캘리브레이션)
+- ✅ oCamS 실카메라+실IMU로 ORB-SLAM3 스테레오-이너셜 라이브 확인,
+  pose 스트림(`/orbslam3/pose`) 발행 → [notes/2026-07-14_ocams_ros2_slam_live.md](notes/2026-07-14_ocams_ros2_slam_live.md)
 - ⬜ 스테레오 깊이 `D` (oCamS 캘리브 + 우영상 + SGM) ← **현재 병목**
 - ⬜ ORB-SLAM3 pose `T_WS` → 융합 `p_W` → Rerun 3D 시각화
 
 세부 순서는 [docs/09_visualization.md](docs/09_visualization.md) §7.
+
+## SLAM 패치 / 셋업 문서
+- [patches/orbslam3_patches.md](patches/orbslam3_patches.md) — ORB-SLAM3 / ORB_SLAM3_ROS2 클론 + 패치 절차
+- [ros2_ws/src/ocams_ros2/README.md](ros2_ws/src/ocams_ros2/README.md) — oCamS ROS2 드라이버 (신규 작성)
 
 ## 진행 기록
 `notes/` 에 날짜별로 남긴다. 최신: [notes/](notes/)

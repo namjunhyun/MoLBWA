@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ocams_ros2</name>
+  <version>0.0.1</version>
+  <description>ROS2 port of the Withrobot oCamS-1MGN-U stereo+IMU driver, publishing topics compatible with orbslam3_ros2's stereo-inertial node.</description>
+  <maintainer email="parkse1010@gmail.com">seng</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>libopencv-dev</depend>
+  <depend>libv4l-dev</depend>
+  <depend>libudev-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

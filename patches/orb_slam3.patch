@@ -1,0 +1,50 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 016e743..11b2875 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,10 +7,12 @@ ENDIF()
+ 
+ MESSAGE("Build type: " ${CMAKE_BUILD_TYPE})
+ 
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall   -O3")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
++set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall -w   -O3")
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -w   -O3")
+ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
+ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
++set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+ # Check C++11 or C++0x support
+ include(CheckCXXCompilerFlag)
+diff --git a/src/LoopClosing.cc b/src/LoopClosing.cc
+index 319afb5..16f9ed2 100644
+--- a/src/LoopClosing.cc
++++ b/src/LoopClosing.cc
+@@ -982,7 +982,7 @@ void LoopClosing::CorrectLoop()
+         unique_lock<mutex> lock(mMutexGBA);
+         mbStopGBA = true;
+ 
+-        mnFullBAIdx++;
++        mnFullBAIdx = mnFullBAIdx + 1;
+ 
+         if(mpThreadGBA)
+         {
+@@ -1233,7 +1233,7 @@ void LoopClosing::MergeLocal()
+         unique_lock<mutex> lock(mMutexGBA);
+         mbStopGBA = true;
+ 
+-        mnFullBAIdx++;
++        mnFullBAIdx = mnFullBAIdx + 1;
+ 
+         if(mpThreadGBA)
+         {
+@@ -1806,7 +1806,7 @@ void LoopClosing::MergeLocal2()
+         unique_lock<mutex> lock(mMutexGBA);
+         mbStopGBA = true;
+ 
+-        mnFullBAIdx++;
++        mnFullBAIdx = mnFullBAIdx + 1;
+ 
+         if(mpThreadGBA)
+         {

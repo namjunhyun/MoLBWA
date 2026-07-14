@@ -1,0 +1,99 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# System config
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Images published by ocams_ros2 are already rectified (see ocams_ros2/config/left.yaml,
+# right.yaml + the remap done in ocams_stereo_imu_node), so distortion is zero here and
+# do_rectify must be passed as "false" to the stereo-inertial node.
+#
+# fx/fy/cx/cy come from the projection_matrix (P) in ocams_ros2's calibration files.
+Camera1.fx: 433.553025
+Camera1.fy: 433.553025
+Camera1.cx: 470.352457
+Camera1.cy: 236.488789
+
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+
+Camera2.fx: 433.553025
+Camera2.fy: 433.553025
+Camera2.cx: 470.352457
+Camera2.cy: 236.488789
+
+Camera2.k1: 0.0
+Camera2.k2: 0.0
+Camera2.p1: 0.0
+Camera2.p2: 0.0
+
+Camera.width: 640
+Camera.height: 480
+
+Camera.fps: 30
+Camera.RGB: 0
+
+# Close/Far threshold. Baseline times.
+Stereo.ThDepth: 40.0
+
+# Rectified stereo pair -> pure x-translation. Baseline derived from
+# P2(0,3) / P2(0,0) = 54.116684 / 433.553025 in ocams_ros2/config/right.yaml.
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [1.0, 0.0, 0.0, 0.124820,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, 0.0,
+         0.0, 0.0, 0.0, 1.0]
+
+# NOTE: no camera-IMU extrinsic calibration is available for this specific oCamS-1MGN-U /
+# myAHRS+ unit. This is left as identity (IMU frame == left camera frame) as a starting
+# point so the pipeline runs end to end -- it is NOT a real calibration. For accurate
+# tracking, calibrate T_b_c1 properly (e.g. with Kalibr) and replace this.
+IMU.T_b_c1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [1.0, 0.0, 0.0, 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, 0.0,
+         0.0, 0.0, 0.0, 1.0]
+
+# Approximate consumer-MEMS-grade noise parameters (myAHRS+ datasheet values were not
+# available). Loosen/tighten and re-check IMU.Frequency (measure with
+# `ros2 topic hz /imu`) once the driver is running.
+IMU.NoiseGyro: 0.01
+IMU.NoiseAcc: 0.08
+IMU.GyroWalk: 2.0e-04
+IMU.AccWalk: 4.0e-03
+IMU.Frequency: 100.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 1200
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 1.0

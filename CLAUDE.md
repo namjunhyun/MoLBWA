@@ -25,11 +25,15 @@ p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 - 엣지: **Raspberry Pi 5** (캡처+동공검출+스트리밍, 전송 위주)
 - 데스크톱: SLAM + 융합 + 시각화
 
-## 현재 상태 (2026-07-02)
+## 현재 상태 (2026-07-14)
 - **0단계**: 전부 유선, 데스크톱 직결. IR 카메라 미도착으로 **RealSense D455**로 임시 대체 시험.
 - 아이트래킹 알고리즘: **JEOresearch/EyeTracker** (Orlosky 검출기) 사용.
   - `external/`에 클론(리포엔 미포함) → `patches/PATCH_NOTES.md`의 numpy2 overflow 수정 필수.
 - **검증됨**: RealSense IR → 동공 검출 → 3D 시선 벡터 추출까지 관통. `assets/` GIF 참고.
+- **검증됨**: oCamS 실카메라+실IMU로 ORB-SLAM3 스테레오-이너셜 라이브 확인, `/orbslam3/pose` 발행 확인.
+  ORB-SLAM3/ORB_SLAM3_ROS2도 `external/` 클론(리포엔 미포함) + `patches/orbslam3_patches.md`의 패치 필요.
+  신규 코드는 `ros2_ws/src/ocams_ros2/`(자체 작성 ROS2 드라이버, 리포에 포함).
+  **미해결**: 카메라-IMU 외부 파라미터(`IMU.T_b_c1`) 미검증 placeholder — 실측 캘리브레이션 필요.
 - 진행 로그: `notes/` (날짜별).
 
 ## 코드 (`src/`)

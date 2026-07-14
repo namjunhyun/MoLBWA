@@ -1,0 +1,153 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 16b9d4c..7bfe9f8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.5)
+ project(orbslam3)
+ 
+ # You should set the PYTHONPATH to your own python site-packages path
+-set(ENV{PYTHONPATH} "/opt/ros/foxy/lib/python3.8/site-packages/")
++set(ENV{PYTHONPATH} "/opt/ros/jazzy/lib/python3.12/site-packages/")
+ 
+ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules)
+ 
+@@ -18,16 +18,20 @@ endif()
+ find_package(ament_cmake REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(sensor_msgs REQUIRED)
++find_package(geometry_msgs REQUIRED)
++find_package(tf2_ros REQUIRED)
+ find_package(cv_bridge REQUIRED)
+ find_package(message_filters REQUIRED)
+ find_package(Sophus REQUIRED)
+ find_package(Pangolin REQUIRED)
+ find_package(ORB_SLAM3 REQUIRED)
++find_package(OpenCV REQUIRED)
+ 
+ include_directories(
+   include
+   ${ORB_SLAM3_ROOT_DIR}/include
+   ${ORB_SLAM3_ROOT_DIR}/include/CameraModels
++  ${ORB_SLAM3_ROOT_DIR}/include/Thirdparty/Sophus
+ )
+ 
+ link_directories(
+@@ -52,12 +56,14 @@ add_executable(stereo
+ )
+ ament_target_dependencies(stereo rclcpp sensor_msgs cv_bridge message_filters
+ ORB_SLAM3 Pangolin)
++target_link_libraries(stereo ${OpenCV_LIBS})
+ 
+ add_executable(stereo-inertial
+   src/stereo-inertial/stereo-inertial.cpp
+   src/stereo-inertial/stereo-inertial-node.cpp
+ )
+-ament_target_dependencies(stereo-inertial rclcpp sensor_msgs cv_bridge ORB_SLAM3 Pangolin)
++ament_target_dependencies(stereo-inertial rclcpp sensor_msgs geometry_msgs tf2_ros cv_bridge ORB_SLAM3 Pangolin)
++target_link_libraries(stereo-inertial ${OpenCV_LIBS})
+ 
+ install(TARGETS mono rgbd stereo stereo-inertial
+   DESTINATION lib/${PROJECT_NAME})
+diff --git a/package.xml b/package.xml
+index f0c890b..116c14d 100644
+--- a/package.xml
++++ b/package.xml
+@@ -12,6 +12,8 @@
+ 
+   <depend>rclcpp</depend>
+   <depend>sensor_msgs</depend>
++  <depend>geometry_msgs</depend>
++  <depend>tf2_ros</depend>
+   <depend>cv_bridge</depend>
+   <depend>message_filters</depend>
+   <depend>Pangolin</depend>
+diff --git a/src/stereo-inertial/stereo-inertial-node.cpp b/src/stereo-inertial/stereo-inertial-node.cpp
+index 035f817..0115f21 100644
+--- a/src/stereo-inertial/stereo-inertial-node.cpp
++++ b/src/stereo-inertial/stereo-inertial-node.cpp
+@@ -61,6 +61,9 @@ StereoInertialNode::StereoInertialNode(ORB_SLAM3::System *SLAM, const string &st
+     subImgLeft_ = this->create_subscription<ImageMsg>("camera/left", 100, std::bind(&StereoInertialNode::GrabImageLeft, this, _1));
+     subImgRight_ = this->create_subscription<ImageMsg>("camera/right", 100, std::bind(&StereoInertialNode::GrabImageRight, this, _1));
+ 
++    posePub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("orbslam3/pose", 10);
++    tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
++
+     syncThread_ = new std::thread(&StereoInertialNode::SyncWithImu, this);
+ }
+ 
+@@ -207,10 +210,46 @@ void StereoInertialNode::SyncWithImu()
+                 cv::remap(imRight, imRight, M1r_, M2r_, cv::INTER_LINEAR);
+             }
+ 
+-            SLAM_->TrackStereo(imLeft, imRight, tImLeft, vImuMeas);
++            Sophus::SE3f Tcw = SLAM_->TrackStereo(imLeft, imRight, tImLeft, vImuMeas);
++
++            if (SLAM_->GetTrackingState() == ORB_SLAM3::Tracking::OK)
++            {
++                rclcpp::Time stamp(static_cast<int64_t>(tImLeft * 1e9));
++                PublishPose(Tcw, stamp);
++            }
+ 
+             std::chrono::milliseconds tSleep(1);
+             std::this_thread::sleep_for(tSleep);
+         }
+     }
+ }
++
++void StereoInertialNode::PublishPose(const Sophus::SE3f &Tcw, const rclcpp::Time &stamp)
++{
++    // Tcw is world->camera; invert to get the camera pose expressed in the world
++    // ("map") frame, which is what's useful for visualization / downstream fusion.
++    Sophus::SE3f Twc = Tcw.inverse();
++    Eigen::Vector3f t = Twc.translation();
++    Eigen::Quaternionf q = Twc.unit_quaternion();
++
++    geometry_msgs::msg::PoseStamped poseMsg;
++    poseMsg.header.stamp = stamp;
++    poseMsg.header.frame_id = "map";
++    poseMsg.pose.position.x = t.x();
++    poseMsg.pose.position.y = t.y();
++    poseMsg.pose.position.z = t.z();
++    poseMsg.pose.orientation.x = q.x();
++    poseMsg.pose.orientation.y = q.y();
++    poseMsg.pose.orientation.z = q.z();
++    poseMsg.pose.orientation.w = q.w();
++    posePub_->publish(poseMsg);
++
++    geometry_msgs::msg::TransformStamped tfMsg;
++    tfMsg.header = poseMsg.header;
++    tfMsg.child_frame_id = "camera_left";
++    tfMsg.transform.translation.x = t.x();
++    tfMsg.transform.translation.y = t.y();
++    tfMsg.transform.translation.z = t.z();
++    tfMsg.transform.rotation = poseMsg.pose.orientation;
++    tfBroadcaster_->sendTransform(tfMsg);
++}
+diff --git a/src/stereo-inertial/stereo-inertial-node.hpp b/src/stereo-inertial/stereo-inertial-node.hpp
+index 86cd4fe..d568c9e 100644
+--- a/src/stereo-inertial/stereo-inertial-node.hpp
++++ b/src/stereo-inertial/stereo-inertial-node.hpp
+@@ -4,8 +4,11 @@
+ #include "rclcpp/rclcpp.hpp"
+ #include "sensor_msgs/msg/image.hpp"
+ #include "sensor_msgs/msg/imu.hpp"
++#include "geometry_msgs/msg/pose_stamped.hpp"
++#include "geometry_msgs/msg/transform_stamped.hpp"
++#include "tf2_ros/transform_broadcaster.h"
+ 
+-#include <cv_bridge/cv_bridge.h>
++#include <cv_bridge/cv_bridge.hpp>
+ 
+ #include "System.h"
+ #include "Frame.h"
+@@ -34,6 +37,10 @@ private:
+     rclcpp::Subscription<ImageMsg>::SharedPtr subImgLeft_;
+     rclcpp::Subscription<ImageMsg>::SharedPtr subImgRight_;
+ 
++    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr posePub_;
++    std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
++    void PublishPose(const Sophus::SE3f &Tcw, const rclcpp::Time &stamp);
++
+     ORB_SLAM3::System *SLAM_;
+     std::thread *syncThread_;
+ 

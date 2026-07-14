@@ -23,7 +23,15 @@
 | 내부파라미터 `K`, rectification | OpenCV 스테레오 캘리브레이션 (사전) |
 
 ## 체크리스트
-- [ ] oCamS 스테레오 캘리브레이션 (K, baseline, rectification 맵)
-- [ ] StereoSGBM 로컬 윈도우 깊이 함수 작성
-- [ ] ORB-SLAM3 스테레오-이너셜 실행 확인 (기존 경험 활용)
-- [ ] pose 스트림 타임스탬프 확보
+- [x] oCamS 스테레오 캘리브레이션 (K, baseline, rectification 맵) — 기존 계측치 확보,
+      `ros2_ws/src/ocams_ros2/config/{left,right}.yaml`. Baseline ≈0.12482m @640x480.
+- [ ] StereoSGBM 로컬 윈도우 깊이 함수 작성 — 아직. (SLAM 맵과는 별도 파이프라인, 융합 단계에서 필요)
+- [x] ORB-SLAM3 스테레오-이너셜 실행 확인 — 2026-07-14, 실카메라+실IMU 라이브 확인.
+      `notes/2026-07-14_ocams_ros2_slam_live.md` 참고.
+- [x] pose 스트림 타임스탬프 확보 — `/orbslam3/pose` (`geometry_msgs/PoseStamped`, world/`map` 프레임)
+      + TF(`map`→`camera_left`), 트래킹 OK 상태일 때만 발행.
+
+## 남은 리스크
+- **카메라-IMU 외부 파라미터(`IMU.T_b_c1`) 미검증** — 지금은 identity placeholder. 시선 융합 정확도를
+  신뢰하려면 실측 캘리브레이션(Kalibr 등)으로 교체 필요. 자세한 내용: `patches/orbslam3_patches.md`.
+- IMU 노이즈 파라미터도 데이터시트 실측치 아님 (일반 MEMS 추정치).
