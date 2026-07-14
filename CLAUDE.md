@@ -35,8 +35,10 @@ p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 ## 코드 (`src/`)
 | 파일 | 용도 |
 |------|------|
-| `realsense_eye_test.py` | RealSense IR → Lite 동공검출(타원) 라이브/헤드리스 |
-| `realsense_gaze_test.py` | RealSense IR → 3D 시선 벡터 추출 라이브/헤드리스 |
+| `uvc_gaze_test.py` | **GC0308(UVC) IR → 3D 시선 벡터.** 현재 눈 카메라 진입점 (RealSense 의존 없음) |
+| `gaze_on_scene.py` | **눈+씬 결합.** 1점 캘리브(`c`)로 시선을 oCamS 좌영상에 투영 → 융합(docs/03)의 징검다리 |
+| `realsense_eye_test.py` | (구) RealSense IR → Lite 동공검출(타원) 라이브/헤드리스 |
+| `realsense_gaze_test.py` | (구) RealSense IR → 3D 시선 벡터 추출 라이브/헤드리스 |
 | `realsense_record.py` | RealSense 라이브 + 알고리즘 오버레이 녹화 |
 | `run_on_eyevideo.py` | 클로즈업 눈영상으로 알고리즘 검증(오버레이+통계) |
 | `make_demo_video.py` | 눈영상에 시각화 입혀 데모 mp4 생성 |
