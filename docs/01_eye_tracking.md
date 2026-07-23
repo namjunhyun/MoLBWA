@@ -38,4 +38,6 @@ pip install pupil-detectors pye3d
 - [ ] pye3d 설치 및 샘플 눈영상으로 동공 검출 확인
 - [ ] ROI 크롭 → fps 측정
 - [ ] (IR 도착 후) 밴드패스 필터 유무 검출 안정성 비교
-- [ ] 9~13점 캘리브레이션 절차 스크립트화
+- [x] 다점 캘리브레이션 절차 스크립트화 — `src/gaze_on_scene.py`에 마우스 클릭 기반 다점
+      캘리브 구현 (고정 9~13점이 아니라 가변 점 수, `m` 키로 진입). 2D→2D 직접 매핑 대신
+      회전(Wahba/SVD)+fx 최적화 방식으로 구현. 상세: [../notes/2026-07-23_gaze_calibration_upgrade.md](../notes/2026-07-23_gaze_calibration_upgrade.md)
