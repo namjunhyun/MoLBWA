@@ -24,26 +24,33 @@
   눈  = Sonix UVC IR (by-id 자동탐색)
   씬  = oCamS-1MGN-U. YUYV raw에서 Y채널=왼쪽, UV채널=오른쪽 (스테레오쌍).
         여기선 왼쪽만 쓴다. 노출은 기본값으로 충분(수동으로 올리지 말 것).
+        ocams_calib.py의 rectify 맵으로 왜곡보정+정렬(rectify)까지 거친 이미지를 쓴다 —
+        docs/03_fusion.md의 스테레오 깊이(K=ocams_calib.RECTIFIED_K)와 좌표계를 맞추기 위함.
+        640x480 고정(캘리브레이션 해상도와 다르면 rectify 맵이 안 맞음).
 
 사용:
   python gaze_on_scene.py                 # 창 두 개(눈/씬). 눈 굴려 모델 수렴 → 'c'로 캘리브
   키: c=1점 캘리브 / m=다점 캘리브 모드 토글(클릭으로 포인트 추가) / r=리셋 / q=종료
+
+시각화(docs/09_visualization.md A-2, 2026-07-30):
+  cv2 창(다점 캘리브용 마우스 클릭 때문에 그대로 둠)에 더해, 같은 프레임을 Rerun에도 로깅한다
+  ("eye/ir", "scene/image", "scene/gaze_cursor", "scene/calib_points"). 나중에 pose(C)/깊이(B)가
+  붙으면 여기 3D 엔티티만 추가하면 됨 — cv2 쪽은 안 건드려도 된다. --no-rerun으로 끌 수 있음.
 """
 import os
 import sys
 import argparse
 import numpy as np
 import cv2
+import rerun as rr
+
+import ocams_calib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "external", "EyeTracker", "3DTracker")))
 os.chdir(HERE)
 
-GAZE_TXT = os.path.join(HERE, "gaze_vector.txt")
-if os.path.exists(GAZE_TXT):
-    os.remove(GAZE_TXT)
-
-import Orlosky3DEyeTracker as tracker  # noqa: E402  (numpy2 패치본)
+import Orlosky3DEyeTracker as tracker  # noqa: E402  (numpy2 패치 + 2026-07-30 반환값 패치본)
 
 BY_ID = "/dev/v4l/by-id"
 
@@ -140,19 +147,6 @@ def solve_rotation_svd(dirs, rays):
     return R.astype(np.float32)
 
 
-def read_last_gaze():
-    """3DTracker가 매 프레임 쓰는 gaze_vector.txt → direction (3,)"""
-    try:
-        with open(GAZE_TXT) as f:
-            lines = [l.strip() for l in f if l.strip()]
-        vals = [float(x) for x in lines[-1].replace(",", " ").split()]
-        if len(vals) >= 6:
-            return np.array(vals[3:6], dtype=np.float32)
-    except Exception:
-        pass
-    return None
-
-
 def open_eye(width, height, fps):
     cap = cv2.VideoCapture(find_cam("Sonix"), cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
@@ -175,8 +169,9 @@ def open_scene(width, height):
     return cap
 
 
-def scene_left(cap):
-    """oCamS raw YUYV → 왼쪽 영상(Y채널) BGR"""
+def scene_left(cap, rectify_maps=None):
+    """oCamS raw YUYV → 왼쪽 영상(Y채널) BGR.
+    rectify_maps가 주어지면 왜곡보정+스테레오 정렬까지 적용(ocams_calib 좌표계로 맞춤)."""
     ok, f = cap.read()
     if not ok or f is None:
         return None
@@ -185,8 +180,17 @@ def scene_left(cap):
     elif f.ndim == 2:
         left = f[:, 0::2]
     else:
-        return f  # 이미 BGR
-    return cv2.cvtColor(np.ascontiguousarray(left), cv2.COLOR_GRAY2BGR)
+        left = None  # 이미 BGR인 경우 아래에서 그대로 반환
+
+    if left is None:
+        bgr = f
+    else:
+        left = np.ascontiguousarray(left)
+        if rectify_maps is not None:
+            map1, map2 = rectify_maps
+            left = cv2.remap(left, map1, map2, cv2.INTER_LINEAR)
+        bgr = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
+    return bgr
 
 
 def main():
@@ -194,11 +198,14 @@ def main():
     ap.add_argument("--eye-width", type=int, default=640)
     ap.add_argument("--eye-height", type=int, default=480)
     ap.add_argument("--eye-fps", type=int, default=30)
-    ap.add_argument("--scene-width", type=int, default=1280)
-    ap.add_argument("--scene-height", type=int, default=720)
+    ap.add_argument("--scene-width", type=int, default=ocams_calib.IMAGE_WIDTH,
+                    help="ocams_calib.py의 캘리브레이션 해상도와 같아야 rectify 맵이 맞는다 (기본 640)")
+    ap.add_argument("--scene-height", type=int, default=ocams_calib.IMAGE_HEIGHT,
+                    help="위와 동일 (기본 480)")
     ap.add_argument("--fx", type=float, default=None,
-                    help="씬 카메라 초점거리(px). 미지정시 폭*0.94 근사 "
-                         "(원본은 640폭에 600 가정). 원이 너무 크게/작게 움직이면 조절")
+                    help="씬 카메라 초점거리(px) 강제 지정. 미지정시 ocams_calib의 rectified "
+                         "캘리브레이션 값을 그대로 씀(근사 아님) — 스테레오 깊이(docs/03)와 "
+                         "좌표계를 맞추려면 이 기본값을 그대로 쓸 것")
     ap.add_argument("--smooth", type=float, default=0.25,
                     help="시선벡터 EMA 계수(0=고정,1=생값). 7/2 노트의 프레임간 튐(std0.18) 완화")
     ap.add_argument("--flip", action="store_true", help="눈 영상 상하반전")
@@ -207,7 +214,17 @@ def main():
                     help="시선 x축 반전을 끈다. 기본은 켬 — 눈 카메라는 사용자를 마주보므로 "
                          "씬 카메라와 좌우가 뒤집힌다(1점 캘리브의 최소회전으로는 못 고침)")
     ap.add_argument("--mirror-y", action="store_true", help="시선 y축도 반전(상하가 뒤집힐 때)")
+    ap.add_argument("--no-rerun", action="store_true", help="Rerun 로깅 끄기 (cv2 창만 사용)")
+    ap.add_argument("--rerun-every", type=int, default=3,
+                    help="Rerun에 영상을 N프레임마다 1번만 로깅 (기본 3). 매 프레임 원본 "
+                         "해상도로 다 보내면 gRPC 버퍼(1GiB)가 몇 분 안에 차서 뷰어가 죽는다 "
+                         "(2026-07-30에 실제로 겪음) — cv2 창 표시/캘리브는 영향 없음, "
+                         "Rerun 쪽 영상만 덜 자주 보냄")
     args = ap.parse_args()
+
+    if not args.no_rerun:
+        rr.init("molbwa_gaze_on_scene", spawn=True)
+    rerun_ok = not args.no_rerun  # gRPC 전송 에러 나면 죽이지 말고 이후로는 꺼버림
 
     # 눈/씬 카메라가 서로 마주보는 데서 오는 축 반전. 런타임에 x/y 키로 토글 가능.
     sign = np.array([1.0 if args.no_mirror_x else -1.0,
@@ -217,14 +234,30 @@ def main():
     eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
     scene_cap = open_scene(args.scene_width, args.scene_height)
 
-    probe = scene_left(scene_cap)
+    if (args.scene_width, args.scene_height) != (ocams_calib.IMAGE_WIDTH, ocams_calib.IMAGE_HEIGHT):
+        print(f"[경고] --scene-width/height가 캘리브레이션 해상도"
+              f"({ocams_calib.IMAGE_WIDTH}x{ocams_calib.IMAGE_HEIGHT})와 다름 — rectify 맵을 못 씀, "
+              f"raw(왜곡보정 전) 이미지로 진행. docs/03 융합용으로는 기본 해상도를 쓸 것.")
+        left_maps = None
+    else:
+        left_maps, _right_maps_unused = ocams_calib.build_rectify_maps()
+
+    probe = scene_left(scene_cap, left_maps)
     if probe is None:
         raise RuntimeError("씬 프레임 없음")
     SH, SW = probe.shape[:2]
-    fx = fy = args.fx if args.fx else SW * 0.94
-    fx0 = fx  # 리셋 시 되돌아갈 초기 근사값
-    cx, cy = SW / 2.0, SH / 2.0
-    print(f"[scene] {SW}x{SH}  fx={fx:.0f} (근사값 — 다점 캘리브 3점 이상이면 자동 보정됨)")
+    if args.fx:
+        fx = fy = args.fx
+        cx, cy = SW / 2.0, SH / 2.0
+    elif left_maps is not None:
+        fx = fy = ocams_calib.RECTIFIED_K[0, 0]
+        cx, cy = ocams_calib.RECTIFIED_K[0, 2], ocams_calib.RECTIFIED_K[1, 2]
+    else:
+        fx = fy = SW * 0.94  # rectify 못 쓰는 경우의 옛 근사치 (해상도 불일치 시)
+        cx, cy = SW / 2.0, SH / 2.0
+    fx0 = fx  # 리셋 시 되돌아갈 초기값
+    print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
+          f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
     print("[키] c=1점 캘리브 / m=다점 캘리브 모드 토글(클릭으로 포인트 추가, 3점+ 시 fx도 자동보정) / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
@@ -244,6 +277,18 @@ def main():
     cv2.namedWindow(win_name)
     cv2.setMouseCallback(win_name, on_mouse)
 
+    def rr_log_safe(entity_path, obj):
+        """rr.log 실패(gRPC transport error 등)해도 스크립트 전체가 죽지 않게. 실패하면 이후 로깅 자체를 끔."""
+        nonlocal rerun_ok
+        if not rerun_ok:
+            return
+        try:
+            rr.log(entity_path, obj)
+        except Exception as e:
+            print(f"[rerun] 로깅 실패 — 이후 Rerun 로깅 끔(cv2 창은 계속 동작): {e}")
+            rerun_ok = False
+
+    frame_idx = 0
     try:
         while True:
             ok, eye = eye_cap.read()
@@ -252,8 +297,13 @@ def main():
             if args.flip:
                 eye = cv2.flip(eye, -1)
 
-            tracker.process_frame(eye)  # 검출 + 안구모델 + gaze_vector.txt 갱신 + 눈 창 표시
-            d = read_last_gaze()
+            log_images_this_frame = rerun_ok and (frame_idx % args.rerun_every == 0)
+            if rerun_ok:
+                rr.set_time("frame", sequence=frame_idx)
+                if log_images_this_frame:
+                    rr_log_safe("eye/ir", rr.Image(cv2.cvtColor(eye, cv2.COLOR_BGR2RGB)))
+
+            _ellipse, d = tracker.process_frame(eye)  # 검출 + 안구모델 + 눈 창 표시, 반환값으로 시선벡터 바로 받음
 
             if d is not None and np.linalg.norm(d) > 1e-6:
                 d = (d / np.linalg.norm(d)) * sign
@@ -261,11 +311,17 @@ def main():
                     (1 - args.smooth) * smooth_dir + args.smooth * d
                 smooth_dir /= np.linalg.norm(smooth_dir)
 
-            scene = scene_left(scene_cap)
+            scene = scene_left(scene_cap, left_maps)
             if scene is None:
                 continue
             if args.scene_flip:
                 scene = cv2.flip(scene, -1)
+
+            if log_images_this_frame:
+                rr_log_safe("scene/image", rr.Image(cv2.cvtColor(scene, cv2.COLOR_BGR2RGB)))
+            if rerun_ok and calib_pixels:
+                rr_log_safe("scene/calib_points",
+                            rr.Points2D(calib_pixels, radii=8, colors=[255, 0, 255]))
 
             if click_state["pending"] is not None:
                 cu, cv_ = click_state["pending"]
@@ -298,6 +354,9 @@ def main():
                     cv2.drawMarker(scene, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
                     cv2.putText(scene, f"gaze ({u},{v})", (u + 34, v - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    if rerun_ok:
+                        rr_log_safe("scene/gaze_cursor",
+                                    rr.Points2D([[u, v]], radii=12, colors=[0, 255, 0]))
                 else:
                     cv2.putText(scene, "gaze behind camera", (20, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -320,6 +379,7 @@ def main():
                                 f"points={len(calib_pixels)}  fx={fx:.0f}", (20, 86),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, multi_color, 2)
             cv2.imshow(win_name, scene)
+            frame_idx += 1
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):

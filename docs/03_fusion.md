@@ -46,6 +46,7 @@ def gaze_point_world(u, v, D, K, T_WS):
 - pose를 흔들며 같은 물체 응시 → `p_W`가 월드에서 고정되는지 확인 (융합이 맞으면 고정).
 
 ## 체크리스트
-- [ ] `gaze_point_world` 단위 테스트 (합성 데이터)
+- [x] `gaze_point_world` 단위 테스트 (합성 데이터) — `src/fusion.py`, 항등/평행이동/회전+평행이동
+      3가지 pose로 순방향→역복원 왕복 검증, 오차 1e-15 수준. `python src/fusion.py`로 재현.
 - [ ] 실물 물체로 D/p_W 정확도 확인
 - [ ] pose 이동 시 p_W 월드 고정성 확인

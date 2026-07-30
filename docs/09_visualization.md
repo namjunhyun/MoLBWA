@@ -121,15 +121,20 @@ fixation 히트맵도 점 누적이 아니라 **mesh vertex에 거리 기반 가
 
 `src/gaze_on_scene.py`는 2D 오버레이까지는 동작하지만, **3D 실시간 시각화를 얹으면 아래가 터진다.**
 
-### (1) `gaze_vector.txt` 파일 IPC 제거 — 1순위
-지금 `tracker.process_frame()`이 텍스트 파일에 쓰고 `read_last_gaze()`가 다시 읽는다.
-데모에선 돌아가지만, pose·깊이와 **타임스탬프를 맞춰야 하는 순간** 레이스 컨디션과
-프레임 드랍이 된다. `Orlosky3DEyeTracker.process_frame`이 **벡터를 리턴하도록** 고쳐
-메모리로 받는다.
+### (1) `gaze_vector.txt` 파일 IPC 제거 — 1순위 ✅ (2026-07-30 완료)
+~~지금 `tracker.process_frame()`이 텍스트 파일에 쓰고 `read_last_gaze()`가 다시 읽는다.~~
+~~데모에선 돌아가지만, pose·깊이와 **타임스탬프를 맞춰야 하는 순간** 레이스 컨디션과~~
+~~프레임 드랍이 된다. `Orlosky3DEyeTracker.process_frame`이 **벡터를 리턴하도록** 고쳐~~
+~~메모리로 받는다.~~
+→ `patches/PATCH_NOTES.md`의 "패치 2" 참고. `process_frame()`이 이제
+`(final_rotated_rect, gaze_direction)`을 바로 반환. `gaze_on_scene.py`도 파일 읽기 제거함.
 
-### (2) 씬 카메라 캘리브레이션 실측
-현재 `fx = SW * 0.94` **근사값**. 2D 원만 그릴 땐 티가 안 나지만,
-**깊이를 곱해 3D 점을 만드는 순간 미터 단위 오차로 증폭된다.** oCamS 스테레오 캘리브(K, D, baseline) 필수.
+### (2) 씬 카메라 캘리브레이션 실측 ✅ (2026-07-30 완료)
+~~현재 `fx = SW * 0.94` **근사값**. 2D 원만 그릴 땐 티가 안 나지만,~~
+~~**깊이를 곱해 3D 점을 만드는 순간 미터 단위 오차로 증폭된다.** oCamS 스테레오 캘리브(K, D, baseline) 필수.~~
+→ `src/ocams_calib.py`가 `ocams_ros2/config/*.yaml`의 실측 캘리브레이션에서 rectify 맵과
+`RECTIFIED_K`(fx=fy=433.55, cx=470.35, cy=236.49)를 계산. `gaze_on_scene.py`는 이제 이 값을
+기본값으로 쓰고, rectify된 이미지 위에서 캘리브레이션한다 (`docs/03_fusion.md` 참고).
 
 ### (3) 우영상 추출
 `scene_left()`가 YUYV의 Y채널(좌)만 쓴다. 스테레오 깊이를 얻으려면 UV채널의 우영상도 꺼내야 한다.
@@ -148,7 +153,8 @@ docs/03의 검증 항목(*pose를 흔들며 같은 물체 응시 → `p_W`가 �
 
 ## 7. 진행 순서
 
-- [ ] **A. 파일 IPC 제거 + Rerun 배선** — 눈/씬 2D를 먼저 Rerun으로 옮긴다 (기능 동일, 배선만 교체)
+- [x] **A-1. 파일 IPC 제거** (2026-07-30, 위 (1) 참고)
+- [ ] **A-2. Rerun 배선** — 눈/씬 2D를 Rerun으로 옮긴다 (기능 동일, 배선만 교체) — 아직 안 함
 - [ ] **B. oCamS 스테레오 캘리브 + 우영상 + SGM 깊이** — 가장 오래 걸림. 여기서 `D`가 나온다
 - [ ] **C. ORB-SLAM3(stereo-inertial) pose 연결** → `T_WS`
 - [ ] **D. 융합** `p_W` + 불확실성 반경 → Rerun 3D
