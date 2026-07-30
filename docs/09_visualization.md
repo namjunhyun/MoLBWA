@@ -3,6 +3,9 @@
 융합(docs/03)의 결과물 `p_W`(시선이 향한 세계 3D점)를 **실시간으로 보여주는** 레이어.
 "돌아간다"와 "보여줄 수 있다"는 다른 문제이고, 이 문서는 후자를 다룬다.
 
+> **D455 선행 검증:** ORB-SLAM3 pose, 컬러 RGB-D TSDF, Rerun `World | Camera`
+> 2분할까지 실제 장비로 확인한 과정은 [`10_realsense_tsdf_mapping.md`](10_realsense_tsdf_mapping.md)에 기록했다.
+
 ---
 
 ## 1. 왜 ORB-SLAM3 기본 뷰어로는 부족한가

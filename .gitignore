@@ -5,6 +5,7 @@ external/
 data/
 *.mp4
 *.webm
+!docs/assets/d455_tsdf_rerun_demo.webm
 *.avi
 
 # 트래커 런타임 출력
