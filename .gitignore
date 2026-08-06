@@ -12,6 +12,11 @@ data/
 gaze_vector.txt
 output_video.mp4
 
+# Kalibr 캘리브레이션용 녹화본(rosbag2/ros1 bag) — 용량 크고 재녹화 가능
+calibration/bags/
+calibration/*.bag
+calibration/.convert_venv/
+
 # 파이썬
 __pycache__/
 *.pyc

@@ -1,0 +1,5 @@
+target_type: 'aprilgrid'
+tagCols: 6
+tagRows: 6
+tagSize: 0.025       # m, 태그(검은 사각형) 한 변 길이
+tagSpacing: 0.3      # tagSize 대비 태그 사이 간격 비율
