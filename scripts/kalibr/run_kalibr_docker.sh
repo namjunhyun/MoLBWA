@@ -8,11 +8,11 @@
 # data_dir defaults to ./calibration (relative to repo root).
 #
 # Inside the container, kalibr's workspace is pre-sourced, so you can run
-# e.g.:
-#   kalibr_calibrate_cameras --bag /data/bags/<name>.bag \
+# e.g. (kalibr's scripts are only on rosrun's package path, not bare $PATH):
+#   rosrun kalibr kalibr_calibrate_cameras --bag /data/bags/<name>.bag \
 #       --target /data/target.yaml --models pinhole-radtan pinhole-radtan \
 #       --topics /camera/left /camera/right --dont-show-report
-#   kalibr_calibrate_imu_camera --bag /data/bags/<name>.bag \
+#   rosrun kalibr kalibr_calibrate_imu_camera --bag /data/bags/<name>.bag \
 #       --target /data/target.yaml --cam /data/camchain.yaml \
 #       --imu /data/imu.yaml --dont-show-report
 #
@@ -48,7 +48,9 @@ fi
 
 echo "== Mounting ${DATA_DIR} -> /data =="
 docker run -it --rm \
+  --entrypoint bash \
+  -e KALIBR_MANUAL_FOCAL_LENGTH_INIT=1 \
   "${X11_ARGS[@]}" \
   -v "${DATA_DIR}:/data" \
   "$IMAGE_TAG" \
-  bash -lc "source devel/setup.bash && exec bash"
+  -lc "source /catkin_ws/devel/setup.bash && cd /data && exec bash"
