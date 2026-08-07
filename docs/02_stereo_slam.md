@@ -32,6 +32,7 @@
       + TF(`map`→`camera_left`), 트래킹 OK 상태일 때만 발행.
 
 ## 남은 리스크
-- **카메라-IMU 외부 파라미터(`IMU.T_b_c1`) 미검증** — 지금은 identity placeholder. 시선 융합 정확도를
-  신뢰하려면 실측 캘리브레이션(Kalibr 등)으로 교체 필요. 자세한 내용: `patches/orbslam3_patches.md`.
+- **카메라-IMU 외부 파라미터(`IMU.T_b_c1`) 실측 완료 (2026-08-07)** — Kalibr 결과의
+  `T_cam0_imu`를 역변환해 ORB-SLAM3 설정에 반영했다. 절차, 수치, 행렬 방향과 남은 검증은
+  [11_camera_imu_calibration.md](11_camera_imu_calibration.md) 참고.
 - IMU 노이즈 파라미터도 데이터시트 실측치 아님 (일반 MEMS 추정치).

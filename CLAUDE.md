@@ -15,7 +15,7 @@ IR 눈 카메라 → 동공/시선 벡터   ─┐
                                  ─┘
 p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 ```
-자세한 설계는 `docs/00_overview.md` ~ `docs/08_materials_BOM.md`.
+자세한 설계는 `docs/00_overview.md` ~ `docs/11_camera_imu_calibration.md`.
 
 ## 하드웨어
 - 눈 카메라: **GC0308** (Sonix UVC 브리지, `/dev/v4l/by-id`에서 "Sonix"로 탐색) + 850nm IR
@@ -33,7 +33,8 @@ p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 - **검증됨**: oCamS 실카메라+실IMU로 ORB-SLAM3 스테레오-이너셜 라이브 확인, `/orbslam3/pose` 발행 확인.
   ORB-SLAM3/ORB_SLAM3_ROS2도 `external/` 클론(리포엔 미포함) + `patches/orbslam3_patches.md`의 패치 필요.
   신규 코드는 `ros2_ws/src/ocams_ros2/`(자체 작성 ROS2 드라이버, 리포에 포함).
-  **미해결**: 카메라-IMU 외부 파라미터(`IMU.T_b_c1`) 미검증 placeholder — 실측 캘리브레이션 필요.
+  **완료(2026-08-07)**: 카메라-IMU 외부 파라미터를 Kalibr로 실측하고 `IMU.T_b_c1`에 반영.
+  절차와 결과는 `docs/11_camera_imu_calibration.md` 참고. Allan variance와 SLAM 장시간 검증은 남음.
 - 진행 로그: `notes/` (날짜별).
 
 ## 코드 (`src/`)

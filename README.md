@@ -45,6 +45,8 @@ IR 눈 카메라 → 동공/시선 벡터 (Orlosky 3D 트래커)
 - [docs/07_accuracy.md](docs/07_accuracy.md) — 정확도 기대치 / 설계 지침
 - [docs/08_materials_BOM.md](docs/08_materials_BOM.md) — 물품 구매 목록(BOM)
 - [docs/09_visualization.md](docs/09_visualization.md) — **시각화 설계 (Rerun) + GC0308이 설계에 미치는 영향**
+- [docs/10_realsense_tsdf_mapping.md](docs/10_realsense_tsdf_mapping.md) — RealSense TSDF 매핑 실험
+- [docs/11_camera_imu_calibration.md](docs/11_camera_imu_calibration.md) — **oCamS camera–IMU Kalibr 절차·실측 결과·ORB-SLAM3 적용**
 
 ## 셋업
 아이트래킹 알고리즘은 서드파티 레포를 쓰므로 별도 클론 + 패치가 필요하다 (리포엔 미포함).
@@ -90,6 +92,8 @@ ros2 run orbslam3 stereo-inertial \
 - ✅ 시선 → 씬 카메라 영상 위 2D 투영 (1점 캘리브레이션)
 - ✅ oCamS 실카메라+실IMU로 ORB-SLAM3 스테레오-이너셜 라이브 확인,
   pose 스트림(`/orbslam3/pose`) 발행 → [notes/2026-07-14_ocams_ros2_slam_live.md](notes/2026-07-14_ocams_ros2_slam_live.md)
+- ✅ oCamS camera–IMU 외부 파라미터 Kalibr 실측 및 `IMU.T_b_c1` 반영
+  → [docs/11_camera_imu_calibration.md](docs/11_camera_imu_calibration.md)
 - ⬜ 스테레오 깊이 `D` (oCamS 캘리브 + 우영상 + SGM) ← **현재 병목**
 - ⬜ ORB-SLAM3 pose `T_WS` → 융합 `p_W` → Rerun 3D 시각화
 
