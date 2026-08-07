@@ -73,4 +73,4 @@ docker run --rm \
 
 echo
 echo "Done. Check ${DATA_DIR}/bags for *-camchain-imucam.yaml and the report pdf/txt."
-echo "T_cam_imu in that file goes into orbslam3_ros2/config/stereo-inertial/oCamS.yaml's IMU.T_b_c1."
+echo "ORB-SLAM3 IMU.T_b_c1 is camera-to-body: use inverse(T_cam_imu), not T_cam_imu directly."

@@ -73,6 +73,7 @@ yes 400 | docker run -i --rm \
   -lc "source /catkin_ws/devel/setup.bash && cd /data && \
     rosrun kalibr kalibr_calibrate_cameras \
       --bag '${BAG_IN_CONTAINER}' \
+      --bag-freq 4.0 \
       --target /data/target.yaml \
       --models pinhole-radtan pinhole-radtan \
       --topics /camera/left /camera/right \

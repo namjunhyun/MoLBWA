@@ -52,18 +52,17 @@ Stereo.T_c1_c2: !!opencv-matrix
          0.0, 0.0, 1.0, 0.0,
          0.0, 0.0, 0.0, 1.0]
 
-# NOTE: no camera-IMU extrinsic calibration is available for this specific oCamS-1MGN-U /
-# myAHRS+ unit. This is left as identity (IMU frame == left camera frame) as a starting
-# point so the pipeline runs end to end -- it is NOT a real calibration. For accurate
-# tracking, calibrate T_b_c1 properly (e.g. with Kalibr) and replace this.
+# Camera-to-IMU-body transform measured with Kalibr on 2026-08-07.
+# This is inverse(T_cam0_imu0) from
+# calibration/camchain-imucam.yaml.
 IMU.T_b_c1: !!opencv-matrix
   rows: 4
   cols: 4
   dt: f
-  data: [1.0, 0.0, 0.0, 0.0,
-         0.0, 1.0, 0.0, 0.0,
-         0.0, 0.0, 1.0, 0.0,
-         0.0, 0.0, 0.0, 1.0]
+  data: [-0.309107386422,  0.020966201147,  0.950796004445, 0.008359036921,
+         -0.950463210321,  0.027613527014, -0.309608105438, 0.015542755837,
+         -0.032746136969, -0.999398775032,  0.011392057686, 0.001533337011,
+          0.0, 0.0, 0.0, 1.0]
 
 # Approximate consumer-MEMS-grade noise parameters (myAHRS+ datasheet values were not
 # available). Loosen/tighten and re-check IMU.Frequency (measure with
