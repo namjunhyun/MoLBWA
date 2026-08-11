@@ -151,6 +151,8 @@ fixation 히트맵도 점 누적이 아니라 **mesh vertex에 거리 기반 가
 docs/03의 검증 항목(*pose를 흔들며 같은 물체 응시 → `p_W`가 월드에서 고정되는가*)이 정확히 이걸 잡아낸다.
 
 **대응**: 여러 거리(0.5m / 1.5m / 3m)에서 캘리브 점을 모아 **R과 t를 함께** 푼다.
+설계(미구현)는 `docs/12_eye_scene_extrinsic_calibration.md` 참고 — 트래커의 `gaze_origin`은
+물리 단위가 아니라서 못 쓰고, R+눈 원점(p_eye)을 캘리브 데이터에서 동시에 푸는 방식.
 
 ---
 
@@ -158,10 +160,13 @@ docs/03의 검증 항목(*pose를 흔들며 같은 물체 응시 → `p_W`가 �
 
 - [x] **A-1. 파일 IPC 제거** (2026-07-30, 위 (1) 참고)
 - [ ] **A-2. Rerun 배선** — 눈/씬 2D를 Rerun으로 옮긴다 (기능 동일, 배선만 교체) — 아직 안 함
-- [ ] **B. oCamS 스테레오 캘리브 + 우영상 + SGM 깊이** — 가장 오래 걸림. 여기서 `D`가 나온다
-- [ ] **C. ORB-SLAM3(stereo-inertial) pose 연결** → `T_WS`
+- [ ] **B. oCamS 스테레오 캘리브 + 우영상 + SGM 깊이** — 스테레오 캘리브 자체는 2026-08-11에
+      재작업 완료(`docs/11_camera_imu_calibration.md`); 우영상(`scene_right()`)+SGM 배선은
+      아직. `docs/12_eye_scene_extrinsic_calibration.md`의 depth 획득 계획과 같이 진행 예정
+- [x] **C. ORB-SLAM3(stereo-inertial) pose 연결** → `T_WS` (2026-07-14, `/orbslam3/pose`)
 - [ ] **D. 융합** `p_W` + 불확실성 반경 → Rerun 3D
-- [ ] **E. 다중거리 캘리브레이션 (R+t)** — docs/03 검증(`p_W` 월드 고정성) 통과가 합격선
+- [ ] **E. 다중거리 캘리브레이션 (R+t)** — docs/03 검증(`p_W` 월드 고정성) 통과가 합격선.
+      설계는 `docs/12_eye_scene_extrinsic_calibration.md` (미구현)
 - [ ] **F. TSDF mesh + fixation 히트맵 누적**
 
 A는 반나절, B가 병목. **C·D는 B 없이는 의미가 없다** (깊이 없으면 3D 점이 안 나온다).

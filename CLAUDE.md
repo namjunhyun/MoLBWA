@@ -15,7 +15,7 @@ IR 눈 카메라 → 동공/시선 벡터   ─┐
                                  ─┘
 p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
 ```
-자세한 설계는 `docs/00_overview.md` ~ `docs/11_camera_imu_calibration.md`.
+자세한 설계는 `docs/00_overview.md` ~ `docs/12_eye_scene_extrinsic_calibration.md`.
 
 ## 하드웨어
 - 눈 카메라: **GC0308** (Sonix UVC 브리지, `/dev/v4l/by-id`에서 "Sonix"로 탐색) + 850nm IR
