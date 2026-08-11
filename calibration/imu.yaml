@@ -1,7 +1,19 @@
 rostopic: /imu
 update_rate: 100.0
 
-accelerometer_noise_density: 0.08
-accelerometer_random_walk: 4.0e-03
-gyroscope_noise_density: 0.01
+# Measured 2026-08-11 via Allan variance on a 2h13m stationary /imu recording
+# (calibration/bags/allan_imu_20260811_183141), analyzed with
+# scripts/kalibr/analyze_allan_variance.py. 3-axis average, white-noise-slope
+# fits all landed within 0.01 of the expected -0.5, so these are trustworthy.
+accelerometer_noise_density: 0.00361319163403806
+accelerometer_random_walk: 0.01329998507261506
+gyroscope_noise_density: 0.005485941354177776
+
+# NOT yet measured: the Allan deviation curve for all 3 gyro axes was still
+# monotonically decreasing after 2h13m (never reached the bias-instability
+# trough + random-walk upturn), so gyroscope_random_walk could not be fit from
+# real data. This is the same generic consumer-MEMS placeholder as before
+# 2026-08-11. Re-run with a longer (4h+) stationary recording to replace it:
+#   calibration/.convert_venv/bin/python3 scripts/kalibr/analyze_allan_variance.py \
+#     <bag> --write
 gyroscope_random_walk: 2.0e-04

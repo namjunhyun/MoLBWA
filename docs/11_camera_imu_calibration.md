@@ -234,9 +234,33 @@ ORB-SLAM3 재실행 결과, `New Map created` 포인트 수가 40~120개 → **2
 타당해 보이지만(1.8cm, 직교성 검증됨), 지금 rectification을 바꿨으니 **재검증이 필요할 수
 있다** — 특히 SLAM이 완전히 안정화된 후에도 pose 정확도가 부족하면 이 부분부터 의심할 것.
 
+## 2026-08-11 — Allan variance IMU 노이즈 실측 (부분)
+
+`ocams_stereo_imu_node`로 `/imu`만 2시간 13분 완전 정지 녹화
+(`calibration/bags/allan_imu_20260811_183141`) 후 `scripts/kalibr/analyze_allan_variance.py`로
+분석했다. `allan_variance_ros`(ROS1) 빌드 없이 `rosbags` + `allantools`로 오프라인 처리.
+
+방법: 축별 overlapping Allan deviation을 구하고, log-log 곡선의 **국소 기울기**가 -1/2에
+가장 가까운 지점(ADEV 최저점 이전)에서 white noise density `N`을, +1/2에 가장 가까운 지점
+(최저점 이후)에서 rate random walk `K`를 읽어 3축 평균했다. (첫 구현은 "전체 tau 개수 중
+앞쪽 1/3"이라는 상대적 구간으로 직선을 피팅해서 녹화가 길어질수록 진짜 white-noise 구간을
+벗어나는 버그가 있었다 — gyro 기울기가 양수로 나와서 발견, 국소 기울기 탐색 방식으로 수정.)
+
+결과:
+
+| 파라미터 | 값 | 비고 |
+|---|---:|---|
+| gyroscope_noise_density | 0.005486 rad/s/√Hz | 3축 기울기 -0.50~-0.51, 신뢰 가능 |
+| accelerometer_noise_density | 0.003613 m/s²/√Hz | 3축 기울기 -0.50~-0.60, 신뢰 가능 |
+| accelerometer_random_walk | 0.013300 m/s³/√Hz | 3축 기울기 정확히 0.50, 신뢰 가능 |
+| gyroscope_random_walk | (미측정, 기존 2.0e-04 유지) | 2h13m 동안 자이로 ADEV 곡선이 최저점을 못 찍음(계속 하강) — 4시간 이상 재녹화 필요 |
+
+`calibration/imu.yaml`, `orbslam3_stereo_inertial_oCamS.yaml`의 `IMU.NoiseGyro/NoiseAcc/AccWalk`에
+반영했다. `IMU.GyroWalk`만 아직 실측 전 추정치다.
+
 ## 한계와 다음 검증
 
-- `calibration/imu.yaml`의 noise density/random walk는 Allan variance 실측값이 아니라 추정치다.
+- `IMU.GyroWalk`는 아직 Allan variance 실측값이 아니라 추정치다 (위 표 참고, 4시간+ 재녹화 필요).
 - 좌우 카메라 시간 이동 추정치에 약 5.3 ms 차이가 있다. ORB-SLAM3에는 별도 적용하지 않았다.
 - 최종 합격 기준은 `New Map created`/IMU reset 반복 감소와 정적 대상의 월드 시선점 고정 여부다.
 - 센서 마운트를 풀거나 카메라와 IMU 상대 위치·각도가 바뀌면 다시 캘리브레이션한다.
@@ -250,7 +274,8 @@ ORB-SLAM3 재실행 결과, `New Map created` 포인트 수가 40~120개 → **2
 - [x] 행렬 방향 역변환 후 `IMU.T_b_c1` 반영
 - [x] 회전행렬 determinant/직교성 검증
 - [x] 스테레오 rectification 재캘리브레이션 (2026-08-11, raw 영상 기준, epipolar 정렬 0%→80% 개선)
-- [ ] Allan variance로 IMU noise 실측
+- [x] Allan variance로 IMU noise 실측 (2026-08-11, NoiseGyro/NoiseAcc/AccWalk 완료, GyroWalk는 재녹화 필요)
 - [ ] ORB-SLAM3 장시간 안정성 비교 (VI 초기화까지는 도달, 완전 안정화는 미검증)
 - [ ] 정적 대상의 `p_W` 월드 고정성 검증
 - [ ] rectification 변경에 따른 camera–IMU extrinsic 재검증 필요성 판단
+- [ ] 4시간+ 재녹화로 `IMU.GyroWalk` 실측 마무리

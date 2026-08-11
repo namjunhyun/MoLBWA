@@ -56,34 +56,45 @@ def load_imu(bag_path):
     return t, np.array([gx, gy, gz]), np.array([ax, ay, az])
 
 
+def _local_slopes(taus, adevs):
+    """Local log-log slope at each point via central differences (standard
+    Allan-deviation noise-identification method: don't fit a line over an
+    arbitrary window, find where the LOCAL slope matches the target exponent)."""
+    log_t = np.log10(taus)
+    log_a = np.log10(adevs)
+    return np.gradient(log_a, log_t)
+
+
 def fit_white_noise(taus, adevs):
-    """Fit slope -1/2 over the shortest-tau third of the curve; return N (ADEV at tau=1)."""
-    n = max(3, len(taus) // 3)
-    log_t = np.log10(taus[:n])
-    log_a = np.log10(adevs[:n])
-    slope, intercept = np.polyfit(log_t, log_a, 1)
-    # sigma(tau) = N * tau^-0.5 -> log(sigma) = log(N) - 0.5*log(tau)
-    # Use the actual fitted intercept at log10(tau)=0 regardless of fitted slope,
-    # but report the slope too so the caller can sanity-check it's near -0.5.
-    N = 10 ** intercept
-    return N, slope
+    """Find the point with local slope closest to -1/2 (angle/velocity random
+    walk region), searched only before the ADEV minimum. Return N such that
+    sigma(tau) = N / sqrt(tau), i.e. N = sigma(tau_i) * sqrt(tau_i)."""
+    min_idx = int(np.argmin(adevs))
+    search_hi = max(2, min_idx)  # only look before the trough
+    if search_hi < 2:
+        search_hi = len(taus)
+    slopes = _local_slopes(taus[:search_hi], adevs[:search_hi])
+    idx = int(np.argmin(np.abs(slopes - (-0.5))))
+    N = adevs[idx] * np.sqrt(taus[idx])
+    return N, slopes[idx]
 
 
 def fit_rate_random_walk(taus, adevs):
-    """Find the ADEV minimum (bias instability trough), fit slope +1/2 just past it,
-    return K such that sigma(tau) = K * sqrt(tau/3)."""
+    """Find the point with local slope closest to +1/2, searched only after the
+    ADEV minimum (bias-instability trough). Return K such that
+    sigma(tau) = K * sqrt(tau/3), i.e. K = sigma(tau_i) * sqrt(3/tau_i)."""
     min_idx = int(np.argmin(adevs))
-    lo = min_idx
-    hi = min(len(taus), min_idx + max(3, (len(taus) - min_idx) // 2))
-    if hi - lo < 3:
+    if min_idx >= len(taus) - 2:
+        return None, None  # curve never turned upward -- not enough data
+    slopes = _local_slopes(taus[min_idx:], adevs[min_idx:])
+    idx = int(np.argmin(np.abs(slopes - 0.5))) + min_idx
+    best_slope = slopes[idx - min_idx]
+    if best_slope < 0.15:
+        # Nothing resembling a +1/2 random-walk region was found past the
+        # trough -- the recording is too short to see rate random walk yet.
         return None, None
-    log_t = np.log10(taus[lo:hi])
-    log_a = np.log10(adevs[lo:hi])
-    slope, intercept = np.polyfit(log_t, log_a, 1)
-    # sigma(tau) = K * sqrt(tau/3) -> log(sigma) = log(K) - 0.5*log(3) + 0.5*log(tau)
-    logK = intercept + 0.5 * np.log10(3)
-    K = 10 ** logK
-    return K, slope
+    K = adevs[idx] * np.sqrt(3.0 / taus[idx])
+    return K, best_slope
 
 
 def analyze_axis(rate_hz, data):

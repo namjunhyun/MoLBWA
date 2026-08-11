@@ -69,13 +69,15 @@ IMU.T_b_c1: !!opencv-matrix
          -0.032746136969, -0.999398775032,  0.011392057686, 0.001533337011,
           0.0, 0.0, 0.0, 1.0]
 
-# Approximate consumer-MEMS-grade noise parameters (myAHRS+ datasheet values were not
-# available). Loosen/tighten and re-check IMU.Frequency (measure with
-# `ros2 topic hz /imu`) once the driver is running.
-IMU.NoiseGyro: 0.01
-IMU.NoiseAcc: 0.08
+# Measured 2026-08-11 via Allan variance (2h13m stationary /imu recording,
+# see MoLBWA/calibration/imu.yaml + docs/11_camera_imu_calibration.md).
+# IMU.GyroWalk is still the old generic placeholder -- the gyro Allan
+# deviation curve hadn't turned upward yet after 2h13m, so it couldn't be
+# fit from real data. Re-measure with a longer (4h+) recording to replace it.
+IMU.NoiseGyro: 0.005485941354177776
+IMU.NoiseAcc: 0.00361319163403806
 IMU.GyroWalk: 2.0e-04
-IMU.AccWalk: 4.0e-03
+IMU.AccWalk: 0.01329998507261506
 IMU.Frequency: 100.0
 
 #--------------------------------------------------------------------------------------------
