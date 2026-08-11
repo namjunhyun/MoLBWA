@@ -34,7 +34,11 @@ p_W = T_WS · (D · K⁻¹ [u,v,1]ᵀ)
   ORB-SLAM3/ORB_SLAM3_ROS2도 `external/` 클론(리포엔 미포함) + `patches/orbslam3_patches.md`의 패치 필요.
   신규 코드는 `ros2_ws/src/ocams_ros2/`(자체 작성 ROS2 드라이버, 리포에 포함).
   **완료(2026-08-07)**: 카메라-IMU 외부 파라미터를 Kalibr로 실측하고 `IMU.T_b_c1`에 반영.
-  절차와 결과는 `docs/11_camera_imu_calibration.md` 참고. Allan variance와 SLAM 장시간 검증은 남음.
+  **완료(2026-08-11)**: SLAM 리셋 루프의 근본 원인이 스테레오 rectification 캘리브레이션
+  자체(2026-07-14부터 사용, 실제 정렬과 안 맞음)였음을 발견하고 raw 영상 기준으로 재캘리브레이션
+  — epipolar 정렬 0%→80% 개선, ORB-SLAM3가 VI 초기화 1단계까지 도달.
+  절차와 결과는 `docs/11_camera_imu_calibration.md` 참고. Allan variance, SLAM 장시간 검증,
+  camera-IMU extrinsic 재검증은 남음.
 - 진행 로그: `notes/` (날짜별).
 
 ## 코드 (`src/`)

@@ -31,6 +31,7 @@
 - [ ] 0단계: RealSense 임시 파이프라인 검증
 - [x] 0단계: oCamS 스테레오-이너셜 SLAM 라이브 확인 + pose 발행 (2026-07-14)
 - [x] 1단계: oCamS camera-IMU Kalibr 실측 + ORB-SLAM3 extrinsic 반영 (2026-08-07)
+- [x] 1단계: oCamS 스테레오 rectification 재캘리브레이션 — SLAM 리셋 루프 근본 원인 수정 (2026-08-11)
 - [ ] 0단계: 융합 수식 책상 검증
 - [ ] 1단계: 오프라인 융합 + 정확도
 - [ ] 2단계: Pi + 무선

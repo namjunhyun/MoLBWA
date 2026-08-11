@@ -7,25 +7,29 @@ File.version: "1.0"
 
 Camera.type: "PinHole"
 
-# Images published by ocams_ros2 are already rectified (see ocams_ros2/config/left.yaml,
-# right.yaml + the remap done in ocams_stereo_imu_node), so distortion is zero here and
+# Images published by ocams_ros2 are already rectified (see ocams_ros2/config/left_opencv.yaml,
+# right_opencv.yaml + the remap done in ocams_stereo_imu_node), so distortion is zero here and
 # do_rectify must be passed as "false" to the stereo-inertial node.
 #
 # fx/fy/cx/cy come from the projection_matrix (P) in ocams_ros2's calibration files.
-Camera1.fx: 433.553025
-Camera1.fy: 433.553025
-Camera1.cx: 470.352457
-Camera1.cy: 236.488789
+# Re-measured 2026-08-11 (raw-image Kalibr stereo calibration -> cv2.stereoRectify; the
+# previous left_opencv.yaml/right_opencv.yaml, in use since 2026-07-14, was calibrated
+# against already-rectified images -- a circular calibration that left epipolar lines
+# misaligned by tens of px and was the root cause of ORB-SLAM3's stereo-matching failures).
+Camera1.fx: 484.71068739
+Camera1.fy: 484.71068739
+Camera1.cx: 326.83634186
+Camera1.cy: 240.15449524
 
 Camera1.k1: 0.0
 Camera1.k2: 0.0
 Camera1.p1: 0.0
 Camera1.p2: 0.0
 
-Camera2.fx: 433.553025
-Camera2.fy: 433.553025
-Camera2.cx: 470.352457
-Camera2.cy: 236.488789
+Camera2.fx: 484.71068739
+Camera2.fy: 484.71068739
+Camera2.cx: 326.83634186
+Camera2.cy: 240.15449524
 
 Camera2.k1: 0.0
 Camera2.k2: 0.0
@@ -42,19 +46,20 @@ Camera.RGB: 0
 Stereo.ThDepth: 40.0
 
 # Rectified stereo pair -> pure x-translation. Baseline derived from
-# P2(0,3) / P2(0,0) = 54.116684 / 433.553025 in ocams_ros2/config/right.yaml.
+# -P2(0,3) / P2(0,0) = 51.72376498 / 484.71068739 in ocams_ros2/config/right_opencv.yaml
+# (re-measured 2026-08-11, see Camera1.fx comment above).
 Stereo.T_c1_c2: !!opencv-matrix
   rows: 4
   cols: 4
   dt: f
-  data: [1.0, 0.0, 0.0, 0.124820,
+  data: [1.0, 0.0, 0.0, 0.10671059,
          0.0, 1.0, 0.0, 0.0,
          0.0, 0.0, 1.0, 0.0,
          0.0, 0.0, 0.0, 1.0]
 
 # Camera-to-IMU-body transform measured with Kalibr on 2026-08-07.
-# This is inverse(T_cam0_imu0) from
-# calibration/camchain-imucam.yaml.
+# This is inverse(T_cam0_imu0) from MoLBWA/calibration/camchain-imucam.yaml.
+# See MoLBWA/docs/11_camera_imu_calibration.md.
 IMU.T_b_c1: !!opencv-matrix
   rows: 4
   cols: 4

@@ -168,12 +168,79 @@ ORB-SLAM3 `IMU.T_b_c1 = inverse(T_cam0_imu)`:
 기존 rectified 스트림 값을 유지하고, 이번 결과에서는 camera–IMU extrinsic만 적용했다.
 `calibration/camchain.yaml`의 radtan 값을 ORB 설정에 그대로 복사하지 않는다.
 
+## 2026-08-11 — 스테레오 rectification 재캘리브레이션 (근본 원인 수정)
+
+### 문제
+
+`IMU.T_b_c1` 반영 후에도 ORB-SLAM3가 계속 `New Map created` (점 40~120개) →
+`Fail to track local map!` → `IMU is not or recently initialized. Reseting active map...`
+루프를 반복했다. CPU 부족(헤드리스 실행으로 배제), 조명/텍스처(밝은 텍스처 있는 장면으로
+재현), ORB feature 파라미터(기본값과 동일, 실제로는 좌 1141 / 우 1156개로 검출량 자체는
+충분)를 순서대로 배제하고 나서, 실제 좌우 정합을 직접 측정해 원인을 찾았다.
+
+**측정 방법**: 좌/우 rectified 프레임에서 ORB 특징점을 뽑고 ratio test(0.75)로 매칭한 뒤,
+매칭 쌍의 y좌표 차이(epipolar error)를 계산. 제대로 rectify된 스테레오 쌍이면 대부분 매칭이
+y오차 1~2px 이내여야 한다.
+
+| | 기존 캘리브레이션 | |
+|---|---:|---|
+| ratio-test 매칭 96개 중 y오차 2px 이내 | **0개 (0%)** | 완전히 어긋남 |
+| y오차 평균/표준편차 | 18.3px / 40.2px | |
+
+**원인**: `ocams_ros2/config/left_opencv.yaml`, `right_opencv.yaml`(2026-07-14부터 사용,
+`left.yaml`/`right.yaml`을 OpenCV 포맷으로 옮긴 것)의 rectification 캘리브레이션 자체가
+현재 카메라의 실제 물리 정렬과 안 맞았다. 방증: 2026-08-07 Kalibr 카메라 캘리브레이션을
+`/camera/left`, `/camera/right`(**드라이버가 이미 rectify해서 내보내는 영상**)에 대해
+돌렸는데, 원래 rectified 영상이면 distortion이 거의 0이어야 하는데 Kalibr가 유의미한
+distortion(cam0 k1=-0.13 등)을 다시 적합시켰다 — 이미 rectify된 영상을 다시
+캘리브레이션하는 순환 오류였고, 이 자체가 기존 rectification이 틀렸다는 신호였다.
+
+### 재작업 절차
+
+1. `ocams_stereo_imu_node`를 존재하지 않는 `calib_dir`로 실행 → rectification 파일을 못
+   찾아 자동으로 **raw(왜곡 보정 전) 영상**을 발행하도록 함 (`publishing UNRECTIFIED images`
+   로그로 확인).
+2. 이 raw 영상으로 AprilGrid를 새로 녹화 (156.7초, 좌우 각 4701프레임).
+3. `scripts/kalibr/calibrate_cameras.sh`로 Kalibr 스테레오 캘리브레이션 —
+   `calibration/camchain_raw.yaml`.
+4. `cv2.stereoRectify()`로 Kalibr 결과(K, D, R, t)를 OpenCV rectification 포맷(K, D, R1/R2,
+   P1/P2)으로 변환해 `left_opencv.yaml`/`right_opencv.yaml` 재작성 (기존 파일은
+   `*.bak_20260811`로 백업).
+5. `orbslam3_stereo_inertial_oCamS.yaml`의 `Camera1/2.fx/fy/cx/cy`와 `Stereo.T_c1_c2`
+   baseline도 새 rectified 값으로 갱신 (이전엔 예전 rectification 기준값이 그대로 남아있어
+   또 다른 불일치 요인이었음).
+6. 드라이버를 정상(rectify) 모드로 재시작해 같은 epipolar-정렬 측정을 재실행.
+
+### 결과
+
+| 항목 | 기존 | 재캘리브레이션 후 |
+|---|---:|---:|
+| 재투영 오차 | — | cam0 0.214px, cam1 0.218px |
+| distortion (cam0 k1) | (rectified 영상에 residual) | -0.4506 (raw 렌즈다운 값) |
+| baseline | 0.12482 m (2026-07-14 원본) | **0.10671 m** (실측) |
+| y오차 2px 이내 매칭 (드라이버 실제 출력, 111개 중) | 0/96 (0%) | **89/111 (80%)** |
+| y오차 평균/표준편차 | 18.3px / 40.2px | **-0.12px / 4.3px** |
+
+ORB-SLAM3 재실행 결과, `New Map created` 포인트 수가 40~120개 → **244~676개**로 증가하고
+키프레임이 리셋 없이 21~93프레임까지 생존, `start VIBA 1` / `end VIBA 1`(VI 초기화 1단계
+진행)까지 처음으로 도달했다. 남은 실패 모드는 `Fail to track local map!`이 아니라
+`Not enough motion for initializing`로 성격이 바뀌었다 — 이건 캘리브레이션이 아니라
+리셋 이후 매번 IMU 스케일/중력 추정에 필요한 만큼의 격렬한 움직임(특히 병진 가속도 변화)이
+필요하다는, 훨씬 정상적인 요구사항이다.
+
+**주의**: 2026-08-07의 camera–IMU extrinsic(`IMU.T_b_c1`)은 그 당시의 (틀렸던) rectified
+스트림 기준으로 계산됐다. Kalibr가 그 스트림에 맞는 자체 카메라 모델(비영 distortion 포함)을
+따로 적합시켜 self-consistent하게 풀었기 때문에 회전/이동 방향 자체는 여전히 물리적으로
+타당해 보이지만(1.8cm, 직교성 검증됨), 지금 rectification을 바꿨으니 **재검증이 필요할 수
+있다** — 특히 SLAM이 완전히 안정화된 후에도 pose 정확도가 부족하면 이 부분부터 의심할 것.
+
 ## 한계와 다음 검증
 
 - `calibration/imu.yaml`의 noise density/random walk는 Allan variance 실측값이 아니라 추정치다.
 - 좌우 카메라 시간 이동 추정치에 약 5.3 ms 차이가 있다. ORB-SLAM3에는 별도 적용하지 않았다.
 - 최종 합격 기준은 `New Map created`/IMU reset 반복 감소와 정적 대상의 월드 시선점 고정 여부다.
 - 센서 마운트를 풀거나 카메라와 IMU 상대 위치·각도가 바뀌면 다시 캘리브레이션한다.
+- (2026-08-11 추가) rectification을 다시 잡았으므로 camera–IMU extrinsic도 재검증 후보다.
 
 ## 체크리스트
 
@@ -182,6 +249,8 @@ ORB-SLAM3 `IMU.T_b_c1 = inverse(T_cam0_imu)`:
 - [x] stereo 및 camera–IMU calibration 완료
 - [x] 행렬 방향 역변환 후 `IMU.T_b_c1` 반영
 - [x] 회전행렬 determinant/직교성 검증
+- [x] 스테레오 rectification 재캘리브레이션 (2026-08-11, raw 영상 기준, epipolar 정렬 0%→80% 개선)
 - [ ] Allan variance로 IMU noise 실측
-- [ ] ORB-SLAM3 장시간 안정성 비교
+- [ ] ORB-SLAM3 장시간 안정성 비교 (VI 초기화까지는 도달, 완전 안정화는 미검증)
 - [ ] 정적 대상의 `p_W` 월드 고정성 검증
+- [ ] rectification 변경에 따른 camera–IMU extrinsic 재검증 필요성 판단
