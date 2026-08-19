@@ -342,6 +342,9 @@ def main():
     if args.enable_experimental_depth:
         print("[경고] 스테레오 깊이는 현재 검증 실패 상태입니다. 로봇팔 제어에 사용하지 마세요.")
 
+    if rr is None and not args.no_rerun:
+        print("[rerun] 패키지 없음 — cv2 창만 사용")
+        args.no_rerun = True
     if not args.no_rerun:
         rr.init("molbwa_gaze_on_scene", spawn=True)
     rerun_ok = not args.no_rerun  # gRPC 전송 에러 나면 죽이지 말고 이후로는 꺼버림
