@@ -22,18 +22,73 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Cup:
-    idx: int                  # 0=좌, 1=중, 2=우
+    idx: int                  # 0=좌, 1=중, 2=우 (화면 순서 — 프레임마다 바뀔 수 있으니 식별자로 쓰지 말 것)
     center_uv: tuple
     bbox: tuple               # (x1,y1,x2,y2)
     conf: float
     mask: np.ndarray | None = None
     p_cam: np.ndarray | None = None   # 헤드캠 좌표 3D [m]
+    base_uv: tuple | None = None      # 컵-테이블 접점 픽셀 (마스크 최하단 중심)
 
 
 def backproject(u: float, v: float, depth_m: float, K: np.ndarray) -> np.ndarray:
     """픽셀 + depth -> 카메라 좌표 3D. K 는 rectified intrinsics 를 써야 한다."""
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     return np.array([(u - cx) * depth_m / fx, (v - cy) * depth_m / fy, depth_m])
+
+
+def cup_base_pixel(cup: "Cup") -> tuple:
+    """컵-테이블 접점 픽셀 = 마스크 최하단 행의 중심. 마스크가 없으면 bbox 하단 중심."""
+    if cup.mask is not None:
+        rows = np.flatnonzero(cup.mask.any(axis=1))
+        if rows.size:
+            v_bot = int(rows[-1])
+            cols = np.flatnonzero(cup.mask[v_bot])
+            if cols.size:
+                return (float(cols.mean()), float(v_bot))
+    x1, _, x2, y2 = cup.bbox
+    return ((x1 + x2) / 2.0, float(y2))
+
+
+def ray_plane_intersect(u: float, v: float, K: np.ndarray,
+                        plane_point_hc: np.ndarray, plane_normal_hc: np.ndarray,
+                        max_range_m: float = 3.0):
+    """픽셀 광선과 평면의 교점 (헤드캠 좌표). 뒤쪽/너무 먼 해는 버린다."""
+    d = np.linalg.inv(K) @ np.array([u, v, 1.0])
+    d = d / np.linalg.norm(d)
+    denom = float(d @ plane_normal_hc)
+    if abs(denom) < 1e-6:                       # 광선이 평면과 거의 평행
+        return None
+    t = float(plane_point_hc @ plane_normal_hc) / denom
+    if not (0.05 < t < max_range_m):
+        return None
+    return t * d
+
+
+def cup_position_on_table(cup: "Cup", T_hc_ab: np.ndarray, table_z: float,
+                          K: np.ndarray, cup_center_height_m: float = 0.04):
+    """★ depth 센서 없이 컵의 3D 위치를 구한다 — "컵은 테이블 위에 있다"는 사전정보 이용.
+
+    StereoSGBM 은 흰 종이컵처럼 텍스처 없는 물체에서 정확히 그 물체 위에만 구멍이 뚫린다
+    (docs/11 기준 유효픽셀 32%). 대신 컵-테이블 접점 픽셀에서 광선을 쏴 알려진 테이블
+    평면과 교차시키면 depth 가 아예 필요 없다.
+
+    T_hc_ab : p_hc = T_hc_ab @ p_ab (anchor.T_headcam_to_armbase() 결과)
+    table_z : armbase 좌표계에서의 테이블 상면 높이 [m] (config task.table_z)
+    반환    : 헤드캠 좌표계의 컵 중심 3D 점, 못 구하면 None
+    """
+    if T_hc_ab is None:
+        return None
+    R, t = T_hc_ab[:3, :3], T_hc_ab[:3, 3]
+    plane_point_hc = R @ np.array([0.0, 0.0, table_z]) + t
+    plane_normal_hc = R @ np.array([0.0, 0.0, 1.0])
+
+    u, v = cup.base_uv if cup.base_uv is not None else cup_base_pixel(cup)
+    p_hc = ray_plane_intersect(u, v, K, plane_point_hc, plane_normal_hc)
+    if p_hc is None:
+        return None
+    # 접점 -> 컵 중심 높이만큼 위로 (armbase +z 방향)
+    return p_hc + plane_normal_hc * cup_center_height_m
 
 
 def robust_depth(depth_m: np.ndarray, u: float, v: float, patch: int = 9,
@@ -82,6 +137,7 @@ class CupDetector:
         cups = []
         for idx, (cu, cv_, bbox, conf, m) in enumerate(raw):
             cup = Cup(idx=idx, center_uv=(cu, cv_), bbox=bbox, conf=conf, mask=m)
+            cup.base_uv = cup_base_pixel(cup)     # 테이블 평면 교차용 접점 픽셀
             if depth_m is not None:
                 d = robust_depth(depth_m, cu, cv_, self.patch, m)
                 if d is not None:
@@ -92,50 +148,73 @@ class CupDetector:
 
 @dataclass
 class GazeDwell:
-    """Midas touch 방지. 같은 컵에 dwell_s 만큼 시선이 머물러야 선택으로 친다."""
+    """Midas touch 방지. 같은 컵에 dwell_s 만큼 시선이 머물러야 선택으로 친다.
+
+    ★ 후보를 "화면 좌->우 인덱스"가 아니라 **화면상 위치**로 추적한다 (2026-08-19).
+    인덱스는 프레임마다 다시 매겨지므로, 컵 하나가 한 프레임 검출에서 빠지면 나머지
+    컵들의 인덱스가 통째로 밀린다. 예전 구현은 그 때 dwell 을 처음부터 다시 시작했고
+    (선택이 계속 안 됨), 더 나쁘게는 sticky 한 selected 인덱스를 다음 프레임의
+    컵 리스트에 대입할 여지가 있었다 — 다른 컵을 잡는 사고로 이어질 수 있다.
+
+    이제 update() 는 인덱스가 아니라 **선택된 그 순간 프레임의 Cup 객체**를 돌려준다.
+    호출자가 인덱스를 다시 조회할 일이 없으니 이 종류의 사고가 구조적으로 불가능하다.
+    """
 
     dwell_s: float = 1.0
     release_s: float = 0.4
+    track_radius_px: float = 60.0     # 이 반경 안이면 같은 컵으로 본다
 
-    _cand: int | None = None
+    _cand_uv: tuple | None = None
     _since: float = 0.0
     _last_seen: float = 0.0
-    selected: int | None = None
+    selected: "Cup | None" = None
     progress: float = 0.0
     history: list = field(default_factory=list)
 
-    def update(self, cups: list[Cup], gaze_uv, t: float | None = None) -> int | None:
-        t = time.time() if t is None else t
-        hit = None
-        if gaze_uv is not None:
-            gu, gv = gaze_uv
-            for c in cups:
+    def _hit(self, cups: list, gaze_uv) -> "Cup | None":
+        """시선 픽셀이 올라가 있는 컵. 마스크 우선, 없으면 bbox."""
+        if gaze_uv is None:
+            return None
+        gu, gv = gaze_uv
+        for c in cups:
+            if c.mask is not None:
+                iv, iu = int(round(gv)), int(round(gu))
+                if 0 <= iv < c.mask.shape[0] and 0 <= iu < c.mask.shape[1] and c.mask[iv, iu]:
+                    return c
+            else:
                 x1, y1, x2, y2 = c.bbox
-                if c.mask is not None:
-                    iv, iu = int(round(gv)), int(round(gu))
-                    if 0 <= iv < c.mask.shape[0] and 0 <= iu < c.mask.shape[1] and c.mask[iv, iu]:
-                        hit = c.idx
-                        break
-                elif x1 <= gu <= x2 and y1 <= gv <= y2:
-                    hit = c.idx
-                    break
+                if x1 <= gu <= x2 and y1 <= gv <= y2:
+                    return c
+        return None
+
+    def update(self, cups: list, gaze_uv, t: float | None = None):
+        """-> 선택 확정된 Cup 객체 (이번 프레임 것), 아직이면 None."""
+        t = time.time() if t is None else t
+        hit = self._hit(cups, gaze_uv)
 
         if hit is not None:
-            if hit != self._cand:
-                self._cand, self._since = hit, t
+            same = (self._cand_uv is not None and
+                    float(np.hypot(hit.center_uv[0] - self._cand_uv[0],
+                                   hit.center_uv[1] - self._cand_uv[1])) <= self.track_radius_px)
+            if not same:
+                self._since = t
+                self.selected = None
+            self._cand_uv = hit.center_uv
             self._last_seen = t
-        elif self._cand is not None and t - self._last_seen > self.release_s:
-            self._cand, self._since, self.progress = None, 0.0, 0.0
+        elif self._cand_uv is not None and t - self._last_seen > self.release_s:
+            self._cand_uv, self._since, self.progress, self.selected = None, 0.0, 0.0, None
 
-        if self._cand is None:
-            self.progress = 0.0
-        else:
-            self.progress = min(1.0, (t - self._since) / self.dwell_s)
-            if self.progress >= 1.0 and self.selected != self._cand:
-                self.selected = self._cand
-                self.history.append((t, self._cand))
-                log.info("컵 %d 선택 (dwell %.2fs)", self._cand, t - self._since)
+        if self._cand_uv is None or hit is None:
+            self.progress = 0.0 if self._cand_uv is None else self.progress
+            return None
+
+        self.progress = min(1.0, (t - self._since) / self.dwell_s)
+        if self.progress >= 1.0 and self.selected is None:
+            self.selected = hit
+            self.history.append((t, hit.center_uv))
+            log.info("컵 %d 선택 (dwell %.2fs, uv=%s)", hit.idx, t - self._since,
+                     tuple(round(x, 1) for x in hit.center_uv))
         return self.selected
 
     def reset(self):
-        self._cand, self._since, self.progress, self.selected = None, 0.0, 0.0, None
+        self._cand_uv, self._since, self.progress, self.selected = None, 0.0, 0.0, None
