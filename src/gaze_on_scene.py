@@ -40,9 +40,14 @@
 import os
 import sys
 import argparse
+import json
+import time
 import numpy as np
 import cv2
-import rerun as rr
+try:
+    import rerun as rr
+except ImportError:
+    rr = None
 
 import ocams_calib
 
@@ -135,6 +140,65 @@ def calibrate_multi(dirs, pixels, fx0, cx, cy, iters=8, n_grid=21):
     return R, fx_val
 
 
+def gaze_features(direction):
+    """시선 단위벡터를 원근 정규화 좌표 (x/z, y/z, 1)로 변환."""
+    d = np.asarray(direction, dtype=np.float64)
+    z = d[2]
+    if abs(z) < 1e-6:
+        z = 1e-6 if z >= 0 else -1e-6
+    return np.array([d[0] / z, d[1] / z, 1.0], dtype=np.float64)
+
+
+def calibrate_affine(dirs, pixels):
+    """가로/세로 스케일과 교차축 영향을 독립적으로 맞추는 2D affine 시선 매핑."""
+    X = np.stack([gaze_features(d) for d in dirs])
+    Y = np.asarray(pixels, dtype=np.float64)
+    if len(X) < 3 or np.linalg.matrix_rank(X) < 3:
+        raise ValueError("affine 계산에는 서로 다른 방향의 점이 최소 3개 필요")
+    coeff, _, _, _ = np.linalg.lstsq(X, Y, rcond=None)
+    return coeff.T.astype(np.float32)
+
+
+def affine_reprojection_error(affine, dirs, pixels):
+    predicted = np.stack([affine @ gaze_features(d) for d in dirs])
+    actual = np.asarray(pixels, dtype=np.float64)
+    return float(np.sum((predicted - actual) ** 2))
+
+
+def save_affine_calibration(path, affine, dirs, pixels, width, height):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    px_error = np.sqrt(affine_reprojection_error(affine, dirs, pixels) / len(dirs))
+    payload = {
+        "version": 1,
+        "model": "gaze_direction_to_scene_pixel_affine",
+        "affine_2x3": np.asarray(affine).tolist(),
+        "sample_count": len(dirs),
+        "mean_pixel_error": float(px_error),
+        "image_width": int(width),
+        "image_height": int(height),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return px_error
+
+
+def load_affine_calibration(path, width, height):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        affine = np.asarray(payload["affine_2x3"], dtype=np.float32)
+        if affine.shape != (2, 3):
+            raise ValueError(f"행렬 크기가 {affine.shape}, 기대값은 (2, 3)")
+        if (payload.get("image_width"), payload.get("image_height")) != (width, height):
+            raise ValueError("저장 당시와 현재 씬 영상 해상도가 다름")
+        return affine, payload
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
+        print(f"[calib] 저장 파일 불러오기 실패: {e}")
+        return None
+
+
 def solve_rotation_svd(dirs, rays):
     """Wahba's problem: sum||R@d_i - r_i||^2 최소화하는 회전 R (Kabsch/SVD).
     벡터쌍 2개 이상이면 1점 캘리브(rotation_from_a_to_b)보다 안정적으로 전체 오차를 분산시킴."""
@@ -193,6 +257,57 @@ def scene_left(cap, rectify_maps=None):
     return bgr
 
 
+def scene_stereo(cap, left_maps=None, right_maps=None):
+    """동일한 oCamS raw 프레임에서 rectified 좌/우 모노 영상을 함께 반환."""
+    ok, raw = cap.read()
+    if not ok or raw is None:
+        return None, None
+    if raw.ndim == 3 and raw.shape[2] == 2:
+        # 이 oCamS 실기에서는 보정 파일 기준 left=두 번째 바이트, right=첫 번째 바이트.
+        left = np.ascontiguousarray(raw[:, :, 1])
+        right = np.ascontiguousarray(raw[:, :, 0])
+    elif raw.ndim == 2:
+        left = np.ascontiguousarray(raw[:, 1::2])
+        right = np.ascontiguousarray(raw[:, 0::2])
+    else:
+        return None, None
+    if left_maps is not None:
+        left = cv2.remap(left, left_maps[0], left_maps[1], cv2.INTER_LINEAR)
+    if right_maps is not None:
+        right = cv2.remap(right, right_maps[0], right_maps[1], cv2.INTER_LINEAR)
+    return left, right
+
+
+def make_stereo_matcher():
+    block_size = 7
+    return cv2.StereoSGBM_create(
+        minDisparity=0, numDisparities=128, blockSize=block_size,
+        P1=8 * block_size ** 2, P2=32 * block_size ** 2,
+        disp12MaxDiff=1, uniquenessRatio=10,
+        speckleWindowSize=100, speckleRange=2,
+    )
+
+
+def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5):
+    if disparity is None:
+        return None, 0
+    h, w = disparity.shape
+    u, v = int(u), int(v)
+    x1, x2 = max(0, u - radius), min(w, u + radius + 1)
+    y1, y2 = max(0, v - radius), min(h, v + radius + 1)
+    roi = disparity[y1:y2, x1:x2]
+    valid = roi[np.isfinite(roi) & (roi > 0)]
+    if len(valid) < min_valid:
+        return None, int(len(valid))
+    disp = float(np.median(valid))
+    return float(fx * baseline_m / disp), int(len(valid))
+
+
+def interpolate_affine(depth_m, affine_05, affine_10):
+    alpha = float(np.clip((depth_m - 0.5) / 0.5, 0.0, 1.0))
+    return ((1.0 - alpha) * affine_05 + alpha * affine_10).astype(np.float32)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eye-width", type=int, default=640)
@@ -210,6 +325,8 @@ def main():
                     help="시선벡터 EMA 계수(0=고정,1=생값). 7/2 노트의 프레임간 튐(std0.18) 완화")
     ap.add_argument("--flip", action="store_true", help="눈 영상 상하반전")
     ap.add_argument("--scene-flip", action="store_true", help="씬 카메라(oCamS) 180도 반전 (카메라가 거꾸로 장착된 경우)")
+    ap.add_argument("--enable-experimental-depth", action="store_true",
+                    help="검증되지 않은 스테레오 깊이 기반 0.5m/1.0m affine 보간 사용")
     ap.add_argument("--no-mirror-x", action="store_true",
                     help="시선 x축 반전을 끈다. 기본은 켬 — 눈 카메라는 사용자를 마주보므로 "
                          "씬 카메라와 좌우가 뒤집힌다(1점 캘리브의 최소회전으로는 못 고침)")
@@ -222,6 +339,9 @@ def main():
                          "Rerun 쪽 영상만 덜 자주 보냄")
     args = ap.parse_args()
 
+    if args.enable_experimental_depth:
+        print("[경고] 스테레오 깊이는 현재 검증 실패 상태입니다. 로봇팔 제어에 사용하지 마세요.")
+
     if not args.no_rerun:
         rr.init("molbwa_gaze_on_scene", spawn=True)
     rerun_ok = not args.no_rerun  # gRPC 전송 에러 나면 죽이지 말고 이후로는 꺼버림
@@ -231,21 +351,35 @@ def main():
                      -1.0 if args.mirror_y else 1.0,
                      1.0], dtype=np.float32)
 
-    eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
-    scene_cap = open_scene(args.scene_width, args.scene_height)
+    try:
+        eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
+    except (OSError, RuntimeError) as e:
+        eye_cap = None
+        print(f"[startup] 눈 카메라 없음 — 연결 대기: {e}")
+    try:
+        scene_cap = open_scene(args.scene_width, args.scene_height)
+    except (OSError, RuntimeError) as e:
+        scene_cap = None
+        print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
 
     if (args.scene_width, args.scene_height) != (ocams_calib.IMAGE_WIDTH, ocams_calib.IMAGE_HEIGHT):
         print(f"[경고] --scene-width/height가 캘리브레이션 해상도"
               f"({ocams_calib.IMAGE_WIDTH}x{ocams_calib.IMAGE_HEIGHT})와 다름 — rectify 맵을 못 씀, "
               f"raw(왜곡보정 전) 이미지로 진행. docs/03 융합용으로는 기본 해상도를 쓸 것.")
-        left_maps = None
+        left_maps = right_maps = None
     else:
-        left_maps, _right_maps_unused = ocams_calib.build_rectify_maps()
+        left_maps, right_maps = ocams_calib.build_rectify_maps()
 
-    probe = scene_left(scene_cap, left_maps)
+    probe_left, probe_right = scene_stereo(scene_cap, left_maps, right_maps) if scene_cap is not None else (None, None)
+    probe = probe_left
     if probe is None:
-        raise RuntimeError("씬 프레임 없음")
-    SH, SW = probe.shape[:2]
+        if scene_cap is not None:
+            scene_cap.release()
+            scene_cap = None
+        SH, SW = args.scene_height, args.scene_width
+        print("[startup] 씬 프레임 없음 — 창을 유지하고 자동 재연결 대기")
+    else:
+        SH, SW = probe.shape[:2]
     if args.fx:
         fx = fy = args.fx
         cx, cy = SW / 2.0, SH / 2.0
@@ -256,22 +390,50 @@ def main():
         fx = fy = SW * 0.94  # rectify 못 쓰는 경우의 옛 근사치 (해상도 불일치 시)
         cx, cy = SW / 2.0, SH / 2.0
     fx0 = fx  # 리셋 시 되돌아갈 초기값
+    stereo_matcher = make_stereo_matcher()
+    latest_disparity = None
+    latest_depth_m = None
+    depth_valid_count = 0
     print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
-    print("[키] c=1점 캘리브 / m=다점 캘리브 모드 토글(클릭으로 포인트 추가, 3점+ 시 fx도 자동보정) / r=리셋 / q=종료")
+    print("[키] c=1점 / m=affine 다점 / d=깊이 좌클릭 모드 / s=저장 / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
+    gaze_affine = None
     calibrated = False
     smooth_dir = None
+    calib_path = os.path.abspath(os.path.join(HERE, "..", "calibration", "gaze_scene_affine.json"))
+    profile_05_path = os.path.abspath(os.path.join(HERE, "..", "calibration", "gaze_scene_affine_0.5m.json"))
+    profile_10_path = os.path.abspath(os.path.join(HERE, "..", "calibration", "gaze_scene_affine_1.0m.json"))
+    loaded_05 = load_affine_calibration(profile_05_path, SW, SH)
+    loaded_10 = load_affine_calibration(profile_10_path, SW, SH)
+    affine_05 = loaded_05[0] if loaded_05 is not None else None
+    affine_10 = loaded_10[0] if loaded_10 is not None else None
+    if affine_05 is not None and affine_10 is not None:
+        print("[depth-calib] 0.5m/1.0m affine 프로필 불러오기 완료")
+    loaded_calib = load_affine_calibration(calib_path, SW, SH)
+    if loaded_calib is not None:
+        gaze_affine, loaded_meta = loaded_calib
+        calibrated = True
+        print(f"[calib] affine 자동 불러오기: {calib_path} "
+              f"(samples={loaded_meta.get('sample_count')}, "
+              f"error={loaded_meta.get('mean_pixel_error', float('nan')):.1f}px)")
 
     multi_mode = False
     calib_dirs = []    # 다점 캘리브: 클릭 순간의 시선벡터들
     calib_pixels = []  # 다점 캘리브: 클릭한 (u,v) 픽셀들
-    click_state = {"pending": None}
+    click_state = {"pending": None, "depth_pending": None}
+    depth_mode = False
+    depth_probe_result = None
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            click_state["pending"] = (x, y)
+            if depth_mode:
+                click_state["depth_pending"] = (x, y)
+            else:
+                click_state["pending"] = (x, y)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            click_state["depth_pending"] = (x, y)
 
     win_name = "scene (oCamS left) - gaze"
     cv2.namedWindow(win_name)
@@ -289,11 +451,78 @@ def main():
             rerun_ok = False
 
     frame_idx = 0
+    next_eye_retry = 0.0
+    next_scene_retry = 0.0
+
+    def reconnect_eye():
+        """USB 재연결로 /dev/videoN이 바뀌어도 by-id로 눈 카메라를 다시 연다."""
+        nonlocal eye_cap, smooth_dir, next_eye_retry
+        now = time.monotonic()
+        if eye_cap is not None or now < next_eye_retry:
+            return
+        next_eye_retry = now + 1.0
+        try:
+            eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
+            tracker.reset_tracking_state()
+            smooth_dir = None
+            print("[reconnect] 눈 카메라 재연결 완료 — 안구모델을 다시 수렴시키세요.")
+        except (OSError, RuntimeError) as e:
+            print(f"[reconnect] 눈 카메라 대기 중: {e}")
+
+    def reconnect_scene():
+        """USB 재연결로 /dev/videoN이 바뀌어도 by-id로 씬 카메라를 다시 연다."""
+        nonlocal scene_cap, next_scene_retry
+        now = time.monotonic()
+        if scene_cap is not None or now < next_scene_retry:
+            return
+        next_scene_retry = now + 1.0
+        try:
+            scene_cap = open_scene(args.scene_width, args.scene_height)
+            print("[reconnect] 씬 카메라 재연결 완료.")
+        except (OSError, RuntimeError) as e:
+            print(f"[reconnect] 씬 카메라 대기 중: {e}")
+
     try:
         while True:
-            ok, eye = eye_cap.read()
-            if not ok:
+            reconnect_eye()
+            reconnect_scene()
+
+            scene = None
+            if scene_cap is not None:
+                left_gray, right_gray = scene_stereo(scene_cap, left_maps, right_maps)
+                if left_gray is None or right_gray is None:
+                    print("[disconnect] 씬 카메라 프레임 끊김 — 자동 재연결 대기")
+                    scene_cap.release()
+                    scene_cap = None
+                    next_scene_retry = 0.0
+                else:
+                    scene = cv2.cvtColor(left_gray, cv2.COLOR_GRAY2BGR)
+                    if frame_idx % 3 == 0 and (depth_mode or args.enable_experimental_depth):
+                        latest_disparity = (
+                            stereo_matcher.compute(left_gray, right_gray).astype(np.float32) / 16.0)
+                    if args.scene_flip:
+                        scene = cv2.flip(scene, -1)
+
+            eye = None
+            if eye_cap is not None:
+                ok, eye = eye_cap.read()
+                if not ok or eye is None:
+                    print("[disconnect] 눈 카메라 프레임 끊김 — 자동 재연결 대기")
+                    eye_cap.release()
+                    eye_cap = None
+                    smooth_dir = None
+                    next_eye_retry = 0.0
+
+            if eye is None:
+                waiting = scene if scene is not None else np.zeros((SH, SW, 3), dtype=np.uint8)
+                waiting = waiting.copy()
+                cv2.putText(waiting, "EYE CAMERA DISCONNECTED - waiting for reconnect",
+                            (20, SH // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                cv2.imshow(win_name, waiting)
+                if cv2.waitKey(50) & 0xFF == ord("q"):
+                    break
                 continue
+
             if args.flip:
                 eye = cv2.flip(eye, -1)
 
@@ -311,17 +540,33 @@ def main():
                     (1 - args.smooth) * smooth_dir + args.smooth * d
                 smooth_dir /= np.linalg.norm(smooth_dir)
 
-            scene = scene_left(scene_cap, left_maps)
             if scene is None:
+                waiting = np.zeros((SH, SW, 3), dtype=np.uint8)
+                cv2.putText(waiting, "SCENE CAMERA DISCONNECTED - waiting for reconnect",
+                            (20, SH // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                cv2.imshow(win_name, waiting)
+                if cv2.waitKey(50) & 0xFF == ord("q"):
+                    break
                 continue
-            if args.scene_flip:
-                scene = cv2.flip(scene, -1)
 
             if log_images_this_frame:
                 rr_log_safe("scene/image", rr.Image(cv2.cvtColor(scene, cv2.COLOR_BGR2RGB)))
             if rerun_ok and calib_pixels:
                 rr_log_safe("scene/calib_points",
                             rr.Points2D(calib_pixels, radii=8, colors=[255, 0, 255]))
+
+            if click_state["depth_pending"] is not None:
+                du, dv = click_state["depth_pending"]
+                click_state["depth_pending"] = None
+                measured_depth, valid_n = depth_at(
+                    latest_disparity, du, dv, ocams_calib.RECTIFIED_K[0, 0],
+                    ocams_calib.BASELINE_M, radius=10)
+                depth_probe_result = (du, dv, measured_depth, valid_n)
+                if measured_depth is None:
+                    print(f"[depth] ({du},{dv}) 측정 실패 — 유효 disparity {valid_n}개")
+                else:
+                    print(f"[depth] ({du},{dv}) = {measured_depth:.3f}m "
+                          f"(유효 disparity {valid_n}개)")
 
             if click_state["pending"] is not None:
                 cu, cv_ = click_state["pending"]
@@ -334,35 +579,87 @@ def main():
                     calib_dirs.append(smooth_dir.copy())
                     calib_pixels.append((cu, cv_))
                     print(f"[다점] 포인트 추가 #{len(calib_dirs)}: 시선={smooth_dir.round(3)} <-> 픽셀=({cu},{cv_})")
-                    if len(calib_dirs) >= 2:
-                        R, fx_new = calibrate_multi(calib_dirs, calib_pixels, fx, cx, cy)
-                        fx = fy = fx_new
-                        calibrated = True
-                        px_err = np.sqrt(reprojection_error(fx, calib_dirs, calib_pixels, R, cx, cy)
-                                          / len(calib_dirs))
-                        fx_note = "고정(점<3)" if len(calib_dirs) < 3 else "최적화됨"
-                        print(f"[다점] {len(calib_dirs)}점으로 재계산. fx={fx:.0f}({fx_note}) "
-                              f"평균 픽셀오차={px_err:.1f}px")
+                    if len(calib_dirs) >= 3:
+                        try:
+                            gaze_affine = calibrate_affine(calib_dirs, calib_pixels)
+                            calibrated = True
+                            px_err = np.sqrt(affine_reprojection_error(
+                                gaze_affine, calib_dirs, calib_pixels) / len(calib_dirs))
+                            print(f"[다점-affine] {len(calib_dirs)}점으로 재계산. "
+                                  f"평균 픽셀오차={px_err:.1f}px")
+                            if len(calib_dirs) >= 9:
+                                save_affine_calibration(
+                                    calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
+                                print(f"[calib] 9점 이상 자동 저장: {calib_path}")
+                        except ValueError as e:
+                            print(f"[다점-affine] 계산 대기: {e}")
+                    else:
+                        print(f"[다점-affine] {len(calib_dirs)}/3점 — affine 계산 대기")
 
             n_model = len(getattr(tracker, "model_centers", []))
             if calibrated and smooth_dir is not None:
-                g = R @ smooth_dir
-                if g[2] > 1e-6:
-                    u = int(np.clip(cx + fx * (g[0] / g[2]), 0, SW - 1))
-                    v = int(np.clip(cy - fy * (g[1] / g[2]), 0, SH - 1))
+                gaze_valid = True
+                if (args.enable_experimental_depth
+                        and affine_05 is not None and affine_10 is not None):
+                    depth_guess = latest_depth_m if latest_depth_m is not None else 0.75
+                    measured_depth = None
+                    for _ in range(2):
+                        active_affine = interpolate_affine(depth_guess, affine_05, affine_10)
+                        uv = active_affine @ gaze_features(smooth_dir)
+                        if not np.all(np.isfinite(uv)):
+                            gaze_valid = False
+                            break
+                        u = int(np.clip(uv[0], 0, SW - 1))
+                        v = int(np.clip(uv[1], 0, SH - 1))
+                        measured_depth, depth_valid_count = depth_at(
+                            latest_disparity, u, v, ocams_calib.RECTIFIED_K[0, 0],
+                            ocams_calib.BASELINE_M, radius=5)
+                        if measured_depth is not None and 0.2 <= measured_depth <= 2.0:
+                            depth_guess = measured_depth
+                    if measured_depth is not None and 0.2 <= measured_depth <= 2.0:
+                        latest_depth_m = measured_depth
+                elif gaze_affine is not None:
+                    uv = gaze_affine @ gaze_features(smooth_dir)
+                    gaze_valid = bool(np.all(np.isfinite(uv)))
+                    if gaze_valid:
+                        u = int(np.clip(uv[0], 0, SW - 1))
+                        v = int(np.clip(uv[1], 0, SH - 1))
+                else:
+                    g = R @ smooth_dir
+                    gaze_valid = g[2] > 1e-6
+                    if gaze_valid:
+                        u = int(np.clip(cx + fx * (g[0] / g[2]), 0, SW - 1))
+                        v = int(np.clip(cy - fy * (g[1] / g[2]), 0, SH - 1))
+                if gaze_valid:
                     cv2.circle(scene, (u, v), 28, (0, 255, 0), 3)
                     cv2.drawMarker(scene, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
-                    cv2.putText(scene, f"gaze ({u},{v})", (u + 34, v - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    depth_label = (f" depth={latest_depth_m:.2f}m"
+                                   if latest_depth_m is not None else " depth=N/A")
+                    cv2.putText(scene, f"gaze ({u},{v}){depth_label}", (u + 34, v - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                     if rerun_ok:
                         rr_log_safe("scene/gaze_cursor",
                                     rr.Points2D([[u, v]], radii=12, colors=[0, 255, 0]))
                 else:
-                    cv2.putText(scene, "gaze behind camera", (20, 60),
+                    cv2.putText(scene, "invalid gaze", (20, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                status, color = "CALIBRATED", (0, 255, 0)
+                if (args.enable_experimental_depth
+                        and affine_05 is not None and affine_10 is not None):
+                    status = "CALIBRATED DEPTH 0.5-1.0m"
+                else:
+                    status = "CALIBRATED AFFINE" if gaze_affine is not None else "CALIBRATED R"
+                color = (0, 255, 0)
             else:
                 status, color = "NOT CALIBRATED - look at scene cam, press 'c'", (0, 200, 255)
+
+            if depth_probe_result is not None:
+                du, dv, probe_z, probe_n = depth_probe_result
+                probe_color = (0, 255, 255) if probe_z is not None else (0, 0, 255)
+                probe_text = (f"{probe_z:.3f}m n={probe_n}" if probe_z is not None
+                              else f"depth N/A n={probe_n}")
+                cv2.drawMarker(scene, (du, dv), probe_color, cv2.MARKER_CROSS, 24, 2)
+                cv2.putText(scene, probe_text, (du + 12, max(20, dv - 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, probe_color, 2)
 
             for i, (pu, pv) in enumerate(calib_pixels):
                 cv2.drawMarker(scene, (pu, pv), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 16, 2)
@@ -375,8 +672,10 @@ def main():
             cv2.putText(scene, f"{mirror}  (x/y=toggle)", (20, 58),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
             multi_color = (0, 255, 255) if multi_mode else (150, 150, 150)
-            cv2.putText(scene, f"multi-calib(m)={'ON - click target' if multi_mode else 'off'} "
-                                f"points={len(calib_pixels)}  fx={fx:.0f}", (20, 86),
+            mode_text = "DEPTH LEFT-CLICK" if depth_mode else (
+                "MULTI CALIB" if multi_mode else "TRACKING")
+            cv2.putText(scene, f"mode={mode_text} points={len(calib_pixels)} "
+                                f"map={'affine' if gaze_affine is not None else 'rotation'}", (20, 86),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, multi_color, 2)
             cv2.imshow(win_name, scene)
             frame_idx += 1
@@ -392,13 +691,27 @@ def main():
                           f"눈을 상하좌우로 더 굴린 뒤 다시 (30+ 권장).")
                 else:
                     R = rotation_from_a_to_b(smooth_dir, np.array([0.0, 0.0, 1.0], np.float32))
+                    gaze_affine = None
                     calibrated = True
                     print(f"[calib] 완료. 기준 시선={smooth_dir.round(3)} → 씬 정면 [0,0,1]")
+            elif key == ord('d'):
+                depth_mode = not depth_mode
+                if depth_mode:
+                    multi_mode = False
+                print(f"[depth] 좌클릭 깊이 모드 {'ON' if depth_mode else 'OFF'}")
             elif key == ord('m'):
                 multi_mode = not multi_mode
                 print(f"[다점] 모드 {'ON — 실제 지점을 응시한 채 그 위치를 클릭' if multi_mode else 'OFF'}")
+            elif key == ord('s'):
+                if gaze_affine is None or len(calib_dirs) < 3:
+                    print("[calib] 저장할 affine 다점 데이터가 없습니다.")
+                else:
+                    saved_err = save_affine_calibration(
+                        calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
+                    print(f"[calib] 저장 완료: {calib_path} (error={saved_err:.1f}px)")
             elif key == ord('r'):
                 calibrated = False
+                gaze_affine = None
                 R = np.eye(3, dtype=np.float32)
                 calib_dirs.clear()
                 calib_pixels.clear()
@@ -409,6 +722,7 @@ def main():
                 i = 0 if key == ord('x') else 1
                 sign[i] *= -1
                 calibrated = False
+                gaze_affine = None
                 R = np.eye(3, dtype=np.float32)
                 calib_dirs.clear()
                 calib_pixels.clear()
@@ -416,8 +730,10 @@ def main():
                 print(f"[mirror] {'x' if i == 0 else 'y'} 반전 -> {sign[i]:+.0f} "
                       f"(캘리브 리셋됨, 다시 'c' 또는 'm'+클릭)")
     finally:
-        eye_cap.release()
-        scene_cap.release()
+        if eye_cap is not None:
+            eye_cap.release()
+        if scene_cap is not None:
+            scene_cap.release()
         cv2.destroyAllWindows()
 
 

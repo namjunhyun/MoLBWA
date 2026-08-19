@@ -147,10 +147,10 @@ def main():
                 frame = cv2.flip(frame, -1)
             fed = crop_roi(frame, roi) if roi else frame
 
-            tracker.process_frame(fed)  # 검출·모델·벡터·imshow·gaze_vector.txt 저장
+            _ellipse, returned_dir = tracker.process_frame(fed)
             n += 1
 
-            g = read_last_gaze()
+            g = (None, returned_dir) if returned_dir is not None else None
             model_n = len(getattr(tracker, "model_centers", []))
             if g is not None:
                 got_vec += 1

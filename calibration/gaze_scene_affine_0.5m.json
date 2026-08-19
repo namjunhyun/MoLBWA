@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "model": "gaze_direction_to_scene_pixel_affine",
+  "affine_2x3": [
+    [
+      504.386962890625,
+      -277.28607177734375,
+      118.87933349609375
+    ],
+    [
+      -371.2231750488281,
+      -595.9676513671875,
+      550.10107421875
+    ]
+  ],
+  "sample_count": 9,
+  "mean_pixel_error": 17.091428838344285,
+  "image_width": 640,
+  "image_height": 480
+}
