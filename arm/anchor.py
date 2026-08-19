@@ -152,8 +152,65 @@ class AnchorTracker:
         return True, "ok"
 
 
+def build_bundle_obj_pts(anchor_cfg: dict):
+    """config 의 anchor 섹션 -> {tag_id: (4,3) 코너 좌표(armbase)}, right, up, normal.
+
+    pupil_apriltags 코너 순서는 (좌하, 우하, 우상, 좌상). 그 "오른쪽/위"가 armbase 의
+    어느 축인지는 태그를 어떻게 붙였느냐의 문제라 config(anchor.tag_axes)로 명시한다.
+    검출기 없이도 부를 수 있게 모듈 함수로 뺐다 (테스트용).
+    """
+    def _axes(src, default_right, default_up):
+        r = np.asarray(src.get("right", default_right), float)
+        u = np.asarray(src.get("up", default_up), float)
+        r = r / np.linalg.norm(r)
+        u = u / np.linalg.norm(u)
+        if abs(float(r @ u)) > 1e-6:
+            raise ValueError("tag_axes: right 와 up 은 직교해야 한다")
+        return r, u
+
+    axes = anchor_cfg.get("tag_axes", {})
+    right, up = _axes(axes, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    normal = np.cross(right, up)
+
+    h = anchor_cfg["tag_size_m"] / 2.0
+    obj = {}
+    for t in anchor_cfg["bundle"]:
+        # 태그마다 다른 면에 붙일 수 있다 (예: 수직판 2장 + 테이블에 눕힌 2장).
+        # 그럴 땐 bundle 항목에 right/up 을 각각 적는다. 없으면 전역 tag_axes 를 쓴다.
+        r, u = _axes(t, right, up)
+        local = np.stack([-h * r - h * u, +h * r - h * u, +h * r + h * u, -h * r + h * u])
+        obj[t["id"]] = np.asarray(t["pos"], float) + local
+    return obj, right, up, normal
+
+
+def _warn_if_coplanar(positions, tol_m: float = 0.01):
+    """번들이 한 평면에 몰려 있으면 PnP 회전이 구조적으로 불안정해진다."""
+    P = np.asarray(positions, float)
+    if len(P) < 3:
+        return
+    spread = np.linalg.svd(P - P.mean(axis=0), compute_uv=False)
+    if spread[-1] < tol_m:
+        log.warning("AprilTag 번들이 거의 동일평면이다 (두께 %.1fmm). 평면 PnP 는 광축 "
+                    "방향 회전이 불안정하다 — 태그 하나를 깊이 방향으로 4~6cm 어긋나게 "
+                    "붙이면 크게 좋아진다.", spread[-1] * 1000)
+
+
 class TagBundleDetector:
-    """AprilTag 번들 -> T_hc_ab. 단일 태그의 rotation flip 을 피하려고 여러 태그를 한 번에 PnP 한다."""
+    """AprilTag 번들 -> T_hc_ab. 단일 태그의 rotation flip 을 피하려고 여러 태그를 한 번에 PnP 한다.
+
+    ★ 코너 순서 / 축 방향 (2026-08-19 수정)
+    pupil_apriltags 는 코너를 태그 자체 기준으로 (좌하, 우하, 우상, 좌상) 순서로 준다.
+    그 "오른쪽/위"가 armbase 의 어느 축인지는 **태그를 어떻게 붙였느냐**의 문제라서
+    코드가 마음대로 정할 수 없다 -> config 의 anchor.tag_axes 로 명시한다.
+
+    예전 구현은 로컬 코너를 [(+y,-z), (-y,-z), (-y,+z), (+y,+z)] 로 박아놨는데, 이건
+    right = -y, up = +z 이므로 법선(right x up) = -x 다. 그런데 config 주석은
+    "태그 평면 법선은 +x(팔 정면)" 이라고 되어 있었다. 즉 코드와 문서가 서로 반대였고,
+    실제로는 y 축이 뒤집힌 **거울상** 배치를 PnP 에 넣고 있었다 (det = -1, 회전으로 표현
+    불가능 -> 재투영 오차가 크게 남거나 엉뚱한 자세가 나온다).
+
+    이제 법선 +x / right +y / up +z 가 기본값이고, 재투영 오차로 자동 검증한다.
+    """
 
     def __init__(self, cfg: dict, K: np.ndarray, dist=None):
         import cv2
@@ -167,10 +224,11 @@ class TagBundleDetector:
         self.dist = np.zeros(5) if dist is None else np.asarray(dist, float)
         self.size = a["tag_size_m"]
         self.min_tags = a["min_tags_for_latch"]
-        h = self.size / 2.0
-        # 태그 로컬 코너 (pupil_apriltags 순서: 좌하, 우하, 우상, 좌상), 태그 평면 법선 = armbase +x
-        local = np.array([[0, +h, -h], [0, -h, -h], [0, -h, +h], [0, +h, +h]], float)
-        self.obj_pts = {t["id"]: np.asarray(t["pos"], float) + local for t in a["bundle"]}
+        self.max_reproj_px = a.get("max_reproj_px", 3.0)
+        self.ambiguity_max_m = a.get("ambiguity_max_m", 0.02)
+
+        self.obj_pts, self.right, self.up, self.normal = build_bundle_obj_pts(a)
+        _warn_if_coplanar([t["pos"] for t in a["bundle"]])
 
     def detect(self, gray: np.ndarray) -> np.ndarray | None:
         dets = [d for d in self.det.detect(gray) if d.tag_id in self.obj_pts]
@@ -178,10 +236,47 @@ class TagBundleDetector:
             return None
         obj = np.concatenate([self.obj_pts[d.tag_id] for d in dets])
         img = np.concatenate([np.asarray(d.corners, float) for d in dets])
-        ok, rvec, tvec = self.cv2.solvePnP(
+        # ★ 평면 모호성 검사 (2026-08-19).
+        # 태그를 전부 한 평면에 붙이면, 태그판을 기준으로 **거울 반사된** 자세가 픽셀상
+        # 똑같이 투영된다. 재투영 오차가 0 이어도 팔 베이스가 10cm 넘게 엉뚱한 데 찍힌다
+        # (합성 검증에서 정확히 120mm = 2 x 태그판 깊이만큼 틀렸다).
+        # solvePnPGeneric 으로 후보를 전부 받아, 서로 크게 다르면 관측을 버린다.
+        n_sol, rvecs, tvecs, _ = self.cv2.solvePnPGeneric(
             obj, img, self.K, self.dist, flags=self.cv2.SOLVEPNP_ITERATIVE
         )
-        if not ok:
+        if n_sol < 1:
             return None
+        cands = [(np.asarray(r), np.asarray(t)) for r, t in zip(rvecs, tvecs)]
+        # cheirality: 태그가 카메라 **뒤**에 있는 해는 물리적으로 불가능하다.
+        # 투영은 (x,y,z) -> (-x,-y,-z) 에 대해 불변이라 이런 해가 실제로 나온다
+        # (합성 검증에서 t 가 정확히 부호만 뒤집힌 해가 재투영 0px 로 나왔다).
+        def _in_front(rt):
+            R, _ = self.cv2.Rodrigues(rt[0])
+            return (((R @ obj.T).T + np.asarray(rt[1]).ravel())[:, 2] > 0).all()
+        cands = [c for c in cands if _in_front(c)]
+        if not cands:
+            log.warning("태그 PnP 해가 전부 카메라 뒤 — 관측 버림")
+            return None
+        if len(cands) > 1:
+            spread = max(float(np.linalg.norm(a[1] - b[1]))
+                         for i, a in enumerate(cands) for b in cands[i + 1:])
+            if spread > self.ambiguity_max_m:
+                log.error("태그 PnP 해가 %d개이고 서로 %.1fcm 떨어져 있다 — 동일평면 모호성. "
+                          "관측 버림. 태그 하나를 깊이 방향으로 4~6cm 어긋나게 붙일 것.",
+                          len(cands), spread * 100)
+                return None
+        rvec, tvec = cands[0]
+        rvec, tvec = self.cv2.solvePnPRefineLM(obj, img, self.K, self.dist, rvec, tvec)
+
+        # ★ 재투영 오차 검사 — 코너 순서/축 방향이 틀리면 여기서 걸린다.
+        proj, _ = self.cv2.projectPoints(obj, rvec, tvec, self.K, self.dist)
+        err = float(np.sqrt(((proj.reshape(-1, 2) - img) ** 2).sum(axis=1).mean()))
+        self.last_reproj_px = err
+        if err > self.max_reproj_px:
+            log.warning("태그 PnP 재투영 오차 %.1fpx > %.1fpx — 관측 버림. "
+                        "번들 좌표(anchor.bundle) 또는 코너 축(anchor.tag_axes) 확인.",
+                        err, self.max_reproj_px)
+            return None
+
         R, _ = self.cv2.Rodrigues(rvec)
         return _rt(R, tvec)   # T_hc_ab

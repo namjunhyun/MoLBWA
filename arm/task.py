@@ -38,16 +38,26 @@ class AnchorLost(RuntimeError):
 
 
 class DrinkTask:
-    def __init__(self, cfg: dict, arm, anchor):
+    def __init__(self, cfg: dict, arm, anchor, refresh=None):
+        """refresh: 게이트 직전에 SLAM/anchor 입력을 갱신하는 콜러블 (없어도 동작).
+
+        ★ 이게 없으면 안전 게이트가 무의미하다 (2026-08-19).
+        run() 은 팔이 다 움직일 때까지 블로킹이라, 그 동안 메인 루프가 SLAM 을 못 읽는다.
+        예전 구현은 30초짜리 시퀀스 내내 멈춰 있는 옛 pose 를 검사하면서 "매 동작 직전에
+        게이트 재확인"이라고 주장하고 있었다. 이제 매 게이트마다 refresh() 를 부른다.
+        """
         self.cfg = cfg
         self.t = cfg["task"]
         self.arm = arm
         self.anchor = anchor
+        self.refresh = refresh
         self.stage = Stage.IDLE
         self.cup_pos_ab: np.ndarray | None = None
 
     # ---------- 게이트 ----------
     def _gate(self, what: str):
+        if self.refresh is not None:
+            self.refresh()
         ok, why = self.anchor.can_execute_grasp()
         if not ok:
             raise AnchorLost(f"{what} 중단: {why}")
@@ -106,6 +116,7 @@ class DrinkTask:
             self.arm.goto_pose(mouth, pitch, slow=True)
 
             self.stage = Stage.POUR
+            self._gate("기울이기")
             self.arm.tilt_in_place(pitch, pitch + self.t["pour_tilt_deg"],
                                    self.t["pour_tilt_speed_deg_s"])
             time.sleep(self.t["pour_hold_s"])
