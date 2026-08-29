@@ -12,24 +12,26 @@ Camera.type: "PinHole"
 # do_rectify must be passed as "false" to the stereo-inertial node.
 #
 # fx/fy/cx/cy come from the projection_matrix (P) in ocams_ros2's calibration files.
-# Re-measured 2026-08-11 (raw-image Kalibr stereo calibration -> cv2.stereoRectify; the
-# previous left_opencv.yaml/right_opencv.yaml, in use since 2026-07-14, was calibrated
-# against already-rectified images -- a circular calibration that left epipolar lines
-# misaligned by tens of px and was the root cause of ORB-SLAM3's stereo-matching failures).
-Camera1.fx: 484.71068739
-Camera1.fy: 484.71068739
-Camera1.cx: 326.83634186
-Camera1.cy: 240.15449524
+# Re-measured 2026-08-29 (fresh AprilGrid recording + Kalibr stereo calibration, with a
+# corrected tagSize -- the 2026-08-11 values below used tagSize=20mm, but the physical
+# board printed for that session's re-recalibration was actually the PDF's nominal 25mm,
+# not the 20mm measured off the 2026-08-07 board; see MoLBWA/docs/11_camera_imu_calibration.md
+# and MoLBWA/calibration/target.yaml). Superseded 2026-08-11 values (tagSize bug):
+#   Camera1/2.fx/fy: 484.71068739  cx: 326.83634186  cy: 240.15449524
+Camera1.fx: 461.23678621
+Camera1.fy: 461.23678621
+Camera1.cx: 370.49542618
+Camera1.cy: 242.77328110
 
 Camera1.k1: 0.0
 Camera1.k2: 0.0
 Camera1.p1: 0.0
 Camera1.p2: 0.0
 
-Camera2.fx: 484.71068739
-Camera2.fy: 484.71068739
-Camera2.cx: 326.83634186
-Camera2.cy: 240.15449524
+Camera2.fx: 461.23678621
+Camera2.fy: 461.23678621
+Camera2.cx: 370.49542618
+Camera2.cy: 242.77328110
 
 Camera2.k1: 0.0
 Camera2.k2: 0.0
@@ -46,13 +48,20 @@ Camera.RGB: 0
 Stereo.ThDepth: 40.0
 
 # Rectified stereo pair -> pure x-translation. Baseline derived from
-# -P2(0,3) / P2(0,0) = 51.72376498 / 484.71068739 in ocams_ros2/config/right_opencv.yaml
-# (re-measured 2026-08-11, see Camera1.fx comment above).
+# -P2(0,3) / P2(0,0) = 79.15144322 / 461.23678621 in ocams_ros2/config/right_opencv.yaml
+# (re-measured 2026-08-29, see Camera1.fx comment above -- tagSize fix took Kalibr's raw
+# baseline from 10.771cm to 13.445cm). That still measured ~22% short against a taped-out
+# 1.0m target with the real oCamS stereo pipeline (see MoLBWA git log 2026-08-29), so the
+# final value here is further empirically scaled to 0.17160696m to match that 1.0m
+# ground-truth point exactly. Verified accurate at ~1.0m; still measured ~12% short at
+# ~1.5m in the same session, so this is not a fully general fix -- re-derive properly
+# (better AprilGrid/target size measurement, or a multi-distance ground truth) if SLAM
+# metric scale needs to hold up much beyond 1-1.5m.
 Stereo.T_c1_c2: !!opencv-matrix
   rows: 4
   cols: 4
   dt: f
-  data: [1.0, 0.0, 0.0, 0.10671059,
+  data: [1.0, 0.0, 0.0, 0.17160696,
          0.0, 1.0, 0.0, 0.0,
          0.0, 0.0, 1.0, 0.0,
          0.0, 0.0, 0.0, 1.0]
