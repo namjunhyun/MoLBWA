@@ -321,6 +321,12 @@ def main():
                     help="씬 카메라 초점거리(px) 강제 지정. 미지정시 ocams_calib의 rectified "
                          "캘리브레이션 값을 그대로 씀(근사 아님) — 스테레오 깊이(docs/03)와 "
                          "좌표계를 맞추려면 이 기본값을 그대로 쓸 것")
+    ap.add_argument("--baseline-m", type=float, default=None,
+                    help="스테레오 baseline(m) 강제 지정, 진단용. 미지정시 ocams_calib.BASELINE_M "
+                         "(Kalibr 계산값, 실측 아님). 2026-08-29: 실측 baseline(캘리퍼스 12cm)이 "
+                         "8/11 재캘리브레이션 값(10.67cm)과 달라 깊이가 실제보다 짧게 나오는 문제 "
+                         "진단 중 — rectification(R1/R2)은 그대로 두고 이 상수만 바꿔서 baseline만 "
+                         "따로 검증하기 위해 추가.")
     ap.add_argument("--smooth", type=float, default=0.25,
                     help="시선벡터 EMA 계수(0=고정,1=생값). 7/2 노트의 프레임간 튐(std0.18) 완화")
     ap.add_argument("--flip", action="store_true", help="눈 영상 상하반전")
@@ -338,6 +344,10 @@ def main():
                          "(2026-07-30에 실제로 겪음) — cv2 창 표시/캘리브는 영향 없음, "
                          "Rerun 쪽 영상만 덜 자주 보냄")
     args = ap.parse_args()
+
+    baseline_m = args.baseline_m if args.baseline_m is not None else ocams_calib.BASELINE_M
+    if args.baseline_m is not None:
+        print(f"[baseline] 강제 지정: {baseline_m:.4f}m (캘리브레이션값 {ocams_calib.BASELINE_M:.4f}m 대신)")
 
     if args.enable_experimental_depth:
         print("[경고] 스테레오 깊이는 현재 검증 실패 상태입니다. 로봇팔 제어에 사용하지 마세요.")
@@ -516,32 +526,29 @@ def main():
                     smooth_dir = None
                     next_eye_retry = 0.0
 
-            if eye is None:
-                waiting = scene if scene is not None else np.zeros((SH, SW, 3), dtype=np.uint8)
-                waiting = waiting.copy()
-                cv2.putText(waiting, "EYE CAMERA DISCONNECTED - waiting for reconnect",
-                            (20, SH // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-                cv2.imshow(win_name, waiting)
-                if cv2.waitKey(50) & 0xFF == ord("q"):
-                    break
-                continue
-
-            if args.flip:
-                eye = cv2.flip(eye, -1)
-
+            # 눈 카메라가 없어도(2026-08-29: 케이블 파손으로 당일 미보유) 씬 카메라만으로
+            # 스테레오 깊이 검증(d/우클릭 모드)은 계속 돌아가야 한다 — 예전에는 여기서
+            # continue로 매 프레임 건너뛰어서 depth_pending 처리(아래)와 'd' 키 토글에
+            # 도달할 수조차 없었다. eye 관련 계산만 건너뛰고 나머지는 그대로 진행한다.
             log_images_this_frame = rerun_ok and (frame_idx % args.rerun_every == 0)
-            if rerun_ok:
+            if eye is not None:
+                if args.flip:
+                    eye = cv2.flip(eye, -1)
+
+                if rerun_ok:
+                    rr.set_time("frame", sequence=frame_idx)
+                    if log_images_this_frame:
+                        rr_log_safe("eye/ir", rr.Image(cv2.cvtColor(eye, cv2.COLOR_BGR2RGB)))
+
+                _ellipse, d = tracker.process_frame(eye)  # 검출 + 안구모델 + 눈 창 표시, 반환값으로 시선벡터 바로 받음
+
+                if d is not None and np.linalg.norm(d) > 1e-6:
+                    d = (d / np.linalg.norm(d)) * sign
+                    smooth_dir = d if smooth_dir is None else \
+                        (1 - args.smooth) * smooth_dir + args.smooth * d
+                    smooth_dir /= np.linalg.norm(smooth_dir)
+            elif rerun_ok:
                 rr.set_time("frame", sequence=frame_idx)
-                if log_images_this_frame:
-                    rr_log_safe("eye/ir", rr.Image(cv2.cvtColor(eye, cv2.COLOR_BGR2RGB)))
-
-            _ellipse, d = tracker.process_frame(eye)  # 검출 + 안구모델 + 눈 창 표시, 반환값으로 시선벡터 바로 받음
-
-            if d is not None and np.linalg.norm(d) > 1e-6:
-                d = (d / np.linalg.norm(d)) * sign
-                smooth_dir = d if smooth_dir is None else \
-                    (1 - args.smooth) * smooth_dir + args.smooth * d
-                smooth_dir /= np.linalg.norm(smooth_dir)
 
             if scene is None:
                 waiting = np.zeros((SH, SW, 3), dtype=np.uint8)
@@ -563,7 +570,7 @@ def main():
                 click_state["depth_pending"] = None
                 measured_depth, valid_n = depth_at(
                     latest_disparity, du, dv, ocams_calib.RECTIFIED_K[0, 0],
-                    ocams_calib.BASELINE_M, radius=10)
+                    baseline_m, radius=10)
                 depth_probe_result = (du, dv, measured_depth, valid_n)
                 if measured_depth is None:
                     print(f"[depth] ({du},{dv}) 측정 실패 — 유효 disparity {valid_n}개")
@@ -616,7 +623,7 @@ def main():
                         v = int(np.clip(uv[1], 0, SH - 1))
                         measured_depth, depth_valid_count = depth_at(
                             latest_disparity, u, v, ocams_calib.RECTIFIED_K[0, 0],
-                            ocams_calib.BASELINE_M, radius=5)
+                            baseline_m, radius=5)
                         if measured_depth is not None and 0.2 <= measured_depth <= 2.0:
                             depth_guess = measured_depth
                     if measured_depth is not None and 0.2 <= measured_depth <= 2.0:
@@ -680,6 +687,9 @@ def main():
             cv2.putText(scene, f"mode={mode_text} points={len(calib_pixels)} "
                                 f"map={'affine' if gaze_affine is not None else 'rotation'}", (20, 86),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, multi_color, 2)
+            if eye_cap is None:
+                cv2.putText(scene, "EYE CAMERA DISCONNECTED (scene-only depth test OK)",
+                            (20, SH - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
             cv2.imshow(win_name, scene)
             frame_idx += 1
 
