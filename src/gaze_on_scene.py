@@ -50,6 +50,7 @@ except ImportError:
     rr = None
 
 import ocams_calib
+import eye_scene_extrinsic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "external", "EyeTracker", "3DTracker")))
@@ -409,7 +410,8 @@ def main():
     depth_valid_count = 0
     print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
-    print("[키] c=1점 / m=affine 다점 / d=깊이 좌클릭 모드 / s=저장 / r=리셋 / q=종료")
+    print("[키] c=1점 / m=affine 다점 / M=R,p_eye 최소제곱 다점(6+, docs/12) "
+          "/ d=깊이 좌클릭 모드 / s=저장 / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
     gaze_affine = None
@@ -435,13 +437,26 @@ def main():
     multi_mode = False
     calib_dirs = []    # 다점 캘리브: 클릭 순간의 시선벡터들
     calib_pixels = []  # 다점 캘리브: 클릭한 (u,v) 픽셀들
-    click_state = {"pending": None, "depth_pending": None}
+    click_state = {"pending": None, "depth_pending": None, "extrinsic_pending": None}
     depth_mode = False
     depth_probe_result = None
 
+    # docs/12_eye_scene_extrinsic_calibration.md "M" 모드 — 여러 거리(0.5/1.5/3m 등)에서
+    # 실제 지점을 클릭하면 (시선방향, 그 픽셀의 스테레오 깊이로 구한 씬 카메라 3D점)을 모아서
+    # eye_scene_extrinsic.calibrate_r_p_eye()로 (R, p_eye) 6자유도를 비선형 최소제곱으로 푼다.
+    # 기존 'm'(회전+스케일만 푸는 Wahba)과 별개 — docs/12 배경 참고.
+    extrinsic_mode = False
+    extrinsic_dirs = []
+    extrinsic_points = []
+    extrinsic_R = None
+    extrinsic_p_eye = None
+    extrinsic_residuals = None
+
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            if depth_mode:
+            if extrinsic_mode:
+                click_state["extrinsic_pending"] = (x, y)
+            elif depth_mode:
                 click_state["depth_pending"] = (x, y)
             else:
                 click_state["pending"] = (x, y)
@@ -510,7 +525,8 @@ def main():
                     next_scene_retry = 0.0
                 else:
                     scene = cv2.cvtColor(left_gray, cv2.COLOR_GRAY2BGR)
-                    if frame_idx % 3 == 0 and (depth_mode or args.enable_experimental_depth):
+                    if frame_idx % 3 == 0 and (
+                            depth_mode or args.enable_experimental_depth or extrinsic_mode):
                         latest_disparity = (
                             stereo_matcher.compute(left_gray, right_gray).astype(np.float32) / 16.0)
                     if args.scene_flip:
@@ -577,6 +593,39 @@ def main():
                 else:
                     print(f"[depth] ({du},{dv}) = {measured_depth:.3f}m "
                           f"(유효 disparity {valid_n}개)")
+
+            if click_state["extrinsic_pending"] is not None:
+                eu, ev = click_state["extrinsic_pending"]
+                click_state["extrinsic_pending"] = None
+                if smooth_dir is None:
+                    print("[R,p_eye] 아직 시선벡터가 없다 — 눈을 굴려 모델을 세우고 다시.")
+                else:
+                    D, valid_n = depth_at(
+                        latest_disparity, eu, ev, ocams_calib.RECTIFIED_K[0, 0],
+                        baseline_m, radius=5)
+                    if D is None or not (0.1 < D < 5.0):
+                        print(f"[R,p_eye] ({eu},{ev}) 깊이 측정 실패(유효 disparity {valid_n}개) "
+                              "— 텍스처 있는 곳을 다시 클릭.")
+                    else:
+                        Kinv = np.linalg.inv(ocams_calib.RECTIFIED_K)
+                        X = D * (Kinv @ np.array([eu, ev, 1.0], dtype=np.float64))
+                        extrinsic_dirs.append(smooth_dir.copy())
+                        extrinsic_points.append(X)
+                        print(f"[R,p_eye] 포인트 추가 #{len(extrinsic_dirs)}: "
+                              f"D={D:.3f}m X={np.round(X, 3)}")
+                        if len(extrinsic_dirs) >= 6:
+                            try:
+                                extrinsic_R, extrinsic_p_eye, extrinsic_residuals = \
+                                    eye_scene_extrinsic.calibrate_r_p_eye(
+                                        extrinsic_dirs, extrinsic_points)
+                                print(f"[R,p_eye] {len(extrinsic_dirs)}점으로 재계산. "
+                                      f"p_eye={np.round(extrinsic_p_eye, 4)}m 잔차(cm): "
+                                      f"평균={extrinsic_residuals.mean()*100:.1f} "
+                                      f"최대={extrinsic_residuals.max()*100:.1f}")
+                            except ValueError as e:
+                                print(f"[R,p_eye] 계산 대기: {e}")
+                        else:
+                            print(f"[R,p_eye] {len(extrinsic_dirs)}/6점 — 최소제곱 계산 대기")
 
             if click_state["pending"] is not None:
                 cu, cv_ = click_state["pending"]
@@ -682,11 +731,20 @@ def main():
             cv2.putText(scene, f"{mirror}  (x/y=toggle)", (20, 58),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
             multi_color = (0, 255, 255) if multi_mode else (150, 150, 150)
-            mode_text = "DEPTH LEFT-CLICK" if depth_mode else (
-                "MULTI CALIB" if multi_mode else "TRACKING")
+            mode_text = "R,P_EYE CALIB" if extrinsic_mode else (
+                "DEPTH LEFT-CLICK" if depth_mode else (
+                    "MULTI CALIB" if multi_mode else "TRACKING"))
             cv2.putText(scene, f"mode={mode_text} points={len(calib_pixels)} "
                                 f"map={'affine' if gaze_affine is not None else 'rotation'}", (20, 86),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, multi_color, 2)
+            if extrinsic_mode or extrinsic_p_eye is not None:
+                ex_text = f"R,p_eye points={len(extrinsic_dirs)}/6+"
+                if extrinsic_p_eye is not None:
+                    ex_text += (f" p_eye={np.round(extrinsic_p_eye, 3)}m "
+                                f"resid(cm) mean={extrinsic_residuals.mean()*100:.1f} "
+                                f"max={extrinsic_residuals.max()*100:.1f}")
+                cv2.putText(scene, ex_text, (20, 114),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
             if eye_cap is None:
                 cv2.putText(scene, "EYE CAMERA DISCONNECTED (scene-only depth test OK)",
                             (20, SH - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
@@ -715,6 +773,13 @@ def main():
             elif key == ord('m'):
                 multi_mode = not multi_mode
                 print(f"[다점] 모드 {'ON — 실제 지점을 응시한 채 그 위치를 클릭' if multi_mode else 'OFF'}")
+            elif key == ord('M'):
+                extrinsic_mode = not extrinsic_mode
+                if extrinsic_mode:
+                    depth_mode = False
+                    multi_mode = False
+                print(f"[R,p_eye] 캘리브 모드 "
+                      f"{'ON — 다른 거리(0.5/1.5/3m 등)에서 실제 지점을 응시한 채 클릭' if extrinsic_mode else 'OFF'}")
             elif key == ord('s'):
                 if gaze_affine is None or len(calib_dirs) < 3:
                     print("[calib] 저장할 affine 다점 데이터가 없습니다.")
@@ -729,7 +794,12 @@ def main():
                 calib_dirs.clear()
                 calib_pixels.clear()
                 fx = fy = fx0
-                print("[calib] 리셋 (다점 캘리브 포인트 + fx도 초기값으로 복원됨)")
+                extrinsic_dirs.clear()
+                extrinsic_points.clear()
+                extrinsic_R = None
+                extrinsic_p_eye = None
+                extrinsic_residuals = None
+                print("[calib] 리셋 (다점 캘리브 포인트 + fx + R/p_eye 캘리브 포인트도 초기값으로 복원됨)")
             elif key in (ord('x'), ord('y')):
                 # 축 부호를 바꾸면 기존 R은 무효 → 캘리브 리셋 후 다시 'c'
                 i = 0 if key == ord('x') else 1
