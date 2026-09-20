@@ -71,6 +71,27 @@ pip install feetech-servo-sdk
 sudo usermod -a -G dialout $USER   # 재로그인 필요
 ```
 
+### 통합 GUI — 한 창에서 전부 본다
+
+```bash
+ros2 launch gaze_hri gui.launch.py                     # 마우스 입력, dry-run
+ros2 launch gaze_hri gui.launch.py backend:=feetech    # 실제 구동
+ros2 launch gaze_hri gui.launch.py input:=gaze source:=udp backend:=feetech
+```
+
+검출된 컵, 시선/커서와 응시 진행률, 선택된 집을 것·놓을 곳, 로봇 동작 단계,
+팔 끝 위치, 준비 상태가 한 화면에 나옵니다.
+조작은 좌클릭 선택 / `c` 취소 / `space` 비상정지 / `d` 검출 전환 / `q` 종료.
+
+화면만 미리 보려면 (ROS·카메라 없이):
+
+```bash
+python -m gaze_hri.panel_render preview.png executing   # idle | pick | executing
+```
+
+> `control_panel` 은 카메라를 직접 열므로 `topdown_click` 과 같이 띄우지 마세요.
+> 호모그래피 캘리브레이션만 `topdown_click`(`mode:=calib`)이 맡습니다.
+
 ### 하드웨어 없이 먼저 돌려보기
 
 **이걸 제일 먼저 하세요.** 안경도 로봇도 없이 전체 파이프라인이 돕니다.

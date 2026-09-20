@@ -31,7 +31,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Empty, Float64MultiArray
+from std_msgs.msg import Empty, Float64MultiArray, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from gaze_hri.kinematics import (JOINT_ORDER, ArmGeometry, IKError,
@@ -254,6 +254,9 @@ class ArmServer(Node):
         self.q = list(self.get_parameter("home_q").value)
 
         self.pub_js = self.create_publisher(JointState, "/joint_states", 10)
+        # 동작 단계를 토픽으로도 알린다. 액션 피드백은 목표를 보낸 클라이언트만
+        # 받기 때문에, GUI 같은 제3자가 진행 상황을 보려면 이게 필요하다.
+        self.pub_phase = self.create_publisher(String, "/arm/phase", 10)
         self.create_timer(0.05, self._publish_joint_state)
 
         # 캘리브레이션 도구가 팔을 원하는 자세로 보낼 때 사용
@@ -591,6 +594,7 @@ class ArmServer(Node):
             f.phase = phase
             f.progress = float(progress)
             goal_handle.publish_feedback(f)
+            self.pub_phase.publish(String(data=phase))
             self.get_logger().info(f"[{phase}]")
 
         # dry_run 목표는 실제 백엔드를 잠시 로그 백엔드로 갈아끼워 수행한다.
@@ -690,6 +694,8 @@ class ArmServer(Node):
             result.message = f"내부 오류: {exc}"
             return result
         finally:
+            # 동작이 어떻게 끝나든 '지금 멈춰 있다'는 것을 GUI에 알린다
+            self.pub_phase.publish(String(data=""))
             if real_backend is not None:
                 self.backend = real_backend
                 # dry_run 동안 self.q 만 움직였을 뿐 실제 팔은 그대로다.

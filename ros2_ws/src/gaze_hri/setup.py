@@ -28,6 +28,7 @@ setup(
             "task_manager = gaze_hri.task_manager_node:main",
             "arm_server = gaze_hri.arm_server_node:main",
             "topdown_click = gaze_hri.topdown_click_node:main",
+            "control_panel = gaze_hri.control_panel_node:main",
             "calibrate_world_to_base = gaze_hri.calibrate_world_to_base:main",
             "calib_tf_publisher = gaze_hri.calib_tf_publisher:main",
         ],

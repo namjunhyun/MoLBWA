@@ -229,19 +229,59 @@ TF를 못 찾으면 **"그대로 쓰지 않고" 목표를 거부한다.** 좌표
 
 ---
 
-## 6. 실행
+## 6. 통합 GUI
+
+한 창에서 전체 파이프라인을 보고 조작한다. `control_panel` 노드다.
+
+![통합 GUI](assets/gaze_hri_gui.png)
+
+보이는 것:
+
+- 탑다운 영상 위에 **검출된 컵**(번호 배지)과 **선택 결과** — 집을 것(주황 링),
+  놓을 곳(초록 점선)
+- **시선/커서 위치와 응시 진행률** — 원호가 다 차면 선택된다
+- **팔 끝(TCP)** — 관절각을 순기구학으로 풀어 화면 위에 표시. 로봇이 목표로
+  제대로 가고 있는지 눈으로 바로 확인된다
+- 사이드바: 파이프라인 어디까지 왔는지, 선택된 좌표와 신뢰도, 물체 중심으로
+  보정됐는지, 로봇 동작 단계, 준비 상태(캘리브·검출·컵 보임)
+
+조작: 좌클릭 선택 / `c` 취소 / `space` 비상정지 / `d` 검출 전환 / `q` 종료.
+
+한글 폰트(Noto CJK, 나눔)가 있으면 한글로, 없으면 영문으로 자동 전환된다.
+
+화면 구성은 `panel_render.py` 에 ROS와 분리해 두었다. 하드웨어 없이 미리 볼 수 있다:
+
+```bash
+python -m gaze_hri.panel_render preview.png executing   # idle | pick | executing
+```
+
+> `control_panel` 은 카메라를 직접 열고 물체 검출까지 담당한다. 그래서
+> `topdown_click` 과 **동시에 띄우면 안 된다**(카메라를 두 번 열게 된다).
+> 호모그래피 캘리브레이션만 `topdown_click` 이 맡는다.
+
+---
+
+## 7. 실행
 
 ```bash
 cd ros2_ws && colcon build --symlink-install && source install/setup.bash
 ```
 
-ROS 없이 도는 검증(기구학·좌표계·파지 판정 17개):
+통합 GUI:
+
+```bash
+ros2 launch gaze_hri gui.launch.py                                  # 마우스 입력, dry-run
+ros2 launch gaze_hri gui.launch.py backend:=feetech                 # 실제 구동
+ros2 launch gaze_hri gui.launch.py input:=gaze source:=udp backend:=feetech
+```
+
+ROS 없이 도는 검증(기구학·좌표계·파지 판정·화면 구성 26개):
 
 ```bash
 python -m unittest discover ros2_ws/src/gaze_hri/test -v
 ```
 
-로봇 단독(안경 없이, 마우스가 시선 역할):
+로봇 단독 — GUI 없이 옛 방식으로 돌릴 때(캘리브레이션은 이쪽을 쓴다):
 
 ```bash
 ros2 launch gaze_hri robot_only.launch.py mode:=calib backend:=feetech   # 캘리브
@@ -264,7 +304,7 @@ ros2 launch gaze_hri gaze_hri.launch.py source:=udp backend:=feetech
 
 ---
 
-## 7. 남은 결정과 리스크
+## 8. 남은 결정과 리스크
 
 ### 결정이 필요한 것
 

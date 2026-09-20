@@ -47,7 +47,7 @@ def generate_launch_description():
         # map -> base_link 를 항등변환으로. 안경이 없으니 두 좌표계가 같습니다.
         Node(package="tf2_ros", executable="static_transform_publisher",
              name="identity_tf",
-             arguments=["0", "0", "0", "0", "0", "0", "map", "base_link"]),
+             arguments=["--frame-id", "map", "--child-frame-id", "base_link"]),
 
         Node(package="gaze_hri", executable="topdown_click",
              name="topdown_click", output="screen",

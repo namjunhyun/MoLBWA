@@ -118,6 +118,30 @@ calib_tf_publisher:
     world_frame: "map"
     base_frame: "base_link"
 
+control_panel:
+  ros__parameters:
+    # 통합 GUI. 카메라를 직접 열고 물체 검출까지 담당하므로,
+    # topdown_click 과 동시에 띄우면 카메라를 두 번 열게 된다.
+    input_source: "mouse"      # mouse | gaze
+    camera_index: 0
+    width: 640
+    height: 480
+    sidebar_width: 320
+    table_z: 0.0
+    base_frame: "base_link"
+    hold_time: 2.0             # 클릭 후 좌표를 고정할 시간(마우스 모드)
+    detect_objects: true
+    hsv_lower: [0, 120, 80]    # 붉은 계열. 빨강은 색상환 양 끝에 걸쳐 있으므로
+    hsv_upper: [12, 255, 255]  # 하한 > 상한 으로 주면 두 구간을 자동으로 합친다
+    min_area: 400
+    show_arm_tip: true         # 관절각으로 팔 끝 위치를 계산해 화면에 표시
+
+    base_height: 0.0563
+    shoulder_offset: 0.0304
+    l1: 0.1160
+    l2: 0.1350
+    l3: 0.1100
+
 topdown_click:
   ros__parameters:
     mode: "run"                # run | calib
