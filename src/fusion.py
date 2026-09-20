@@ -14,6 +14,8 @@ docs/03_fusion.md 체크리스트 1번 — gaze_point_world() 구현 + 합성 �
 위에서 캘리브레이션한다 (raw 이미지 기준이면 여기 K와 안 맞았음). K/baseline은 ocams_calib이
 유일한 출처 — 여기서 중복 정의하지 않고 그대로 가져다 쓴다.
 """
+import math
+
 import numpy as np
 
 from ocams_calib import RECTIFIED_K as OCAMS_RECTIFIED_K
@@ -39,6 +41,44 @@ def gaze_point_world(u, v, D, K, T_WS):
     ray_dir = ray_dir / np.linalg.norm(ray_dir)
 
     return p_W, origin, ray_dir
+
+
+def rotation_matrix_to_quat(R):
+    """3x3 회전행렬 -> 쿼터니언 [x, y, z, w].
+
+    ROS/TF 가 쓰는 xyzw 순서다. scipy 없이 numpy만으로 계산한다
+    (이 모듈의 의존성을 numpy 하나로 유지하기 위해서).
+
+    로봇팔 쪽(ros2_ws/src/gaze_hri)의 gaze_bridge 가 헤드 pose 를 받을 때
+    이 형식을 기대한다. docs/13_gaze_to_arm.md 참고.
+    """
+    R = np.asarray(R, dtype=float)
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        w, x, y, z = (0.25 * s,
+                      (R[2, 1] - R[1, 2]) / s,
+                      (R[0, 2] - R[2, 0]) / s,
+                      (R[1, 0] - R[0, 1]) / s)
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+        w, x, y, z = ((R[2, 1] - R[1, 2]) / s,
+                      0.25 * s,
+                      (R[0, 1] + R[1, 0]) / s,
+                      (R[0, 2] + R[2, 0]) / s)
+    elif R[1, 1] > R[2, 2]:
+        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+        w, x, y, z = ((R[0, 2] - R[2, 0]) / s,
+                      (R[0, 1] + R[1, 0]) / s,
+                      0.25 * s,
+                      (R[1, 2] + R[2, 1]) / s)
+    else:
+        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+        w, x, y, z = ((R[1, 0] - R[0, 1]) / s,
+                      (R[0, 2] + R[2, 0]) / s,
+                      (R[1, 2] + R[2, 1]) / s,
+                      0.25 * s)
+    return [float(x), float(y), float(z), float(w)]
 
 
 def _project(p_cam, K):
