@@ -58,8 +58,13 @@ assert np.allclose(LEFT.P[0, 0], RIGHT.P[0, 0]), "left/right fx가 다르면 ste
 assert np.allclose(LEFT.P[1, 2], RIGHT.P[1, 2]), "left/right cy가 다르면 스캔라인 정렬이 안 된 것"
 RECTIFIED_K = LEFT.P[:3, :3]
 
-# baseline: P_right[0,3] = -fx * baseline (OpenCV/ROS 관례)
-BASELINE_M = -RIGHT.P[0, 3] / RIGHT.P[0, 0]
+# P_right의 값은 rectification/SLAM 기하를 보존하기 위해 그대로 둔다. 그러나 2026-09-22
+# 실측에서 이 값(17.16cm)을 SGBM 깊이 공식에 직접 쓰면 거리가 크게 나왔다.
+GEOMETRIC_BASELINE_M = -RIGHT.P[0, 3] / RIGHT.P[0, 0]
+DEPTH_BASELINE_M = 0.105
+
+# 기존 외부 코드 호환용. 새 깊이 코드는 DEPTH_BASELINE_M을 명시적으로 사용해야 한다.
+BASELINE_M = GEOMETRIC_BASELINE_M
 
 
 def build_rectify_maps():
@@ -74,7 +79,8 @@ def build_rectify_maps():
 
 if __name__ == "__main__":
     print(f"[ocams_calib] rectified K:\n{RECTIFIED_K}")
-    print(f"[ocams_calib] baseline = {BASELINE_M*100:.2f} cm")
+    print(f"[ocams_calib] geometric baseline = {GEOMETRIC_BASELINE_M*100:.2f} cm")
+    print(f"[ocams_calib] SGBM depth baseline = {DEPTH_BASELINE_M*100:.2f} cm")
     left_maps, right_maps = build_rectify_maps()
     for name, (m1, m2) in (("left", left_maps), ("right", right_maps)):
         print(f"[ocams_calib] {name} map1 shape={m1.shape} dtype={m1.dtype}, "

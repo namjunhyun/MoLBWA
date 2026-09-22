@@ -41,7 +41,8 @@ class DepthProbe(Node):
         self.sync = ApproximateTimeSynchronizer([left_sub, right_sub], queue_size=5, slop=0.05)
         self.sync.registerCallback(self.cb)
         self.get_logger().info(
-            f"시작. fx={ocams_calib.RECTIFIED_K[0,0]:.2f} baseline={ocams_calib.BASELINE_M*100:.2f}cm "
+            f"시작. fx={ocams_calib.RECTIFIED_K[0,0]:.2f} "
+            f"depth_baseline={ocams_calib.DEPTH_BASELINE_M*100:.2f}cm "
             "— 화면 중앙 30x30 disparity 중앙값으로 깊이 측정")
 
     def cb(self, left_msg, right_msg):
@@ -58,7 +59,7 @@ class DepthProbe(Node):
 
         if len(valid) >= 5:
             d = float(np.median(valid))
-            depth = ocams_calib.RECTIFIED_K[0, 0] * ocams_calib.BASELINE_M / d
+            depth = ocams_calib.RECTIFIED_K[0, 0] * ocams_calib.DEPTH_BASELINE_M / d
             text = f"depth={depth:.3f}m  disp={d:.1f}px  n={len(valid)}"
             self.get_logger().info(text, throttle_duration_sec=0.5)
             cv2.putText(vis, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)

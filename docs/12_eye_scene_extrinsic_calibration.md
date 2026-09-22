@@ -56,7 +56,7 @@ residual_i = || (X_i - p_eye) - ((X_i - p_eye)·(R·d_i)) (R·d_i) ||
 여기서 같이 해결한다. 이미 있는 재료:
 
 - `src/ocams_calib.py`가 `left_opencv.yaml`/`right_opencv.yaml`(2026-08-11 재캘리브레이션된
-  값, `docs/11_camera_imu_calibration.md` 참고)로 `RECTIFIED_K`, `BASELINE_M`,
+  값, `docs/11_camera_imu_calibration.md` 참고)로 `RECTIFIED_K`, `DEPTH_BASELINE_M`,
   `build_rectify_maps()`(left/right 둘 다 반환)를 이미 계산해서 갖고 있다.
 - 다만 `gaze_on_scene.py`의 `scene_left()`는 **왼쪽만** rectify해서 쓰고, `right_maps`는
   `build_rectify_maps()`가 반환해도 지금 코드에서 버려진다 (`_right_maps_unused` 변수명 참고).
@@ -70,7 +70,7 @@ residual_i = || (X_i - p_eye) - ((X_i - p_eye)·(R·d_i)) (R·d_i) ||
    32% 유효 픽셀 확인).
 3. 클릭한 픽셀 주변 작은 윈도우(예 5x5)의 disparity 중앙값을 사용(노이즈 완화), 유효 disparity가
    없으면 그 점은 버리고 다시 클릭하라고 안내.
-4. `D = fx · baseline / disparity` (`ocams_calib.RECTIFIED_K[0,0]`, `ocams_calib.BASELINE_M`).
+4. `D = fx · baseline / disparity` (`ocams_calib.RECTIFIED_K[0,0]`, `ocams_calib.DEPTH_BASELINE_M`).
 
 ## 데이터 수집 절차 (구현되면)
 
@@ -111,7 +111,9 @@ extrinsics를 다시 검증 또는 재캘리브레이션한 뒤, 알려진 거�
 
 ## 아직 안 한 것 (다음 사람이 이어서 할 일)
 
-- [x] 좌우 영상 분리 + `StereoSGBM` 통합 (단, 실측 깊이 검증 실패로 실험 기능 처리)
+- [x] 좌우 영상 분리 + `StereoSGBM` 통합
+- [x] 2026-09-22 재검증: SGBM 전용 baseline 0.105m로 0.5/1.05/1.5m 거리 스케일 확인
+  - 약 1.73m 위치에서는 10회 측정 범위 1.726~1.730m, 유효 disparity 441/441로 반복 안정성 확인
 - [ ] `(R, p_eye)` 최소제곱 최적화 함수 작성 + 기존 `m` 모드와 별도 키로 통합
 - [ ] 여러 거리 실측 데이터 수집 + 검증
 - [ ] 기존 회전전용 `m` 모드는 "빠른 사전 정렬용"으로 남겨둘지, 완전히 교체할지 결정
