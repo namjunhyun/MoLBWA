@@ -44,6 +44,7 @@ import os
 import time
 
 import cv2
+import numpy as np
 import rclpy
 from gaze_hri_msgs.msg import Fixation, GazeTarget
 from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray
@@ -52,10 +53,15 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, Float32, String
 
+from std_msgs.msg import Float64MultiArray
+
 from gaze_hri.hud import Hud
-from gaze_hri.kinematics import ArmGeometry, forward_kinematics
+from gaze_hri.kinematics import (TOPDOWN_CALIB_XY, ArmGeometry,
+                                 forward_kinematics)
 from gaze_hri.panel_render import PanelState, render
-from gaze_hri.table_view import ObjectDetector, TableHomography, open_camera
+from gaze_hri.table_view import (HomographyCalibration, ObjectDetector,
+                                 TableHomography, find_camera,
+                                 hsv_range_from_pixel)
 
 WIN = "MoLBWA gaze pick and place"
 
@@ -80,6 +86,9 @@ class ControlPanel(Node):
         self.declare_parameter("hsv_upper", [12, 255, 255])
         self.declare_parameter("min_area", 400)
         self.declare_parameter("show_arm_tip", True)
+        # 캘리브레이션 (GUI 안에서 k 키로 실행)
+        self.declare_parameter("calib_height", 0.005)
+        self.declare_parameter("ransac_threshold_m", 0.005)
         # 기구학 (팔 끝을 화면에 그릴 때 사용)
         self.declare_parameter("base_height", 0.0563)
         self.declare_parameter("shoulder_offset", 0.0304)
@@ -118,14 +127,23 @@ class ControlPanel(Node):
             self.get_parameter("hsv_lower").value,
             self.get_parameter("hsv_upper").value,
             self.get_parameter("min_area").value)
-        self.cap = open_camera(self.get_parameter("camera_index").value,
-                               self.get_parameter("width").value,
-                               self.get_parameter("height").value)
+        # 카메라 인덱스는 USB 를 다시 꽂으면 바뀐다. 지정한 게 안 열리면 훑는다.
+        self.cap, cam_idx = find_camera(self.get_parameter("camera_index").value,
+                                        self.get_parameter("width").value,
+                                        self.get_parameter("height").value)
+        self.get_logger().info(f"카메라 {cam_idx} 사용")
+
+        # 캘리브레이션 (GUI 안에서 바로 한다 — 카메라를 두 프로그램이 다투지 않도록)
+        self.calib = None
+        self.calib_file = self.get_parameter("homography_file").value
 
         # ---- 통신 ----
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.pub_objects = self.create_publisher(PoseArray, "/objects/poses", 10)
         self.pub_cancel = self.create_publisher(Empty, "/task/cancel", 10)
+        # 캘리브레이션 때 팔을 기준 자세로 보낸다
+        self.pub_joints = self.create_publisher(
+            Float64MultiArray, "/arm/goto_joints", 10)
         self.pub_point = self.pub_valid = None
         if self.source == "mouse":
             self.pub_point = self.create_publisher(PointStamped, "/gaze/point_raw", qos)
@@ -142,6 +160,7 @@ class ControlPanel(Node):
         self.create_subscription(JointState, "/joint_states", self.on_joints, 10)
 
         # ---- 상태 ----
+        self.mode = "run"            # run | calib
         self.frame = None
         self.objects = []
         self.cursor = None
@@ -222,7 +241,18 @@ class ControlPanel(Node):
             return
         if event == cv2.EVENT_MOUSEMOVE:
             self.cursor = (x, y)
-        elif event == cv2.EVENT_LBUTTONDOWN and self.source == "mouse":
+            return
+
+        if event == cv2.EVENT_RBUTTONDOWN:
+            self.pick_color(x, y)
+            return
+
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        if self.mode == "calib":
+            self.calib_click(x, y)
+        elif self.source == "mouse":
             self.held_px = (x, y)
             self.held_until = time.time() + self.hold_time
             xy = self.homography.to_robot(x, y)
@@ -233,7 +263,16 @@ class ControlPanel(Node):
     def handle_key(self, key):
         if key in (ord("q"), 27):
             raise KeyboardInterrupt
-        if key == ord("c"):
+        if key == ord("k"):
+            self.toggle_calibration()
+        elif key == ord("u") and self.mode == "calib":
+            if self.calib.undo():
+                self.goto_calib_pose()
+                self.say("직전 클릭을 취소했습니다", "Undid last click")
+        elif key == ord("c"):
+            if self.mode == "calib":
+                self.toggle_calibration()          # 캘리브 중단
+                return
             self.held_until, self.held_px = 0.0, None
             self.pub_cancel.publish(Empty())
             self.say("취소했습니다", "Cancelled")
@@ -245,6 +284,85 @@ class ControlPanel(Node):
             self.detect_on = not self.detect_on
             self.say(f"물체 검출 {'켬' if self.detect_on else '끔'}",
                      f"Detection {'ON' if self.detect_on else 'OFF'}")
+
+    # ==================================================================
+    # 캘리브레이션 (창 하나에서 바로)
+    # ==================================================================
+    def toggle_calibration(self):
+        if self.mode == "calib":
+            self.mode = "run"
+            self.calib = None
+            self.say("캘리브레이션을 중단했습니다", "Calibration aborted")
+            return
+
+        self.calib = HomographyCalibration(
+            self.geo, table_z=self.table_z,
+            calib_height=float(self.get_parameter("calib_height").value),
+            ransac_threshold_m=float(
+                self.get_parameter("ransac_threshold_m").value),
+            logger=self.get_logger())
+        n = self.calib.build(TOPDOWN_CALIB_XY)
+        if n < 4:
+            self.calib = None
+            self.say(f"도달 가능한 캘리브 지점이 {n}개뿐입니다 — 링크 길이 확인",
+                     f"Only {n} reachable points — check link lengths", 5.0)
+            return
+        self.mode = "calib"
+        self.pub_cancel.publish(Empty())    # 진행 중이던 작업은 정리
+        self.say(f"캘리브레이션 시작 — 그리퍼 끝을 클릭하세요 (0/{n})",
+                 f"Calibration started — click the gripper tip (0/{n})", 4.0)
+        self.goto_calib_pose()
+
+    def goto_calib_pose(self):
+        """현재 캘리브 지점으로 팔을 보낸다. 그리퍼는 살짝 벌려 끝이 잘 보이게."""
+        q = self.calib.current_pose()
+        if q is None:
+            return
+        msg = Float64MultiArray()
+        msg.data = [float(v) for v in q] + [0.0, 0.8]
+        self.pub_joints.publish(msg)
+
+    def calib_click(self, x, y):
+        if not self.calib.add_click(x, y):
+            return
+        if not self.calib.done:
+            self.say(f"{self.calib.index}/{self.calib.total} — 다음 자세로",
+                     f"{self.calib.index}/{self.calib.total} — next pose")
+            self.goto_calib_pose()
+            return
+
+        result, why = self.calib.solve()
+        if result is None:
+            self.say(f"캘리브레이션 실패: {why}", f"Calibration failed: {why}", 6.0)
+            self.mode, self.calib = "run", None
+            return
+        H, err, n = result
+        self.homography.set(H)
+        self.homography.reproj_error_mm = err
+        self.homography.num_points = n
+        self.calib.save(self.calib_file)
+        self.mode, self.calib = "run", None
+        self.say(f"캘리브레이션 완료 — 재투영 {err:.1f}mm. 자로 재서 꼭 확인하세요",
+                 f"Calibration done — reproj {err:.1f}mm. Verify with a ruler", 6.0)
+        self.get_logger().info(
+            f"호모그래피 저장: {self.calib_file} (재투영 {err:.1f}mm, 점 {n}개)\n"
+            "  주의: 재투영 오차는 캘리브 점 자신에 대해서만 맞춘 값입니다. "
+            "테이블 위 여러 지점을 자로 재서 검증하세요.")
+
+    # ==================================================================
+    def pick_color(self, x, y):
+        """우클릭한 자리의 색으로 컵 검출 범위를 잡는다."""
+        if self.frame is None:
+            return
+        lower, upper, (h, s, v) = hsv_range_from_pixel(self.frame, x, y)
+        self.detector.lower = np.array(lower, dtype=np.uint8)
+        self.detector.upper = np.array(upper, dtype=np.uint8)
+        self.detect_on = True
+        self.say(f"컵 색 지정: H{h:.0f} S{s:.0f} V{v:.0f} → {lower}~{upper}",
+                 f"Color set: H{h:.0f} S{s:.0f} V{v:.0f}", 4.0)
+        self.get_logger().info(
+            "컵 색을 잡았습니다. config 에 남기려면 아래를 복사하세요:\n"
+            f"    hsv_lower: {lower}\n    hsv_upper: {upper}")
 
     def say(self, ko, en, seconds=2.5):
         self.notice = self.hud.label(ko, en)
@@ -266,12 +384,17 @@ class ControlPanel(Node):
             inst = 1.0 / dt
             self._fps = 0.9 * self._fps + 0.1 * inst if self._fps else inst
 
-        self.objects = (self.detector.detect(frame, self.homography)
-                        if self.detect_on else [])
-        if self.detect_on and self.homography.ready:
-            self.publish_objects()
-        if self.source == "mouse":
-            self.publish_mouse_point(now)
+        # 캘리브레이션 중에는 파이프라인에 좌표를 흘리지 않는다.
+        # (그리퍼 끝을 클릭하는 동작이 '물체 선택'으로 해석되면 팔이 제멋대로 움직인다)
+        if self.mode == "calib":
+            self.objects = []
+        else:
+            self.objects = (self.detector.detect(frame, self.homography)
+                            if self.detect_on else [])
+            if self.detect_on and self.homography.ready:
+                self.publish_objects()
+            if self.source == "mouse":
+                self.publish_mouse_point(now)
 
         cv2.imshow(WIN, render(frame, self.build_state(now), self.hud,
                                self.homography))
@@ -319,6 +442,11 @@ class ControlPanel(Node):
             px, holding, frac = self.gaze_px, False, 0.0
 
         return PanelState(
+            mode=self.mode,
+            calib_index=self.calib.index if self.calib else 0,
+            calib_total=self.calib.total if self.calib else 0,
+            calib_target=self.calib.current_target() if self.calib else None,
+            calib_pixels=list(self.calib.pixels) if self.calib else [],
             task_state=self.task_state,
             source=self.source,
             objects=self.objects,

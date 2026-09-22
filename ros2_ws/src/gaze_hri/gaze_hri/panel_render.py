@@ -42,6 +42,11 @@ STAGES = [("시선", "Gaze"), ("응시", "Dwell"), ("목표", "Target"), ("로�
 class PanelState:
     """화면에 그릴 것 전부. 노드가 이걸 채워서 넘긴다."""
 
+    mode: str = "run"                 # run | calib
+    calib_index: int = 0
+    calib_total: int = 0
+    calib_target: tuple = None        # 지금 클릭해야 할 지점의 로봇 좌표
+    calib_pixels: list = field(default_factory=list)
     task_state: str = "IDLE"
     source: str = "mouse"
     objects: list = field(default_factory=list)   # [((u,v), (x,y), contour), ...]
@@ -70,10 +75,15 @@ def _is_same(a, b, tol=0.02):
 def render(frame, st, hud, homography):
     """한 프레임을 그려서 캔버스를 돌려준다."""
     view = frame.copy()
-    _draw_objects(view, st, hud)
-    _draw_targets(view, st, hud, homography)
-    _draw_arm_tip(view, st, hud, homography)
-    _draw_pointer(view, st, hud, homography)
+    if st.mode == "calib":
+        _draw_calibration(view, st, hud)
+    else:
+        _draw_objects(view, st, hud)
+        _draw_targets(view, st, hud, homography)
+        _draw_arm_tip(view, st, hud, homography)
+        _draw_pointer(view, st, hud, homography)
+        if not st.calibrated:
+            _draw_needs_calibration(view, hud)
 
     vh, vw = view.shape[:2]
     canvas = np.full((HEADER_H + vh + FOOTER_H, vw + st.sidebar_w, 3), BG, np.uint8)
@@ -134,6 +144,46 @@ def _draw_targets(view, st, hud, homo):
                      H.PLACE, 13, bold=True, anchor="ct")
 
 
+def _draw_calibration(view, st, hud):
+    """캘리브레이션 중 화면. 지금 무엇을 클릭해야 하는지만 또렷하게."""
+    h, w = view.shape[:2]
+    # 이미 찍은 점
+    for i, (u, v) in enumerate(st.calib_pixels, 1):
+        cv2.circle(view, (int(u), int(v)), 5, H.PLACE, -1, cv2.LINE_AA)
+        cv2.circle(view, (int(u), int(v)), 5, (20, 20, 20), 1, cv2.LINE_AA)
+        hud.text(view, (u + 8, v - 8), str(i), H.PLACE, 11)
+
+    n, total = st.calib_index, st.calib_total
+    hud.chip(view, (w / 2, 40),
+             hud.label(f"그리퍼 끝을 클릭하세요   {n}/{total}",
+                       f"Click the gripper tip   {n}/{total}"),
+             H.BUSY, 16, bold=True, anchor="ct", alpha=0.85)
+    if st.calib_target:
+        hud.chip(view, (w / 2, 68),
+                 hud.label(
+                     f"팔이 멈춘 뒤에 누르세요 · 목표 "
+                     f"({st.calib_target[0]:+.3f}, {st.calib_target[1]:+.3f})",
+                     f"Wait until the arm stops · target "
+                     f"({st.calib_target[0]:+.3f}, {st.calib_target[1]:+.3f})"),
+                 H.FG, 12, anchor="ct", alpha=0.72)
+    hud.chip(view, (w / 2, h - 12),
+             hud.label("u 직전 취소   c 캘리브 중단",
+                       "u = undo   c = abort"),
+             H.MUTED, 12, anchor="ct", alpha=0.72)
+
+
+def _draw_needs_calibration(view, hud):
+    """캘리브레이션 전에는 좌표가 아예 안 나오므로 크게 알린다."""
+    h, w = view.shape[:2]
+    hud.chip(view, (w / 2, h / 2 - 10),
+             hud.label("캘리브레이션이 필요합니다", "Calibration required"),
+             H.WARN, 18, bold=True, anchor="ct", alpha=0.85)
+    hud.chip(view, (w / 2, h / 2 + 28),
+             hud.label("k 를 누르면 시작합니다 (팔이 8개 자세를 잡습니다)",
+                       "Press k to start (the arm will strike 8 poses)"),
+             H.FG, 13, anchor="ct", alpha=0.8)
+
+
 def _draw_arm_tip(view, st, hud, homo):
     if st.tcp is None:
         return
@@ -177,6 +227,14 @@ def _draw_pointer(view, st, hud, homo):
 # 헤더 / 푸터
 # ----------------------------------------------------------------------
 def _state_style(st, hud):
+    if st.mode == "calib":
+        return H.BUSY, hud.label("캘리브레이션", "CALIBRATION"), \
+            hud.label(f"{st.calib_index}/{st.calib_total} — 그리퍼 끝을 클릭",
+                      f"{st.calib_index}/{st.calib_total} — click gripper tip")
+    if not st.calibrated:
+        return H.WARN, hud.label("캘리브 필요", "NOT CALIBRATED"), \
+            hud.label("k 를 눌러 캘리브레이션을 시작하세요",
+                      "Press k to calibrate")
     if st.task_state == "IDLE":
         return H.IDLE, hud.label("대기", "IDLE"), \
             hud.label("집을 컵을 보세요", "Look at a cup to pick")
@@ -215,11 +273,16 @@ def _draw_footer(canvas, y, st, hud):
     cv2.line(canvas, (0, y), (canvas.shape[1], y), (44, 42, 40), 1)
     if st.notice:
         hud.text(canvas, (18, y + 7), st.notice, H.BUSY, 13, bold=True)
+    elif st.mode == "calib":
+        hud.text(canvas, (18, y + 8), hud.label(
+            "좌클릭 = 그리퍼 끝 지정   u 직전 취소   c 캘리브 중단   q 종료",
+            "click=gripper tip   u=undo   c=abort   q=quit"), H.MUTED, 12)
     else:
         hud.text(canvas, (18, y + 8), hud.label(
-            "좌클릭 선택   c 취소   space 비상정지   d 검출 전환   q 종료",
-            "click=select   c=cancel   space=E-STOP   d=detect   q=quit"),
-            H.MUTED, 12)
+            "좌클릭 선택   우클릭 컵 색 지정   k 캘리브   c 취소   "
+            "space 비상정지   d 검출   q 종료",
+            "L=select  R=pick color  k=calib  c=cancel  space=E-STOP  "
+            "d=detect  q=quit"), H.MUTED, 12)
 
 
 # ----------------------------------------------------------------------
@@ -382,6 +445,19 @@ def main():
         st.pointer_px = (470, 380)
         st.dwell_progress = 0.7
         st.tcp = (0.22, -0.05, 0.16)
+    elif scenario == "calib":
+        st.mode = "calib"
+        st.calib_total = 8
+        st.calib_index = 3
+        st.calib_target = (0.25, 0.17)
+        st.calib_pixels = [(210, 330), (300, 300), (390, 320)]
+        st.pointer_px = (420, 280)
+        st.objects = []
+    elif scenario == "nocalib":
+        st.calibrated = False
+        st.reproj_error_mm = None
+        st.objects = []
+        st.pointer_px = (300, 300)
     else:                                   # executing
         st.task_state = "EXECUTING"
         st.pick_target = objects[1][1]

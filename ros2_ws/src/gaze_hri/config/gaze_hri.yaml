@@ -135,6 +135,9 @@ control_panel:
     hsv_upper: [12, 255, 255]  # 하한 > 상한 으로 주면 두 구간을 자동으로 합친다
     min_area: 400
     show_arm_tip: true         # 관절각으로 팔 끝 위치를 계산해 화면에 표시
+    # 캘리브레이션 (GUI 에서 k 키). topdown_click 과 같은 값을 쓴다.
+    calib_height: 0.005        # 캘리브 때 그리퍼 끝을 테이블에서 띄울 높이
+    ransac_threshold_m: 0.005  # 오클릭 제외 임계값 [m]. 목표가 미터라 임계도 미터.
 
     base_height: 0.0563
     shoulder_offset: 0.0304
