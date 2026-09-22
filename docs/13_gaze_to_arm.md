@@ -304,7 +304,76 @@ ros2 launch gaze_hri gaze_hri.launch.py source:=udp backend:=feetech
 
 ---
 
-## 8. 남은 결정과 리스크
+## 8. 실기에서 무엇부터 해야 하나
+
+**"빌드하고 클릭하면 컵을 옮긴다"가 아직 아니다.** 순서대로 해야 하고,
+각 단계는 앞 단계가 맞아야 의미가 있다. 상세 절차와 통과 기준은
+`ros2_ws/src/gaze_hri/ROBOT_ONLY_TEST.md`.
+
+### 0. 빌드 — 이걸 아직 아무도 안 해봤다
+
+```bash
+cd ~/창종설/ros2_ws
+colcon build --symlink-install && source install/setup.bash
+ros2 pkg list | grep gaze                       # 두 패키지가 보여야 한다
+ros2 interface show gaze_hri_msgs/msg/GazeTarget   # confidence 필드가 있어야 한다
+```
+
+작성 환경에 `rclpy` C 확장이 없어 **노드를 한 번도 띄워보지 못했다.** 메시지
+정의는 실제 rosidl 파서로, 파라미터·토픽·entry point 정합성은 전수 검사로
+확인했지만, 기동은 여기서 처음 해보는 것이다.
+
+### 1. 하드웨어 — 지금 없는 것
+
+| 필요한 것 | 상태 |
+|---|---|
+| SO-ARM101 + 책상 고정 | 확인 필요 |
+| **탑다운 카메라 + 마운트** | **레포 하드웨어 목록에 없다. 새로 필요** |
+| 시연용 컵 (원통형, 지름 7~8cm, 같은 색) | 필요 |
+| 조명 고정 (색 검출이 조명에 민감) | 필요 |
+
+### 2. 숫자 채우기 — 이게 틀리면 전부 틀린다
+
+1. **링크 길이 실측** → `config/gaze_hri.yaml` 의 `base_height / shoulder_offset
+   / l1 / l2 / l3`. 지금 값은 **추정치다.** URDF 의 joint origin 을 읽거나 자로 잰다.
+   이 값이 틀리면 호모그래피 캘리브레이션(로봇 자신을 자로 쓴다)부터 틀어진다.
+2. **서보 부호·중립** (`servo_signs`, `servo_offsets`) — 반대로 돌면 위험하니
+   속도를 낮추고 손으로 잡을 수 있는 자세에서.
+3. **순기구학 검증** — 계산값과 자로 잰 값이 10mm 이내. 여기를 못 넘기면
+   뒤에서 절대 못 맞춘다.
+
+### 3. 카메라 ↔ 로봇 연결
+
+4. **호모그래피 캘리브레이션** — `robot_only.launch.py mode:=calib backend:=feetech`.
+   로봇이 8개 자세를 잡으면 화면에서 그리퍼 끝을 클릭한다.
+5. **좌표 검증** — 화면 여러 곳을 클릭해 자로 잰 값과 비교. **재투영 오차가
+   작다고 넘어가지 말 것**(2-2 참고).
+6. **컵 색 HSV 튜닝** — `hsv_lower/upper`. GUI 에서 `d` 로 검출을 켜고 컵이
+   전부 잡히는지 본다.
+
+### 4. 모터 없이 흐름 확인
+
+7. `ros2 launch gaze_hri gui.launch.py` (기본 dry_run) — 클릭 → 클릭 →
+   `EXECUTING` 까지 흐르고 관절각이 상식적인지.
+8. `fail_rate:=0.5` 로 재시도·복구 경로 확인.
+
+### 5. 실제 파지
+
+9. `backend:=feetech` 로 첫 동작. 전원 스위치를 손 닿는 곳에, 첫 시도는 컵 없이.
+10. **`grasp_margin` 실측** — 컵 물었을 때와 빈손일 때 `gripper` 값 차이의 절반.
+11. 컵 위치를 바꿔가며 30회, 성공률 기록.
+
+### 6. 안경 연동
+
+12. 융합 루프에 세 줄 추가 (`GazeUdpSender`) → `python src/gaze_udp_sender.py` 로
+    배선만 먼저 확인.
+13. **`T_BW` 캘리브레이션** — `calibrate_world_to_base.launch.py` (전용 런치를
+    쓸 것. 전체 런치로 하면 팔이 캘리브 도중 제멋대로 움직일 수 있다).
+14. `gui.launch.py input:=gaze source:=udp backend:=feetech`.
+
+---
+
+## 9. 남은 결정과 리스크
 
 ### 결정이 필요한 것
 
