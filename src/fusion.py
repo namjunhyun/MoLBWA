@@ -17,7 +17,7 @@ docs/03_fusion.md 체크리스트 1번 — gaze_point_world() 구현 + 합성 �
 import numpy as np
 
 from ocams_calib import RECTIFIED_K as OCAMS_RECTIFIED_K
-from ocams_calib import BASELINE_M as OCAMS_BASELINE_M
+from ocams_calib import DEPTH_BASELINE_M as OCAMS_DEPTH_BASELINE_M
 
 
 def gaze_point_world(u, v, D, K, T_WS):
@@ -107,10 +107,11 @@ if __name__ == "__main__":
                                     p_W_true=np.array([-0.4, 0.9, 2.5]),
                                     T_WS=T_rotated, K=K)
 
-    # 4) 실제 oCamS baseline 스케일 감(느낌 확인용): 12.48cm 베이스라인 기준 시차로 얻는 D
+    # 4) 실제 oCamS SGBM 깊이 스케일 확인: 검증된 유효 baseline 기준 시차로 얻는 D
     #    disparity(px) = fx * baseline / D  ->  D = fx*baseline/disparity
     disparity_px = 20.0
-    D_from_disparity = K[0, 0] * OCAMS_BASELINE_M / disparity_px
-    print(f"[info] baseline={OCAMS_BASELINE_M*100:.2f}cm, disparity={disparity_px}px -> D={D_from_disparity:.3f}m")
+    D_from_disparity = K[0, 0] * OCAMS_DEPTH_BASELINE_M / disparity_px
+    print(f"[info] depth baseline={OCAMS_DEPTH_BASELINE_M*100:.2f}cm, "
+          f"disparity={disparity_px}px -> D={D_from_disparity:.3f}m")
 
     print("\n전체:", "PASS" if all_ok else "FAIL")

@@ -289,7 +289,9 @@ def make_stereo_matcher():
     )
 
 
-def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5):
+def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5,
+             min_valid_ratio=0.7, max_relative_mad=0.08,
+             max_relative_spread=0.2):
     if disparity is None:
         return None, 0
     h, w = disparity.shape
@@ -298,9 +300,14 @@ def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5):
     y1, y2 = max(0, v - radius), min(h, v + radius + 1)
     roi = disparity[y1:y2, x1:x2]
     valid = roi[np.isfinite(roi) & (roi > 0)]
-    if len(valid) < min_valid:
+    required = max(min_valid, int(np.ceil(roi.size * min_valid_ratio)))
+    if len(valid) < required:
         return None, int(len(valid))
     disp = float(np.median(valid))
+    mad = float(np.median(np.abs(valid - disp)))
+    p10, p90 = np.percentile(valid, [10, 90])
+    if (disp <= 0 or mad / disp > max_relative_mad or (p90 - p10) / disp > max_relative_spread):
+        return None, int(len(valid))
     return float(fx * baseline_m / disp), int(len(valid))
 
 
@@ -323,11 +330,8 @@ def main():
                          "캘리브레이션 값을 그대로 씀(근사 아님) — 스테레오 깊이(docs/03)와 "
                          "좌표계를 맞추려면 이 기본값을 그대로 쓸 것")
     ap.add_argument("--baseline-m", type=float, default=None,
-                    help="스테레오 baseline(m) 강제 지정, 진단용. 미지정시 ocams_calib.BASELINE_M "
-                         "(Kalibr 계산값, 실측 아님). 2026-08-29: 실측 baseline(캘리퍼스 12cm)이 "
-                         "8/11 재캘리브레이션 값(10.67cm)과 달라 깊이가 실제보다 짧게 나오는 문제 "
-                         "진단 중 — rectification(R1/R2)은 그대로 두고 이 상수만 바꿔서 baseline만 "
-                         "따로 검증하기 위해 추가.")
+                    help="SGBM 깊이 baseline(m) 강제 지정, 진단용. 미지정시 0.5/1.05/1.5m 실측으로 "
+                         "검증한 ocams_calib.DEPTH_BASELINE_M을 사용한다.")
     ap.add_argument("--smooth", type=float, default=0.25,
                     help="시선벡터 EMA 계수(0=고정,1=생값). 7/2 노트의 프레임간 튐(std0.18) 완화")
     ap.add_argument("--flip", action="store_true", help="눈 영상 상하반전")
@@ -346,12 +350,13 @@ def main():
                          "Rerun 쪽 영상만 덜 자주 보냄")
     args = ap.parse_args()
 
-    baseline_m = args.baseline_m if args.baseline_m is not None else ocams_calib.BASELINE_M
+    baseline_m = args.baseline_m if args.baseline_m is not None else ocams_calib.DEPTH_BASELINE_M
     if args.baseline_m is not None:
-        print(f"[baseline] 강제 지정: {baseline_m:.4f}m (캘리브레이션값 {ocams_calib.BASELINE_M:.4f}m 대신)")
+        print(f"[baseline] 강제 지정: {baseline_m:.4f}m "
+              f"(검증 기본값 {ocams_calib.DEPTH_BASELINE_M:.4f}m 대신)")
 
     if args.enable_experimental_depth:
-        print("[경고] 스테레오 깊이는 현재 검증 실패 상태입니다. 로봇팔 제어에 사용하지 마세요.")
+        print("[경고] SGBM 거리 스케일은 검증됐지만 거리별 시선 affine 보간은 아직 실험 기능입니다.")
 
     if rr is None and not args.no_rerun:
         print("[rerun] 패키지 없음 — cv2 창만 사용")

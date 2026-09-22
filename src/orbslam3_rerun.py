@@ -172,7 +172,7 @@ class OrbSlam3RerunBridge(Node):
         disp = self.latest_disparity
         depth_m = np.zeros_like(disp, dtype=np.float32)
         valid = disp > 0
-        depth_m[valid] = K[0, 0] * ocams_calib.BASELINE_M / disp[valid]
+        depth_m[valid] = K[0, 0] * ocams_calib.DEPTH_BASELINE_M / disp[valid]
         depth_m[(depth_m < 0.1) | (depth_m > TSDF_DEPTH_TRUNC_M)] = 0.0
 
         color = np.repeat(self.latest_left[:, :, None], 3, axis=2)  # 흑백 -> 의사-RGB 텍스처
@@ -245,7 +245,8 @@ class OrbSlam3RerunBridge(Node):
             u = K[0, 0] * self.latest_gaze_dir[0] / gz + K[0, 2]
             v = -K[1, 1] * self.latest_gaze_dir[1] / gz + K[1, 2]
             D, n_valid = gos.depth_at(
-                self.latest_disparity, u, v, K[0, 0], ocams_calib.BASELINE_M, radius=5)
+                self.latest_disparity, u, v, K[0, 0],
+                ocams_calib.DEPTH_BASELINE_M, radius=5)
             if D is not None and 0.1 < D < 5.0:
                 p_W, origin, _ray_dir = fusion.gaze_point_world(u, v, D, K, T_WS)
 
