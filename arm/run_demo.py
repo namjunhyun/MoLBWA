@@ -1,0 +1,181 @@
+#!/usr/bin/env python
+"""메인 루프 — MoLBWA 시선 파이프라인 + SO-ARM101.
+
+MoLBWA 쪽에서 가져와야 하는 것 (아래 GazeSource 를 채우면 된다):
+  * scene 좌영상 (rectified BGR)   <- src/ocams_calib.py 의 rectify map
+  * 시선점 (u,v)                   <- src/gaze_on_scene.py
+  * depth [m]                      <- StereoSGBM 또는 RealSense
+  * T_w_hc, map_id, tracking_ok    <- /orbslam3/pose (+ map_id 퍼블리시 패치 필요)
+
+실행:
+  python run_demo.py --dry-run          # 팔/카메라 없이 로직만
+  python run_demo.py --no-arm           # 인식+anchor 만, 팔은 안 움직임
+  python run_demo.py                    # 전체
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import time
+
+import numpy as np
+import yaml
+
+from anchor import AnchorState, AnchorTracker, TagBundleDetector
+from arm import Arm
+from perception import CupDetector, GazeDwell
+from task import DrinkTask
+
+log = logging.getLogger("molbwa")
+
+# oCamS rectified intrinsics — src/ocams_calib.py 의 RECTIFIED_K 와 일치시킬 것
+RECTIFIED_K = np.array([[433.55, 0.0, 470.35],
+                        [0.0, 433.55, 236.49],
+                        [0.0, 0.0, 1.0]])
+
+
+class GazeSource:
+    """MoLBWA 파이프라인 어댑터.
+
+    ★ 여기가 유일한 통합 지점이다. 아래 두 메서드를 MoLBWA 코드로 채우면 끝.
+    """
+
+    def __init__(self, use_ros: bool = True):
+        self.use_ros = use_ros
+        self._node = None
+        if use_ros:
+            self._init_ros()
+
+    def _init_ros(self):
+        import rclpy
+        from geometry_msgs.msg import PoseStamped
+        from rclpy.node import Node
+        from std_msgs.msg import Int32
+
+        if not rclpy.ok():
+            rclpy.init()
+
+        class _Sub(Node):
+            def __init__(self):
+                super().__init__("molbwa_arm_bridge")
+                self.T_w_hc = None
+                self.map_id = 0
+                self.ok = False
+                self.create_subscription(PoseStamped, "/orbslam3/pose", self._pose, 10)
+                # ★ ORB-SLAM3 패치로 추가해야 하는 토픽. patches/orbslam3_ros2.patch 참고.
+                self.create_subscription(Int32, "/orbslam3/map_id", self._map, 10)
+
+            def _pose(self, msg):
+                from scipy.spatial.transform import Rotation as R
+                p, q = msg.pose.position, msg.pose.orientation
+                T = np.eye(4)
+                T[:3, :3] = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+                T[:3, 3] = [p.x, p.y, p.z]
+                self.T_w_hc, self.ok = T, True
+
+            def _map(self, msg):
+                self.map_id = int(msg.data)
+
+        self._rclpy = rclpy
+        self._node = _Sub()
+
+    def slam(self):
+        """-> (T_w_hc, map_id, tracking_ok)"""
+        if self._node is None:
+            return None, 0, False
+        self._rclpy.spin_once(self._node, timeout_sec=0.0)
+        return self._node.T_w_hc, self._node.map_id, self._node.ok
+
+    def frame(self):
+        """-> (scene_bgr, gaze_uv or None, depth_m or None)
+
+        TODO(MoLBWA): src/gaze_on_scene.py 의 루프를 여기에 연결.
+        지금은 통합 전이라 None 을 돌려준다.
+        """
+        return None, None, None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--dry-run", action="store_true", help="팔 하드웨어 없이")
+    ap.add_argument("--no-arm", action="store_true", help="팔은 절대 안 움직임 (인식만)")
+    ap.add_argument("--no-ros", action="store_true", help="ROS2 없이 (SLAM 입력 없음)")
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    cfg = yaml.safe_load(open(args.config))
+
+    anchor = AnchorTracker(**{k: cfg["anchor"][k] for k in
+                              ("stale_after_s", "drift_warn_m", "drift_max_m", "latch_ema_alpha")})
+    src = GazeSource(use_ros=not args.no_ros)
+    tags = TagBundleDetector(cfg, RECTIFIED_K)
+    cups_det = CupDetector(cfg)
+    dwell = GazeDwell(cfg["gaze"]["dwell_s"], cfg["gaze"]["dwell_release_s"])
+
+    arm = Arm(cfg, dry_run=args.dry_run)
+    arm.connect()
+    arm.home()
+    task = DrinkTask(cfg, arm, anchor)
+
+    log.info("시작. 팔 쪽 태그를 한 번 봐 주세요.")
+    last_state = None
+    try:
+        while True:
+            T_w_hc, map_id, ok = src.slam()
+            if T_w_hc is not None:
+                anchor.update_slam(T_w_hc, map_id, ok)
+
+            frame, gaze_uv, depth = src.frame()
+            if frame is None:
+                time.sleep(0.03)
+                continue
+
+            import cv2
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            T_hc_ab = tags.detect(gray)
+            if T_hc_ab is not None:
+                anchor.update_tag(T_hc_ab)
+
+            if anchor.state is not last_state:
+                log.info("anchor: %s (drift %.1fcm)", anchor.state.value,
+                         anchor.last_drift_m * 100 if anchor.last_drift_m == anchor.last_drift_m else 0)
+                last_state = anchor.state
+
+            cups = cups_det.detect(frame, depth, RECTIFIED_K)
+            sel = dwell.update(cups, gaze_uv)
+            if sel is None:
+                continue
+
+            cup = next((c for c in cups if c.idx == sel), None)
+            if cup is None or cup.p_cam is None:
+                log.warning("컵 %d 의 depth 를 못 얻음 — 선택 무시", sel)
+                dwell.reset()
+                continue
+
+            p_ab = anchor.point_headcam_to_armbase(cup.p_cam)
+            if p_ab is None:
+                log.warning("anchor 미확보 — 팔 쪽 태그를 봐 주세요")
+                dwell.reset()
+                continue
+
+            log.info("컵 %d -> armbase %s", sel, np.round(p_ab, 3).tolist())
+            if args.no_arm:
+                dwell.reset()
+                continue
+
+            stage = task.run(p_ab)
+            log.info("시퀀스 종료: %s", stage.value)
+            dwell.reset()
+
+    except KeyboardInterrupt:
+        log.info("사용자 중단")
+        task.abort()
+    finally:
+        arm.disconnect()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
