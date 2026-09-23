@@ -154,6 +154,7 @@ class TestSo101Driver(unittest.TestCase):
         f = FakeServos()
         bus = make_bus(f)
         bus.enable()
+        f.follow = False                         # 쓰기가 가짜 위치를 덮어쓰지 않게
         f.reg[4][56] = 60000
         with self.assertRaises(d.SafetyStop):    # RuntimeError 로 새면 hold 없이 끝난다
             bus.write_ticks([2100] * 6)
