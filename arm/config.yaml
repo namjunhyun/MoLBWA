@@ -50,7 +50,7 @@ anchor:
   tag_family: tag36h11
   # ★ 태그 한 변 [m]. 3cm 는 1m 거리에서 14px 밖에 안 돼 코너 잡기가 불안정하다.
   # 5~6cm 권장 (0.7m 에서 42px, 1.0m 에서 29px). MEASURE: 검은 테두리 바깥 한 변.
-  tag_size_m: 0.060
+  tag_size_m: 0.056                 # 2026-09-23 실측 (인쇄 시 93% 축소됨, 원본 60mm)
 
   # ★ 번들은 반드시 **비평면**으로 붙일 것 (2026-08-19).
   # 4장을 같은 평면(예전처럼 전부 x=-0.060)에 붙이면 태그판 기준 거울 반사된 자세가
@@ -76,7 +76,8 @@ anchor:
 
   max_reproj_px: 3.0                # PnP 재투영 오차 상한. 넘으면 그 관측은 버린다.
 
-  # 태그 직결(run_demo.py --tag-direct, 2026-09-23~). 아래 latch/stale/drift 는 SLAM 경로 전용.
+  # 태그 직결(run_demo.py --tag-direct, 2026-09-23~). 블록 아래 latch_ema/stale/drift 는
+  # SLAM 경로 전용이고, min_tags_for_latch 는 두 경로 공통(태그 검출기 설정).
   direct:
     min_consecutive: 3              # 연속 이만큼 검출돼야 유효 (한 프레임짜리 오검출 거름)
     max_jump_m: 0.05                # 프레임 간 이보다 튀면 연속 카운트 초기화 (다른 PnP 해로 넘어간 것)
