@@ -106,5 +106,39 @@ class TestSo101Driver(unittest.TestCase):
             bus.check()
 
 
+class SdkShapedHandler:
+    """scservo_sdk protocol_packet_handler 와 **같은 반환 형식**:
+    read*TxRx -> (data, result, error), write*TxRx -> (result, error).
+    make_bus 는 _r/_w 를 통째로 갈아끼워서 이 형식 차이를 못 잡았다 (2026-09-23 실기에서
+    쓰기마다 'not enough values to unpack' 이 났다)."""
+
+    def __init__(self, fake):
+        self.f = fake
+
+    def read1ByteTxRx(self, port, sid, addr):
+        return self.f.read(sid, addr), 0, 0
+
+    read2ByteTxRx = read1ByteTxRx
+
+    def write1ByteTxRx(self, port, sid, addr, val):
+        self.f.write(sid, addr, val)
+        return 0, 0
+
+    write2ByteTxRx = write1ByteTxRx
+
+
+class TestSdkShapes(unittest.TestCase):
+    def test_real_r_w_with_sdk_return_shapes(self):
+        f = FakeServos()
+        bus = make_bus(f)
+        del bus._r, bus._w                       # 진짜 메서드를 쓴다
+        bus.ph, bus.port, bus._ok = SdkShapedHandler(f), None, 0
+        bus.enable()                             # 쓰기 여러 번 — 예외 없어야 한다
+        bus.write_ticks([2100] * 6)
+        self.assertEqual(f.reg[3][42], 2100)
+        bus.relax()
+        self.assertTrue(all(f.reg[s][40] == 0 for s in range(1, 7)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

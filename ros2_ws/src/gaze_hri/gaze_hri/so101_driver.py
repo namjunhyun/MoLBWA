@@ -125,7 +125,7 @@ class So101Bus:
         addr, n = reg
         assert addr >= 40, "EEPROM 쓰기 금지"          # 40 미만은 EEPROM 영역
         fn = self.ph.write1ByteTxRx if n == 1 else self.ph.write2ByteTxRx
-        _, res, _ = fn(self.port, sid, addr, int(val))
+        res, _ = fn(self.port, sid, addr, int(val))     # 쓰기는 (result, error) 2개다
         if res != self._ok:
             raise RuntimeError(f"ID{sid} 쓰기 실패 (addr {addr})")
 
