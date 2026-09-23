@@ -91,6 +91,27 @@ def cup_position_on_table(cup: "Cup", T_hc_ab: np.ndarray, table_z: float,
     return p_hc + plane_normal_hc * cup_center_height_m
 
 
+def gaze_ray_in_base(gaze_uv, K: np.ndarray, T_hc_ab: np.ndarray):
+    """시선 픽셀 -> armbase(base_link) 좌표의 광선 (원점 = 헤드캠 위치, 단위 방향).
+
+    T_hc_ab : p_hc = T_hc_ab @ p_ab (태그 검출 결과, 이번 프레임 것)
+    """
+    T_ab_hc = np.linalg.inv(T_hc_ab)
+    d_hc = np.linalg.inv(K) @ np.array([gaze_uv[0], gaze_uv[1], 1.0])
+    d_ab = T_ab_hc[:3, :3] @ d_hc
+    return T_ab_hc[:3, 3].copy(), d_ab / np.linalg.norm(d_ab)
+
+
+def ray_hit_height(origin, direction, z: float, max_range_m: float = 3.0):
+    """광선이 armbase 높이 z 평면(수평)을 뚫는 점. 평행/뒤쪽/너무 멀면 None."""
+    if abs(direction[2]) < 1e-6:
+        return None
+    t = (z - origin[2]) / direction[2]
+    if not (0.05 < t < max_range_m):
+        return None
+    return origin + t * direction
+
+
 def robust_depth(depth_m: np.ndarray, u: float, v: float, patch: int = 9,
                  mask: np.ndarray | None = None) -> float | None:
     """마스크/패치 안의 유효 depth median. 흰 종이컵은 구멍이 뚫리므로 median 필수."""

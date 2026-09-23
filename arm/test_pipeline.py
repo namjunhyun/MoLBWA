@@ -14,6 +14,7 @@ ultralytics / pupil_apriltags / rclpy / lerobot 는 필요 없다.
   5. depth 없이 테이블 평면 교차로 컵 위치 복원
   6. 검출이 한 프레임 빠져도 dwell 이 같은 컵을 유지하는가
   7. (2026-09-23) 태그 직결 유효성 정책 + 시선 픽셀 UDP 왕복
+  8. (2026-09-23) gaze_tag_bridge: 시선 픽셀 -> base_link 광선
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "src")))
 
 from anchor import AnchorState, AnchorTracker, TagDirectAnchor, build_bundle_obj_pts  # noqa: E402
 from kinematics import ArmModel, IKError                        # noqa: E402
-from perception import Cup, GazeDwell, cup_position_on_table    # noqa: E402
+from perception import (Cup, GazeDwell, cup_position_on_table,  # noqa: E402
+                        gaze_ray_in_base, ray_hit_height)
 from sim_source import SimSource, _euler, _rt                   # noqa: E402
 
 CFG = yaml.safe_load(open(os.path.join(HERE, "config.yaml")))
@@ -253,6 +255,25 @@ def test_tag_direct():
           f"{got} / {got_invalid} / {got_old}")
 
 
+# ---------------------------------------------------------------- 8. 시선 광선 (gaze_hri 브리지)
+def test_gaze_ray_bridge():
+    from ocams_calib import RECTIFIED_K as K
+    sim = SimSource(CFG, K)
+    cam_pos_true = sim.T_ab_hc[:3, 3]
+    errs, origin_err = [], 0.0
+    for c in sim.cups_true_ab:                 # 컵 중심을 보는 시선 픽셀
+        uv, _ = sim._project_ab(c)
+        o, d = gaze_ray_in_base(uv, K, sim.T_hc_ab)
+        origin_err = max(origin_err, float(np.linalg.norm(o - cam_pos_true)))
+        p = ray_hit_height(o, d, float(c[2]))
+        errs.append(float(np.linalg.norm(p - c)))
+    check("브리지: 시선 광선이 컵 중심 높이에서 컵을 뚫음", max(errs) < 1e-9,
+          f"최대오차 {max(errs)*1000:.4f}mm, 광선 원점 = 헤드캠 위치 오차 {origin_err*1000:.4f}mm")
+    # 광선이 위를 향하면(테이블을 안 보면) 교점이 없어야 한다
+    check("브리지: 위를 향한 광선은 교점 없음",
+          ray_hit_height(np.array([0.5, 0, 0.3]), np.array([-1.0, 0, 0.2]), 0.0) is None)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     test_intrinsics()
@@ -262,6 +283,7 @@ if __name__ == "__main__":
     test_table_plane()
     test_dwell_robustness()
     test_tag_direct()
+    test_gaze_ray_bridge()
     print("=" * 70)
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
     print(f"{len(RESULTS) - n_fail}/{len(RESULTS)} PASS")

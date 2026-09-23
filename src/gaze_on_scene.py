@@ -892,6 +892,10 @@ def main():
 
     try:
         while True:
+            # rclpy 는 SIGTERM 을 가로채 컨텍스트만 내린다. 안 보면 kill 로 안 죽는다.
+            if ros_src is not None and not ros_src._rclpy.ok():
+                print("[ros] 종료 신호 — 루프 종료")
+                break
             reconnect_eye()
             reconnect_scene()
 

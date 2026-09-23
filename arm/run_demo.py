@@ -143,7 +143,14 @@ class GazeSource:
         if self.tag_direct:
             self._node.enable_scene(self.scene_topic)
             log.info("씬 구독: %s", self.scene_topic)
-        self._thread = threading.Thread(target=rclpy.spin, args=(self._node,), daemon=True)
+        def _spin():
+            from rclpy.executors import ExternalShutdownException
+            try:
+                rclpy.spin(self._node)
+            except ExternalShutdownException:
+                pass            # SIGTERM/SIGINT 로 컨텍스트가 내려간 것 — 정상 종료
+
+        self._thread = threading.Thread(target=_spin, daemon=True)
         self._thread.start()
         log.info("ROS2 브릿지 시작 (spin 스레드 분리)")
 
@@ -176,10 +183,15 @@ class GazeSource:
         self._last_seq = got[1]
         return got[0], self._gaze.latest(), None
 
+    def ok(self) -> bool:
+        """rclpy 는 SIGTERM/SIGINT 를 가로채 컨텍스트만 내리고 프로세스는 살려 둔다.
+        루프가 이걸 안 보면 kill 로 안 죽는다 (2026-09-23 실측)."""
+        return self._node is None or self._rclpy.ok()
+
     def shutdown(self):
         if self._gaze is not None:
             self._gaze.close()
-        if self._node is not None:
+        if self._node is not None and self._rclpy.ok():   # SIGTERM 이면 이미 내려가 있다
             self._rclpy.shutdown()
 
 
@@ -259,7 +271,7 @@ def main():
     log.info("시작. 팔 쪽 태그를 한 번 봐 주세요.")
     last_state = None
     try:
-        while True:
+        while getattr(src, "ok", lambda: True)():
             refresh_slam()
 
             frame, gaze_uv, depth = src.frame()
