@@ -53,6 +53,7 @@ import ocams_calib
 import eye_scene_extrinsic
 import fusion
 from gaze_udp_sender import GazeUdpSender
+from gaze_px_udp import GazePixelSender
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "external", "EyeTracker", "3DTracker")))
@@ -650,6 +651,10 @@ def main():
                     help="SLAM 헤드 포즈 토픽 (PoseStamped, frame=map)")
     ap.add_argument("--pose-stale-sec", type=float, default=0.3,
                     help="이 시간 동안 포즈가 안 오면 추적 상실로 보고 송신을 막는다")
+    ap.add_argument("--send-gaze-px", action="store_true",
+                    help="시선 픽셀 (u,v) 를 arm/run_demo.py --tag-direct 로 UDP 송신 (SLAM 불필요)")
+    ap.add_argument("--gaze-px-host", default="127.0.0.1")
+    ap.add_argument("--gaze-px-port", type=int, default=55056)
     ap.add_argument("--no-rerun", action="store_true", help="Rerun 로깅 끄기 (cv2 창만 사용)")
     ap.add_argument("--restore-eye-model", action="store_true",
                     help="캘리브 파일에 저장된 안구 중심을 복원하고 고정한다. 안경을 벗지 않고 "
@@ -706,6 +711,11 @@ def main():
         except (OSError, RuntimeError) as e:
             scene_cap = None
             print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
+
+    px_sender = None
+    if args.send_gaze_px:
+        px_sender = GazePixelSender(args.gaze_px_host, args.gaze_px_port)
+        print(f"[gaze-px] 시선 픽셀 송신: {args.gaze_px_host}:{args.gaze_px_port}")
 
     udp_sender = None
     if args.send_udp:
@@ -1104,6 +1114,14 @@ def main():
                         v if gaze_valid else None, latest_disparity, baseline_m,
                         latest_depth_m, args.scene_flip, SW, SH)
 
+                if px_sender is not None:
+                    if gaze_valid:
+                        # --scene-flip 은 표시용. 팔 쪽은 뒤집지 않은 /camera/left 를 본다.
+                        pu, pv = (SW - 1 - u, SH - 1 - v) if args.scene_flip else (u, v)
+                        px_sender.send(pu, pv, valid=True)
+                    else:
+                        px_sender.send(0, 0, valid=False)
+
                 if gaze_valid:
                     cv2.circle(scene, (u, v), 28, (0, 255, 0), 3)
                     cv2.drawMarker(scene, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
@@ -1124,6 +1142,8 @@ def main():
                     status = "CALIBRATED AFFINE" if gaze_affine is not None else "CALIBRATED R"
                 color = (0, 255, 0)
             else:
+                if px_sender is not None:
+                    px_sender.send(0, 0, valid=False)
                 if udp_sender is not None:
                     # 캘리브 전이거나 동공을 놓친 상태. 무소식보다 "지금은 못 믿는다"를
                     # 명시적으로 보내야 로봇팔 쪽이 마지막 유효점을 붙들지 않는다.
@@ -1274,6 +1294,9 @@ def main():
                 print(f"[mirror] {'x' if i == 0 else 'y'} 반전 -> {sign[i]:+.0f} "
                       f"(캘리브 리셋됨, 다시 'c' 또는 'm'+클릭)")
     finally:
+        if px_sender is not None:
+            px_sender.send(0, 0, valid=False)     # 끊길 때 옛 시선을 붙들지 않게
+            px_sender.close()
         if udp_sender is not None:
             # 마지막 한 발은 valid=False. 뷰어를 끄면 로봇팔이 옛 좌표를 붙들고
             # 그리로 움직이려 할 수 있다 — 끊길 때 명시적으로 무효화한다.

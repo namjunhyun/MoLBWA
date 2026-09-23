@@ -7,7 +7,14 @@ MoLBWA 쪽에서 가져와야 하는 것 (아래 GazeSource 를 채우면 된다
   * depth [m] (없으면 테이블 평면 교차로 대체)
   * T_w_hc, map_id, tracking_ok    <- /orbslam3/pose (+ map_id 퍼블리시 패치 필요)
 
+★ 2026-09-23: SLAM 을 버리고 태그 직결(--tag-direct)로 간다. 이 모드에서는
+  * 씬 좌영상은 /camera/left/compressed 를 직접 구독 (Pi 가 이미 rectify)
+  * 시선 픽셀은 gaze_on_scene.py --send-gaze-px 가 UDP 55056 으로 보낸다
+  * T_hc_ab 는 매 프레임 태그에서 바로 (anchor.TagDirectAnchor). SLAM 입력 없음.
+
 실행:
+  python run_demo.py --sim --tag-direct # 태그 직결 경로를 합성 장면으로 검증
+  python run_demo.py --tag-direct --no-arm  # 실카메라 + 시선, 팔은 안 움직임
   python run_demo.py --sim              # 하드웨어 0개. 합성 장면으로 전 구간 검증
   python run_demo.py --dry-run --no-ros # 팔/카메라 없이 로직만
   python run_demo.py --no-arm           # 인식+anchor 만, 팔은 안 움직임
@@ -26,7 +33,7 @@ import time
 import numpy as np
 import yaml
 
-from anchor import AnchorState, AnchorTracker, TagBundleDetector
+from anchor import AnchorState, AnchorTracker, TagBundleDetector, TagDirectAnchor
 from arm import Arm
 from perception import CupDetector, GazeDwell, cup_position_on_table
 from task import DrinkTask
@@ -59,11 +66,21 @@ class GazeSource:
      멈춰 있었고 task.py 의 안전 게이트가 낡은 데이터를 검사하고 있었다.)
     """
 
-    def __init__(self, use_ros: bool = True, pose_timeout_s: float = 0.5):
+    def __init__(self, use_ros: bool = True, pose_timeout_s: float = 0.5,
+                 tag_direct: bool = False, scene_topic: str = "/camera/left/compressed",
+                 gaze_px_port: int = 55056):
         self.use_ros = use_ros
         self.pose_timeout_s = pose_timeout_s
+        self.tag_direct = tag_direct
+        self.scene_topic = scene_topic
         self._node = None
         self._thread = None
+        self._gaze = None
+        self._last_seq = -1
+        if tag_direct:
+            from gaze_px_udp import GazePixelReceiver
+            self._gaze = GazePixelReceiver(port=gaze_px_port)
+            log.info("시선 픽셀 UDP 수신 대기: %d", gaze_px_port)
         if use_ros:
             self._init_ros()
 
@@ -86,6 +103,26 @@ class GazeSource:
                 self.create_subscription(PoseStamped, "/orbslam3/pose", self._pose, 10)
                 # ★ ORB-SLAM3 패치로 추가해야 하는 토픽. patches/orbslam3_ros2.patch 참고.
                 self.create_subscription(Int32, "/orbslam3/map_id", self._map, 10)
+                self.scene = None          # (bgr, seq)
+                self._seq = 0
+
+            def enable_scene(self, topic):
+                from rclpy.qos import QoSProfile, ReliabilityPolicy
+                from sensor_msgs.msg import CompressedImage
+                # BEST_EFFORT + depth 1: 밀린 프레임보다 최신 프레임 (gaze_on_scene 과 같은 정책)
+                qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+                self.create_subscription(CompressedImage, topic, self._scene, qos)
+
+            def _scene(self, msg):
+                import cv2
+                img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    return
+                if img.ndim == 2:
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                with self.lock:
+                    self._seq += 1
+                    self.scene = (img, self._seq)
 
             def _pose(self, msg):
                 from scipy.spatial.transform import Rotation as R
@@ -103,6 +140,9 @@ class GazeSource:
 
         self._rclpy = rclpy
         self._node = _Sub()
+        if self.tag_direct:
+            self._node.enable_scene(self.scene_topic)
+            log.info("씬 구독: %s", self.scene_topic)
         self._thread = threading.Thread(target=rclpy.spin, args=(self._node,), daemon=True)
         self._thread.start()
         log.info("ROS2 브릿지 시작 (spin 스레드 분리)")
@@ -123,20 +163,33 @@ class GazeSource:
     def frame(self):
         """-> (scene_bgr, gaze_uv or None, depth_m or None)
 
-        TODO(MoLBWA): src/gaze_on_scene.py 의 루프를 여기에 연결.
-        지금은 통합 전이라 None 을 돌려준다. --sim 으로 전 구간 검증은 가능하다.
+        태그 직결 모드: 씬은 ROS 토픽, 시선은 UDP. depth 는 안 쓴다(테이블 평면 교차).
+        ★ 새 프레임일 때만 영상을 준다. 같은 프레임을 두 번 넘기면 TagDirectAnchor 의
+        "연속 N프레임 검출" 이 같은 관측을 두 번 세게 된다.
         """
-        return None, None, None
+        if not self.tag_direct or self._node is None:
+            return None, None, None
+        with self._node.lock:
+            got = self._node.scene
+        if got is None or got[1] == self._last_seq:
+            return None, None, None
+        self._last_seq = got[1]
+        return got[0], self._gaze.latest(), None
 
     def shutdown(self):
+        if self._gaze is not None:
+            self._gaze.close()
         if self._node is not None:
             self._rclpy.shutdown()
 
 
 def build_pipeline(cfg, K, args):
     """anchor / 태그검출기 / 컵검출기 / dwell 을 만든다."""
-    anchor = AnchorTracker(**{k: cfg["anchor"][k] for k in
-                              ("stale_after_s", "drift_warn_m", "drift_max_m", "latch_ema_alpha")})
+    if args.tag_direct:
+        anchor = TagDirectAnchor(**cfg["anchor"].get("direct", {}))
+    else:
+        anchor = AnchorTracker(**{k: cfg["anchor"][k] for k in
+                                  ("stale_after_s", "drift_warn_m", "drift_max_m", "latch_ema_alpha")})
 
     # 무거운 서드파티(ultralytics / pupil_apriltags)는 없으면 없는 대로 간다.
     # 예전엔 여기서 바로 ModuleNotFoundError 로 죽어서, README 가 "바로 된다"고 적은
@@ -164,6 +217,10 @@ def main():
     ap.add_argument("--no-ros", action="store_true", help="ROS2 없이 (SLAM 입력 없음)")
     ap.add_argument("--sim", action="store_true",
                     help="하드웨어 0개. 합성 시선/태그/컵으로 전 구간 검증 (--dry-run --no-ros 포함)")
+    ap.add_argument("--tag-direct", action="store_true",
+                    help="SLAM 없이 매 프레임 태그로 T_hc_ab (2026-09-23 기본 경로)")
+    ap.add_argument("--scene-topic", default="/camera/left/compressed")
+    ap.add_argument("--gaze-px-port", type=int, default=55056)
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -182,7 +239,8 @@ def main():
         from sim_source import SimSource
         src = SimSource(cfg, K)
     else:
-        src = GazeSource(use_ros=not args.no_ros)
+        src = GazeSource(use_ros=not args.no_ros, tag_direct=args.tag_direct,
+                         scene_topic=args.scene_topic, gaze_px_port=args.gaze_px_port)
 
     arm = Arm(cfg, dry_run=args.dry_run)
     arm.connect()
@@ -190,6 +248,8 @@ def main():
 
     def refresh_slam():
         """★ 팔이 움직이는 도중에도 게이트가 최신 SLAM 상태를 보게 한다."""
+        if args.tag_direct:
+            return                  # SLAM 입력 없음. 게이트는 commit() 으로 연다.
         T_w_hc, map_id, ok = src.slam()
         if T_w_hc is not None:
             anchor.update_slam(T_w_hc, map_id, ok)
@@ -219,10 +279,15 @@ def main():
                     cups = cups_det.detect(frame, depth, K)
             if T_hc_ab is not None:
                 anchor.update_tag(T_hc_ab)
+            elif args.tag_direct:
+                anchor.miss()        # 이번 프레임엔 유효한 T_hc_ab 가 없다
 
             if anchor.state is not last_state:
-                drift_cm = anchor.last_drift_m * 100 if np.isfinite(anchor.last_drift_m) else 0.0
-                log.info("anchor: %s (drift %.1fcm)", anchor.state.value, drift_cm)
+                if args.tag_direct:
+                    log.info("anchor: %s", anchor.state.value)
+                else:
+                    drift_cm = anchor.last_drift_m * 100 if np.isfinite(anchor.last_drift_m) else 0.0
+                    log.info("anchor: %s (drift %.1fcm)", anchor.state.value, drift_cm)
                 last_state = anchor.state
 
             # depth 가 없어도 컵이 테이블 위에 있다는 사실만으로 3D 위치가 나온다.
@@ -252,7 +317,13 @@ def main():
                 dwell.reset()
                 continue
 
-            stage = task.run(p_ab)
+            if args.tag_direct:
+                anchor.commit()      # 이번 프레임의 유효 관측으로 확정된 좌표다
+            try:
+                stage = task.run(p_ab)
+            finally:
+                if args.tag_direct:
+                    anchor.release()
             log.info("시퀀스 종료: %s", stage.value)
             dwell.reset()
             if args.sim:

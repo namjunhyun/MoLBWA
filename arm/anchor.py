@@ -280,3 +280,78 @@ class TagBundleDetector:
 
         R, _ = self.cv2.Rodrigues(rvec)
         return _rt(R, tvec)   # T_hc_ab
+
+
+class TagDirectAnchor:
+    """SLAM 없이 태그 관측만으로 T_hc_ab 를 준다 (2026-09-23 SLAM 폐기 후).
+
+    AnchorTracker 와 같은 출력 인터페이스(state / T_headcam_to_armbase /
+    point_headcam_to_armbase / can_execute_grasp)라 run_demo·task 가 그대로 쓴다.
+
+    유효성 정책 — AnchorTracker 의 latch/drift 대신:
+      * **같은 프레임**에서 검출된 관측만 쓴다. 헤드캠은 사람 머리에 달려 있어서
+        T_hc_ab 가 고개를 돌리는 즉시 바뀐다. 한 프레임 전 값에 이번 프레임의 컵 픽셀을
+        섞으면 그만큼 틀린다. 그래서 매 프레임 update_tag() 나 miss() 중 하나를 부른다.
+      * 연속 min_consecutive 프레임 검출돼야 ANCHORED. 한 프레임짜리 오검출을 거른다.
+      * 프레임 간 위치가 max_jump_m 넘게 튀면 연속 카운트를 새로 시작한다. 33ms 에
+        5cm = 1.5m/s 로, 머리 움직임으로는 나오기 어렵다 -> PnP 가 다른 해로 넘어간 것.
+
+    팔 동작 중 게이트(can_execute_grasp)는 "선택 시점에 유효한 관측으로 계산했는가"만
+    본다. 컵 좌표가 armbase 로 확정된 뒤의 팔 동작은 머리 자세와 무관하다 — 컵을 입으로
+    가져오는 동안 사용자가 컵을 보면 태그는 화면에서 빠지는 게 정상이다. 그걸로 중단하면
+    데모가 성립하지 않는다. commit() / release() 로 run_demo 가 명시적으로 연다.
+    """
+
+    def __init__(self, min_consecutive: int = 3, max_jump_m: float = 0.05):
+        self.min_consecutive = min_consecutive
+        self.max_jump_m = max_jump_m
+        self._T: np.ndarray | None = None
+        self._consecutive = 0
+        self._committed = False
+        self.last_jump_m = float("nan")
+
+    # ---------- 입력: 매 프레임 둘 중 하나 ----------
+    def update_tag(self, T_hc_ab_meas: np.ndarray, t: float | None = None):
+        if self._T is not None and self._consecutive > 0:
+            jump = float(np.linalg.norm(T_hc_ab_meas[:3, 3] - self._T[:3, 3]))
+            self.last_jump_m = jump
+            if jump > self.max_jump_m:
+                log.warning("태그 자세가 한 프레임에 %.1fcm 튐 — 연속 카운트 초기화", jump * 100)
+                self._consecutive = 0
+        self._T = np.asarray(T_hc_ab_meas, float)
+        self._consecutive += 1
+
+    def miss(self):
+        """이번 프레임에 태그 번들이 안 보였거나 검출기가 관측을 버렸다."""
+        self._consecutive = 0
+
+    # ---------- 출력 ----------
+    @property
+    def state(self) -> AnchorState:
+        if self._T is None or self._consecutive == 0:
+            return AnchorState.UNANCHORED
+        if self._consecutive < self.min_consecutive:
+            return AnchorState.STALE
+        return AnchorState.ANCHORED
+
+    def T_headcam_to_armbase(self) -> np.ndarray | None:
+        """p_hc = T @ p_ab. 이번 프레임 관측이 ANCHORED 일 때만."""
+        return self._T if self.state is AnchorState.ANCHORED else None
+
+    def point_headcam_to_armbase(self, p_hc) -> np.ndarray | None:
+        T = self.T_headcam_to_armbase()
+        if T is None:
+            return None
+        return (_inv(T) @ np.r_[np.asarray(p_hc, float).ravel(), 1.0])[:3]
+
+    def commit(self):
+        """컵 좌표를 armbase 로 확정한 직후 호출 -> 팔 동작 게이트를 연다."""
+        self._committed = True
+
+    def release(self):
+        self._committed = False
+
+    def can_execute_grasp(self, max_latch_age_s: float = 30.0) -> tuple[bool, str]:
+        if not self._committed:
+            return False, "컵 좌표가 유효한 태그 관측으로 확정되지 않았다"
+        return True, "ok"

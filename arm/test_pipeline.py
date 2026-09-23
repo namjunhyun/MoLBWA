@@ -13,6 +13,7 @@ ultralytics / pupil_apriltags / rclpy / lerobot 는 필요 없다.
   4. 태그 코너 축 규약 (거울상이면 PnP 가 안 풀린다)
   5. depth 없이 테이블 평면 교차로 컵 위치 복원
   6. 검출이 한 프레임 빠져도 dwell 이 같은 컵을 유지하는가
+  7. (2026-09-23) 태그 직결 유효성 정책 + 시선 픽셀 UDP 왕복
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "src")))
 
-from anchor import AnchorTracker, build_bundle_obj_pts          # noqa: E402
+from anchor import AnchorState, AnchorTracker, TagDirectAnchor, build_bundle_obj_pts  # noqa: E402
 from kinematics import ArmModel, IKError                        # noqa: E402
 from perception import Cup, GazeDwell, cup_position_on_table    # noqa: E402
 from sim_source import SimSource, _euler, _rt                   # noqa: E402
@@ -191,6 +192,67 @@ def test_dwell_robustness():
           f"sel={None if sel2 is None else sel2.center_uv}")
 
 
+# ---------------------------------------------------------------- 7. 태그 직결
+def test_tag_direct():
+    T = _rt(np.eye(3), [0.0, 0.1, 0.6])
+
+    def moved(dx):
+        return _rt(np.eye(3), [dx, 0.1, 0.6])
+
+    a = TagDirectAnchor(min_consecutive=3, max_jump_m=0.05)
+    a.update_tag(T)
+    a.update_tag(moved(0.005))
+    check("직결: 2프레임으로는 아직 유효 아님", a.state is AnchorState.STALE
+          and a.T_headcam_to_armbase() is None, a.state.value)
+    a.update_tag(moved(0.010))
+    check("직결: 연속 3프레임이면 ANCHORED", a.state is AnchorState.ANCHORED, a.state.value)
+
+    # 한 프레임이라도 놓치면 즉시 무효 — 한 프레임 전 자세에 지금 컵 픽셀을 섞으면 안 된다
+    a.miss()
+    check("직결: 이번 프레임 미검출이면 즉시 무효", a.T_headcam_to_armbase() is None, a.state.value)
+
+    # 프레임 간 12cm 점프 = 다른 PnP 해 -> 연속 카운트 초기화
+    b = TagDirectAnchor(min_consecutive=3, max_jump_m=0.05)
+    for dx in (0.0, 0.005, 0.010):
+        b.update_tag(moved(dx))
+    b.update_tag(moved(0.13))
+    check("직결: 한 프레임 12cm 점프는 연속으로 안 셈", b.state is not AnchorState.ANCHORED,
+          f"{b.state.value}, 점프 {b.last_jump_m*100:.1f}cm")
+
+    # 팔 동작 게이트: commit 전에는 닫혀 있고, 태그가 사라져도 commit 후엔 열려 있다
+    ok0, _ = b.can_execute_grasp()
+    b.commit()
+    b.miss()                                  # 컵을 입으로 가져오며 태그가 화면에서 빠짐
+    ok1, _ = b.can_execute_grasp()
+    b.release()
+    ok2, _ = b.can_execute_grasp()
+    check("직결: 게이트는 commit~release 동안만 열림", (not ok0) and ok1 and (not ok2),
+          f"commit전={ok0} 중={ok1} 후={ok2}")
+
+    # 시선 픽셀 UDP 왕복 (실제 소켓, 임의 포트)
+    import time
+    from gaze_px_udp import GazePixelReceiver, GazePixelSender
+    port = 55999
+    rx = GazePixelReceiver(host="127.0.0.1", port=port, max_age_s=0.15)
+    tx = GazePixelSender(port=port)
+    try:
+        tx.send(321.0, 234.0, valid=True)
+        time.sleep(0.05)
+        got = rx.latest()
+        tx.send(0, 0, valid=False)
+        time.sleep(0.05)
+        got_invalid = rx.latest()
+        tx.send(100.0, 100.0, valid=True)
+        time.sleep(0.25)                      # max_age 초과
+        got_old = rx.latest()
+    finally:
+        tx.close()
+        rx.close()
+    check("직결: 시선 픽셀 UDP 왕복 / 무효 / 오래됨",
+          got == (321.0, 234.0) and got_invalid is None and got_old is None,
+          f"{got} / {got_invalid} / {got_old}")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     test_intrinsics()
@@ -199,6 +261,7 @@ if __name__ == "__main__":
     test_tag_convention()
     test_table_plane()
     test_dwell_robustness()
+    test_tag_direct()
     print("=" * 70)
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
     print(f"{len(RESULTS) - n_fail}/{len(RESULTS)} PASS")
