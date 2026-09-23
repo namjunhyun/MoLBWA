@@ -42,6 +42,9 @@ def make_bus(fake, **safety):
     bus.ids = [1, 2, 3, 4, 5, 6]
     bus.safety = d.SafetyConfig(**safety)
     bus._err_since = bus._load_since = None
+    bus._n_check = 0
+    bus._bad = {"temp": 0, "volt": 0, "glitch": 0}
+    bus.port = type("P", (), {"clearPort": lambda self: None})()
     bus.last_goal = None
     bus._r = lambda sid, reg: fake.read(sid, reg[0])
 
@@ -110,10 +113,50 @@ class TestSo101Driver(unittest.TestCase):
 
     def test_leader_voltage_rejected_by_check(self):
         f = FakeServos(volts=5.2)
-        bus = make_bus(f)
-        bus.last_goal = [2000] * 6
+        bus = make_bus(f, slow_check_every=1)
+        bus.last_goal = [2000 + s for s in range(1, 7)]
+        with self.assertRaises(d.SafetyStop):
+            for _ in range(3):                   # 연속 3회에서 정지
+                bus.check()
+
+    def test_single_temp_glitch_does_not_stop(self):
+        """2026-09-23 실기: 이동 중 온도가 한 번 140°C 로 읽혀 정지했다 (실제 30°C)."""
+        f = FakeServos()
+        bus = make_bus(f, slow_check_every=1)
+        bus.enable()
+        f.reg[2][63] = 140
+        bus.check()                              # 한 번 튄 값 -> 무시
+        f.reg[2][63] = 30
+        for _ in range(3):
+            bus.check()
+
+    def test_real_overheat_stops_after_confirm(self):
+        f = FakeServos()
+        bus = make_bus(f, slow_check_every=1)
+        bus.enable()
+        f.reg[3][63] = 65
+        bus.check()
+        bus.check()
         with self.assertRaises(d.SafetyStop):
             bus.check()
+
+    def test_hold_with_garbage_position_keeps_last_goal(self):
+        """위치가 엉터리로 읽히면 hold 가 그 값을 목표로 쓰면 안 된다 (팔이 튄다)."""
+        f = FakeServos()
+        bus = make_bus(f)
+        bus.enable()
+        bus.write_ticks([2100] * 6)
+        f.reg[4][56] = 60000                     # 통신 오류로 말이 안 되는 위치
+        bus.hold()
+        self.assertEqual(f.reg[4][42], 2100)     # 마지막 목표 유지
+
+    def test_garbage_position_during_move_is_safety_stop(self):
+        f = FakeServos()
+        bus = make_bus(f)
+        bus.enable()
+        f.reg[4][56] = 60000
+        with self.assertRaises(d.SafetyStop):    # RuntimeError 로 새면 hold 없이 끝난다
+            bus.write_ticks([2100] * 6)
 
 
 class SdkShapedHandler:

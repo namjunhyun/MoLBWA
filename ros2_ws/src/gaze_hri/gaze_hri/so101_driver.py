@@ -77,6 +77,8 @@ class SafetyConfig:
     max_load: int = 800               # 부하 80% 지속 시 정지 (그리퍼는 제외)
     load_time: float = 0.5
     max_temp: int = 60                # °C
+    slow_check_every: int = 10        # 온도/전압은 N 번에 한 번만 읽는다 (버스 부하 감소)
+    confirm_n: int = 3                # 온도/전압 이상은 연속 N 번이어야 정지 (한 번 튄 값 무시)
     check_ids: list = field(default_factory=lambda: [1, 2, 3, 4, 5])  # 그리퍼는 물면 부하가 정상
 
 
@@ -111,6 +113,8 @@ class So101Bus:
         self.hi = [v - self.safety.limit_margin for v in self.raw_hi]
         self._err_since = None
         self._load_since = None
+        self._n_check = 0
+        self._bad = {"temp": 0, "volt": 0, "glitch": 0}
         self.last_goal = None
         log(f"[so101] {port} 연결, {v:.1f}V, 한계 {list(zip(self.lo, self.hi))}")
 
@@ -133,7 +137,32 @@ class So101Bus:
 
     # ---------- 읽기 ----------
     def ticks(self):
-        return [self._r(sid, R_PRESENT_POS) for sid in self.ids]
+        """현재 위치. ★ 말이 안 되는 값(한계에서 150틱 넘게 벗어남)은 통신 오류로 보고
+        한 번 다시 읽는다. 그래도 이상하면 예외 — 엉터리 위치를 hold 목표로 쓰면 멈추려는
+        순간 팔이 튄다 (2026-09-23: 이동 중 온도 레지스터가 140°C 로 한 번 잘못 읽혔다)."""
+        out = []
+        for i, sid in enumerate(self.ids):
+            v = self._r(sid, R_PRESENT_POS)
+            if not self._plausible_pos(i, v):
+                self._flush()
+                v = self._r(sid, R_PRESENT_POS)
+                if not self._plausible_pos(i, v):
+                    raise RuntimeError(f"통신 이상: ID{sid} 위치 {v} (한계 "
+                                       f"{self.raw_lo[i]}~{self.raw_hi[i]})")
+            out.append(v)
+        return out
+
+    def _plausible_pos(self, i, v):
+        lo = getattr(self, "raw_lo", None)
+        if lo is None:                               # 한계를 읽기 전 (초기화 중)
+            return 0 <= v < TICKS_PER_REV
+        return self.raw_lo[i] - 150 <= v <= self.raw_hi[i] + 150
+
+    def _flush(self):
+        try:
+            self.port.clearPort()
+        except Exception:
+            pass
 
     def loads(self):
         out = []
@@ -176,12 +205,21 @@ class So101Bus:
         self.log(f"[so101] 토크 ON (한계 {self.safety.torque_limit / 10:.0f}%), 현재 자세 유지")
 
     def hold(self):
-        """지금 있는 자리에 세운다. 토크는 유지 (끄면 팔이 떨어진다)."""
+        """지금 있는 자리에 세운다. 토크는 유지 (끄면 팔이 떨어진다).
+
+        현재 위치를 못 믿겠으면(통신 이상) 마지막으로 보낸 목표를 다시 쓴다 — 엉터리
+        값을 목표로 쓰는 것보다 방금까지 가던 곳에 서는 게 낫다."""
         try:
             now = self.ticks()
+        except Exception as e:
+            self.log(f"[so101] hold: 위치를 못 믿음({e}) -> 마지막 목표 유지")
+            now = self.last_goal
+        if now is None:
+            return
+        try:
             for sid, t in zip(self.ids, now):
                 self._w(sid, R_GOAL_POS, t)
-            self.last_goal = now
+            self.last_goal = list(now)
         except Exception as e:                  # 통신이 죽었으면 할 수 있는 게 없다
             self.log(f"[so101] hold 실패: {e}")
 
@@ -206,7 +244,10 @@ class So101Bus:
     def check(self):
         s = self.safety
         now_t = time.monotonic()
-        pos = self.ticks()
+        try:
+            pos = self.ticks()
+        except RuntimeError as e:                 # 통신 이상 -> 일반 예외로 새지 않게 정지
+            self._stop(str(e))
         if self.last_goal is not None:
             errs = [abs(p - g) for p, g, sid in zip(pos, self.last_goal, self.ids)
                     if sid in s.check_ids]
@@ -225,13 +266,29 @@ class So101Bus:
                 self._stop(f"부하 {max(big) / 10:.0f}% 지속")
         else:
             self._load_since = None
-        t = max(self.temps())
-        if t > s.max_temp:
-            self._stop(f"서보 온도 {t}°C")
-        v = self.voltage()
-        if v < s.min_voltage:
-            self._stop(f"전압 강하 {v:.1f}V")
+        self._n_check += 1
+        if self._n_check % s.slow_check_every == 0:
+            self._slow_checks()
         return pos
+
+    def _slow_checks(self):
+        """온도/전압. 물리적으로 불가능한 값은 통신 오류로 따로 세고, 진짜 이상은 연속
+        confirm_n 번일 때만 정지한다. 통신 오류가 계속되면 그것 자체로 정지."""
+        s = self.safety
+        temps, v = self.temps(), self.voltage()
+        glitch = any(t > 100 or t <= 0 for t in temps) or not (3.0 < v < 20.0)
+        if glitch:
+            self._bad["glitch"] += 1
+            self.log(f"[so101] 이상한 값 무시 (통신 오류?): 온도 {temps}, {v:.1f}V")
+            if self._bad["glitch"] >= 5:
+                self._stop("온도/전압 읽기가 계속 비정상 — 통신 이상")
+            return
+        self._bad["glitch"] = 0
+        for key, bad, msg in (("temp", max(temps) > s.max_temp, f"서보 온도 {max(temps)}°C"),
+                              ("volt", v < s.min_voltage, f"전압 강하 {v:.1f}V")):
+            self._bad[key] = self._bad[key] + 1 if bad else 0
+            if self._bad[key] >= s.confirm_n:
+                self._stop(msg + f" (연속 {s.confirm_n}회)")
 
     def _stop(self, why):
         self.hold()
