@@ -105,8 +105,10 @@ class So101Bus:
             raise RuntimeError(
                 f"{port} 버스 전압 {v:.1f}V < {self.safety.min_voltage}V — 리더 팔(5V)이거나 "
                 "팔로워 전원이 꺼져 있다. 연결 거부.")
-        self.lo = [self._r(sid, R_MIN_POS) + self.safety.limit_margin for sid in self.ids]
-        self.hi = [self._r(sid, R_MAX_POS) - self.safety.limit_margin for sid in self.ids]
+        self.raw_lo = [self._r(sid, R_MIN_POS) for sid in self.ids]
+        self.raw_hi = [self._r(sid, R_MAX_POS) for sid in self.ids]
+        self.lo = [v + self.safety.limit_margin for v in self.raw_lo]
+        self.hi = [v - self.safety.limit_margin for v in self.raw_hi]
         self._err_since = None
         self._load_since = None
         self.last_goal = None
@@ -148,8 +150,21 @@ class So101Bus:
 
     # ---------- 토크 ----------
     def enable(self):
-        """목표=현재로 맞춘 뒤 토크를 켠다 -> 켜는 순간 움직이지 않는다."""
+        """목표=현재로 맞춘 뒤 토크를 켠다 -> 켜는 순간 움직이지 않는다.
+
+        ★ 단, 현재 위치가 EEPROM 위치 한계 **밖**이면 서보 펌웨어가 목표를 한계 안으로
+        잘라서 켜는 순간 그쪽으로 민다 (2026-09-23 실기: wrist_roll 38 < 최소 78 에서
+        토크를 켜자 롤이 한계 쪽으로 50% 힘으로 버티며 막혔다). 그런 관절이 있으면 켜지 않는다.
+        """
         now = self.ticks()
+        out = [(JOINT_NAMES[sid - 1] if 1 <= sid <= 6 else sid, t, lo, hi)
+               for sid, t, lo, hi in zip(self.ids, now, self.raw_lo, self.raw_hi)
+               if not lo <= t <= hi]
+        if out:
+            raise RuntimeError(
+                "토크를 켜지 않는다 — 가동 범위 밖 관절: "
+                + ", ".join(f"{n} 위치 {t} (범위 {lo}~{hi})" for n, t, lo, hi in out)
+                + ". 손으로 범위 안쪽으로 옮긴 뒤 다시.")
         for sid, t in zip(self.ids, now):
             self._w(sid, R_TORQUE_LIMIT, self.safety.torque_limit)
             self._w(sid, R_ACCEL, self.safety.accel)

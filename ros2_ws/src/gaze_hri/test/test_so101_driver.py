@@ -49,6 +49,7 @@ def make_bus(fake, **safety):
         assert reg[0] >= 40, "EEPROM 쓰기 금지"
         fake.write(sid, reg[0], int(val))
     bus._w = _w
+    bus.raw_lo, bus.raw_hi = [1000] * 6, [3000] * 6
     bus.lo = [1000 + bus.safety.limit_margin] * 6
     bus.hi = [3000 - bus.safety.limit_margin] * 6
     return bus
@@ -72,6 +73,15 @@ class TestSo101Driver(unittest.TestCase):
             self.assertLess(goal_idx, torque_idx)                 # 목표 먼저, 토크 나중
             self.assertEqual(f.reg[sid][42], 2000 + sid)          # 목표 = 현재
         self.assertTrue(all(w[1] >= 40 for w in f.writes))        # EEPROM 안 건드림
+
+    def test_enable_refuses_out_of_range_joint(self):
+        """현재 위치가 한계 밖이면 켜는 순간 펌웨어가 민다 -> 토크를 아예 켜지 않는다."""
+        f = FakeServos()
+        f.reg[5][56] = 38                        # 롤이 최소(1000) 밖
+        bus = make_bus(f)
+        with self.assertRaises(RuntimeError):
+            bus.enable()
+        self.assertTrue(all(f.reg[s][40] == 0 for s in range(1, 7)))   # 아무것도 안 켜짐
 
     def test_eeprom_write_blocked(self):
         bus = make_bus(FakeServos())
