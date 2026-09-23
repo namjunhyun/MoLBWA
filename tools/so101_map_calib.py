@@ -101,7 +101,22 @@ def solve(c):
     if abs(A[3] - B[3]) > 250:
         problems.append(f"A 와 B 의 손목이 {abs(A[3] - B[3])}틱 다르다 — 둘 다 일직선이어야 함")
     s6 = sgn(GO[5] - GC[5])
-    zero = [B[0], B[1], B[2], B[3], B[4], GC[5]]
+
+    # 0점: B 하나로 정하지 않고 A 에서 역산한 값과 평균낸다. 손으로 잡은 자세라 둘 다
+    # 몇 도씩 틀리는데, 2026-09-23 실측에서 A-B 가 어깨/팔꿈치 모두 81°(기대 90°)로
+    # 같은 방향으로 어긋났다 = B 에서 위팔이 약 9° 들려 있었다. 평균이면 오차가 반으로 준다.
+    #   A: j2=+90° -> tA = z2 + s2*1024,  j3=-90° -> tA = z3 - s3*1024,  j4=0 -> tA = z4
+    est = {
+        "pan":      (B[0], A[0]),
+        "shoulder": (B[1], A[1] - s2 * Q90),
+        "elbow":    (B[2], A[2] + s3 * Q90),
+        "wrist":    (B[3], A[3]),
+    }
+    zero4 = [round((b + a2) / 2) for b, a2 in est.values()]
+    spread = {k: abs(b - a2) * 360 / 4096 / 2 for k, (b, a2) in est.items()}
+    for k, v in spread.items():
+        print(f"  0점 {k:8s}: B 추정 {est[k][0]}, A 추정 {est[k][1]} -> 평균 (불확실성 ±{v:.1f}°)")
+    zero = zero4 + [B[4], GC[5]]
     sign = [s1, s2, s3, s4, 1, s6]
     grip_open_rad = abs(GO[5] - GC[5]) * 2 * 3.14159265 / 4096
 
@@ -114,6 +129,7 @@ def solve(c):
         "signs": sign,
         # 그리퍼: 0 rad = 완전히 닫힘, + = 열림. arm_server 의 gripper_open/closed 에 쓴다
         "gripper_open_rad_max": round(grip_open_rad, 3),
+        "zero_uncertainty_deg": {k: round(v, 1) for k, v in spread.items()},
         "captured": {k: c[k] for k in need},
         "warnings": problems,
     }
