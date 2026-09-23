@@ -20,6 +20,7 @@ MoveIt2를 쓰면 충돌 회피와 경로 계획이 공짜로 따라오지만 �
 """
 
 import math
+import os
 import time
 
 import numpy as np
@@ -34,6 +35,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty, Float64MultiArray, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from gaze_hri.so101_driver import SafetyStop
 from gaze_hri.kinematics import (JOINT_ORDER, ArmGeometry, IKError,
                                  forward_kinematics, grasp_detected,
                                  inverse_kinematics, quat_to_matrix,
@@ -102,68 +104,48 @@ class DryRunBackend:
 
 
 class FeetechBackend:
-    """STS3215 직접 제어.  pip install feetech-servo-sdk
+    """SO-101 팔로워 직접 제어 — so101_driver 위의 얇은 어댑터 (2026-09-23 재작성).
 
-    주의: 서보 ID와 방향(sign), 중립 오프셋은 조립 상태마다 다릅니다.
-    반드시 낮은 속도로, 팔을 손으로 잡을 수 있는 상태에서 먼저 테스트하세요.
+    예전 구현은 Feetech 공식 SDK 의 sms_sts 를 가정했는데 pip 의 scservo_sdk 에는 없고,
+    "2048틱 = 기구학 0도, 방향 전부 +" 를 가정했다. 이제 틱<->각도 대응은
+    tools/so101_map_calib.py 로 실측한 파일(joint_map_file)에서만 가져온다.
+    그 파일이 없으면 **시작을 거부한다** — 짐작한 대응으로 팔을 움직이지 않는다.
     """
 
-    TICKS_PER_REV = 4096
-    CENTER = 2048
-
-    def __init__(self, port, ids, signs, offsets, logger, speed=600, accel=30):
-        from scservo_sdk import (COMM_SUCCESS, PacketHandler,  # noqa: F401
-                                 PortHandler, sms_sts)
-
+    def __init__(self, map_file, logger):
+        import yaml
+        from gaze_hri.so101_driver import JointMap, So101Bus
+        map_file = os.path.expanduser(map_file)
+        if not map_file or not os.path.exists(map_file):
+            raise RuntimeError(
+                f"joint_map_file 이 없다: {map_file!r}. tools/so101_map_calib.py 로 먼저 "
+                "틱<->각도 대응을 실측할 것. 짐작한 값으로는 움직이지 않는다.")
+        cfg = yaml.safe_load(open(map_file))
+        if cfg.get("warnings"):
+            logger.warn(f"관절 대응 캘리브에 경고가 남아 있다: {cfg['warnings']}")
         self.logger = logger
-        self.ids = ids
-        self.signs = signs
-        self.offsets = offsets
-        self.speed = speed
-        self.accel = accel
-
-        self.port = PortHandler(port)
-        if not self.port.openPort():
-            raise RuntimeError(f"시리얼 포트 열기 실패: {port}")
-        if not self.port.setBaudRate(1000000):
-            raise RuntimeError("보레이트 설정 실패")
-        self.packet = sms_sts(self.port)
-        logger.info(f"Feetech 백엔드 연결: {port}, IDs={ids}")
-
-    def rad_to_ticks(self, rad, i):
-        ticks = self.CENTER + self.signs[i] * rad * self.TICKS_PER_REV / (2 * math.pi)
-        return int(round(ticks + self.offsets[i]))
-
-    def ticks_to_rad(self, ticks, i):
-        return (ticks - self.offsets[i] - self.CENTER) * (2 * math.pi) / \
-            (self.TICKS_PER_REV * self.signs[i])
+        self.map = JointMap(cfg["zero_ticks"], cfg["signs"])
+        self.bus = So101Bus(cfg["port"], cfg["servo_ids"],
+                            log=lambda m: logger.info(m))
+        self.bus.enable()          # 목표=현재로 맞춘 뒤 토크 ON -> 튀지 않는다
 
     def write(self, q):
-        for i, (sid, rad) in enumerate(zip(self.ids, q)):
-            pos = self.rad_to_ticks(rad, i)
-            pos = max(0, min(self.TICKS_PER_REV - 1, pos))
-            self.packet.WritePosEx(sid, pos, self.speed, self.accel)
+        # SafetyStop 은 그대로 올려 보낸다 -> execute 가 복귀 없이 멈춘다
+        self.bus.write_ticks(self.map.to_ticks(q))
 
     def read(self):
-        out = []
-        for i, sid in enumerate(self.ids):
-            pos, _, _ = self.packet.ReadPos(sid)
-            out.append(self.ticks_to_rad(pos, i))
-        return out
+        return self.map.to_rad(self.bus.ticks())
 
     def read_gripper_load(self):
         """그리퍼 서보의 부하. 물체를 물고 있으면 값이 올라갑니다."""
         try:
-            load, _, _ = self.packet.ReadLoad(self.ids[5])
-            return abs(int(load))
+            return abs(int(self.bus.loads()[5]))
         except Exception:
             return None
 
     def close(self):
-        try:
-            self.port.closePort()
-        except Exception:
-            pass
+        self.bus.hold()            # 토크는 유지한 채 그 자리에 둔다 (끄면 팔이 떨어진다)
+        self.bus.close()
 
 
 class JointTrajectoryBackend:
@@ -206,6 +188,14 @@ class ArmServer(Node):
         self.declare_parameter("servo_ids", [1, 2, 3, 4, 5, 6])
         self.declare_parameter("servo_signs", [1, 1, 1, 1, 1, 1])
         self.declare_parameter("servo_offsets", [0, 0, 0, 0, 0, 0])
+        # feetech 백엔드 전용: tools/so101_map_calib.py 가 만든 틱<->각도 대응 파일
+        self.declare_parameter("joint_map_file", "")
+        # 홈 자세를 관절각 대신 TCP 위치로 준다 (비어 있으면 home_q). 관절각 home_q 기본값은
+        # 이 기구학에서 팔꿈치가 베이스 바닥 아래(z=-0.009)로 가는 자세였다.
+        self.declare_parameter("home_xyz", [0.0])
+        self.declare_parameter("home_pitch", -1.5708)
+        # 관절 공간 이동(홈/goto_joints) 속도 상한 [deg/s]
+        self.declare_parameter("joint_speed_deg_s", 25.0)
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("world_frame", "map")
 
@@ -251,7 +241,14 @@ class ArmServer(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.backend = self._make_backend()
-        self.q = list(self.get_parameter("home_q").value)
+        self.home = self._resolve_home()
+        if isinstance(self.backend, FeetechBackend):
+            # 실제 팔은 home 이 아니라 지금 있는 자세에서 출발한다. home_q 로 두면
+            # 첫 보간이 엉뚱한 곳에서 시작해 팔이 한 번에 튄다.
+            self.q = list(self.backend.read())
+            self.get_logger().info(f"현재 관절각(rad): {[round(v, 3) for v in self.q]}")
+        else:
+            self.q = list(self.home)
 
         self.pub_js = self.create_publisher(JointState, "/joint_states", 10)
         # 동작 단계를 토픽으로도 알린다. 액션 피드백은 목표를 보낸 클라이언트만
@@ -312,13 +309,8 @@ class ArmServer(Node):
     def _make_backend(self):
         kind = self.get_parameter("backend").value
         if kind == "feetech":
-            return FeetechBackend(
-                self.get_parameter("serial_port").value,
-                list(self.get_parameter("servo_ids").value),
-                list(self.get_parameter("servo_signs").value),
-                list(self.get_parameter("servo_offsets").value),
-                self.get_logger(),
-            )
+            return FeetechBackend(self.get_parameter("joint_map_file").value,
+                                  self.get_logger())
         if kind == "joint":
             return JointTrajectoryBackend(self)
         # held_gap: '물었을 때' 명령값보다 얼마나 더 열려 있는지. 판정 기준인
@@ -345,14 +337,11 @@ class ArmServer(Node):
             return
         while len(target) < 6:
             target.append(self.q[len(target)])
-        q_start = list(self.q)
-        for i in range(1, 26):
-            s = 0.5 - 0.5 * math.cos(math.pi * i / 25)
-            self.q = [a + (b - a) * s for a, b in zip(q_start, target)]
-            self.backend.write(self.q)
-            time.sleep(0.04)
-        self.q = target
-        self.backend.write(self.q)
+        try:
+            self._joint_move(target)
+        except SafetyStop as exc:
+            self.get_logger().error(f"안전 정지 (goto_joints): {exc}")
+            self.q = list(self.backend.read())
 
     # ------------------------------------------------------------------
     def transform_to_base(self, point, source_frame):
@@ -571,17 +560,46 @@ class ArmServer(Node):
 
         return False
 
-    def go_home(self):
-        home = list(self.get_parameter("home_q").value)
+    def _resolve_home(self):
+        home_q = list(self.get_parameter("home_q").value)
+        xyz = list(self.get_parameter("home_xyz").value)
+        if len(xyz) != 3:
+            return home_q
+        pitch = float(self.get_parameter("home_pitch").value)
+        # 팔꿈치를 높이 드는 해를 먼저 시도한다. 이 기구학에서 그건 elbow_up=False 쪽이다
+        # (TCP (0.22,0,0.16) -45°: False -> 팔꿈치 17cm, True -> 해 없음).
+        q4 = None
+        for up in (False, True):
+            try:
+                q4 = inverse_kinematics(xyz, self.geo, approach_pitch=pitch, elbow_up=up)
+                break
+            except IKError:
+                continue
+        if q4 is None:
+            raise IKError(f"home_xyz {xyz} pitch {pitch:.2f} 를 풀 수 없다")
+        q = list(q4) + [0.0, home_q[5] if len(home_q) > 5 else 0.0]
+        self.get_logger().info(f"홈 = TCP {xyz} pitch {pitch:.2f} -> q {[round(v, 3) for v in q]}")
+        return q
+
+    def _joint_move(self, target):
+        """관절 공간 코사인 보간. 가장 많이 움직이는 관절이 joint_speed_deg_s 를 넘지 않게
+        시간을 잡는다. 예전엔 거리와 무관하게 0.8초(20스텝)였다 — 먼 자세면 휘두른다."""
         q_start = list(self.q)
-        for i in range(1, 21):
+        span = max(abs(b - a) for a, b in zip(q_start, target))
+        vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
+        n = max(10, int(span / vmax / 0.04))
+        for i in range(1, n + 1):
             if self._cancel:
-                return
-            s = 0.5 - 0.5 * math.cos(math.pi * i / 20)
-            self.q = [a + (b - a) * s for a, b in zip(q_start, home)]
+                return False
+            s = 0.5 - 0.5 * math.cos(math.pi * i / n)
+            self.q = [a + (b - a) * s for a, b in zip(q_start, target)]
             self.backend.write(self.q)
             time.sleep(0.04)
-        self.q = home
+        self.q = list(target)
+        return True
+
+    def go_home(self):
+        self._joint_move(list(self.home))
 
     # ------------------------------------------------------------------
     def execute(self, goal_handle):
@@ -678,6 +696,15 @@ class ArmServer(Node):
             result.message = "집어서 옮기기 완료"
             return result
 
+        except SafetyStop as exc:
+            # 충돌/막힘/과부하로 멈춘 것이다. 여기서 home 으로 가면 같은 곳에 다시 부딪힐
+            # 수 있다 -> 그 자리에 세운 채로 사람을 부른다.
+            self.get_logger().error(f"★ 안전 정지 — 복귀하지 않고 그 자리에 멈춤: {exc}")
+            self.q = list(self.backend.read())
+            goal_handle.abort()
+            result.success = False
+            result.message = f"안전 정지: {exc}"
+            return result
         except IKError as exc:
             self.get_logger().error(f"역기구학 실패: {exc}")
             # 실패 지점에서 그대로 멈추면 팔이 어정쩡한 자세로 남는다.

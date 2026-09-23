@@ -61,6 +61,11 @@ task_manager:
 arm_server:
   ros__parameters:
     backend: "dry_run"         # dry_run | feetech | joint
+    # feetech: 포트/0점/방향은 전부 이 파일에서 온다 (tools/so101_map_calib.py 로 실측).
+    # 파일이 없으면 arm_server 가 시작을 거부한다. 아래 serial_port/servo_* 는 feetech 에서 안 쓴다.
+    # 2026-09-23 이 책상: /dev/ttyACM0 = 리더(5V), ACM1 = 팔로워(12V). 번호는 바뀔 수 있어
+    # 맵 파일은 /dev/serial/by-id 경로를 쓴다.
+    joint_map_file: "~/MoLBWA-gaze-hri/ros2_ws/src/gaze_hri/config/so101_follower.yaml"
     serial_port: "/dev/ttyACM0"
     servo_ids: [1, 2, 3, 4, 5, 6]
     servo_signs: [1, 1, 1, 1, 1, 1]     # 방향이 반대면 -1로
@@ -75,7 +80,12 @@ arm_server:
     cartesian_step: 0.008
     gripper_open: 1.2
     gripper_closed: 0.15
-    home_q: [0.0, -0.6, 1.2, -0.6, 0.0, 1.2]
+    home_q: [0.0, -0.6, 1.2, -0.6, 0.0, 1.2]   # home_xyz 가 있으면 그리퍼(마지막 값)만 쓴다
+    # ★ 위 home_q 관절각은 이 기구학에서 팔꿈치가 베이스 바닥 아래(-0.9cm)다. 쓰지 말 것.
+    # 대신 TCP 위치로 준다: 팔꿈치 17cm / 손목 24cm / TCP 16cm — 컵 위를 넉넉히 비킨다.
+    home_xyz: [0.22, 0.0, 0.16]
+    home_pitch: -0.785
+    joint_speed_deg_s: 25.0
 
     # 안전 한계. 반드시 실제 도달 범위보다 '작아야' 한다.
     # 링크 합(shoulder_offset+l1+l2+l3)이 최대 도달거리이고, 기본 링크값에서는
