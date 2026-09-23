@@ -143,13 +143,19 @@ def calibrate_multi(dirs, pixels, fx0, cx, cy, iters=8, n_grid=21):
     return R, fx_val
 
 
+AFFINE_FEATURES_VERSION = 2   # 1 = (x/z, y/z, 1), 2 = (x, y, 1)
+
+
 def gaze_features(direction):
-    """시선 단위벡터를 원근 정규화 좌표 (x/z, y/z, 1)로 변환."""
+    """시선 단위벡터 -> affine 입력 (x, y, 1).
+
+    예전(v1)에는 원근 정규화 (x/z, y/z) 를 썼다. 그런데 눈 카메라가 눈을 비스듬히
+    보기 때문에 z 가 0.48~0.94 로 크게 흔들리고, 나누는 순간 가로축까지 휜다.
+    2026-09-23 10점 실측: 원시 x 와 화면 u 의 상관 0.990 인데 x/z 로는 가로 잔차
+    31px. 원시 (x, y) 로 같은 점을 맞추면 RMS 47.6 -> 36.8px.
+    """
     d = np.asarray(direction, dtype=np.float64)
-    z = d[2]
-    if abs(z) < 1e-6:
-        z = 1e-6 if z >= 0 else -1e-6
-    return np.array([d[0] / z, d[1] / z, 1.0], dtype=np.float64)
+    return np.array([d[0], d[1], 1.0], dtype=np.float64)
 
 
 def calibrate_affine(dirs, pixels):
@@ -194,12 +200,37 @@ def print_calib_report(affine, dirs, pixels):
         print("[진단] 방향이 거의 안 벌어졌다 — 고개를 고정하고 '눈만' 움직였는지 확인할 것.")
 
 
+def current_eye_model():
+    """F 로 고정된 안구 모델 (중심 픽셀, 반지름). 자동 갱신 중이면 None."""
+    if tracker.eye_sphere_adjustment_enabled:
+        return None
+    cx_, cy_ = tracker.prev_model_center_avg
+    return {"center": [int(cx_), int(cy_)], "radius": float(tracker.max_observed_distance)}
+
+
+def restore_eye_model(eye_model):
+    """저장된 안구 중심을 트래커에 넣고 고정한다. 시선 방향은 이 중심만으로 계산된다
+    (Orlosky3DEyeTracker.compute_gaze_vector). 반지름은 표시용."""
+    tracker.prev_model_center_avg = tuple(int(c) for c in eye_model["center"])
+    tracker.max_observed_distance = float(eye_model.get("radius", 0.0))
+    tracker.eye_sphere_adjustment_enabled = False
+
+
+def last_point_is_outlier(affine, dirs, pixels):
+    """마지막 점이 print_calib_report 와 같은 기준(중앙값의 2.5배)으로 튀는지."""
+    X = np.stack([gaze_features(d) for d in dirs])
+    per = np.linalg.norm(X @ np.asarray(affine, dtype=np.float64).T
+                         - np.asarray(pixels, dtype=np.float64), axis=1)
+    return per[-1] > 2.5 * max(float(np.median(per)), 1.0), float(per[-1])
+
+
 def save_affine_calibration(path, affine, dirs, pixels, width, height):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     px_error = np.sqrt(affine_reprojection_error(affine, dirs, pixels) / len(dirs))
     payload = {
-        "version": 1,
+        "version": AFFINE_FEATURES_VERSION,
         "model": "gaze_direction_to_scene_pixel_affine",
+        "features": "raw_xy",
         "affine_2x3": np.asarray(affine).tolist(),
         "sample_count": len(dirs),
         "mean_pixel_error": float(px_error),
@@ -208,6 +239,9 @@ def save_affine_calibration(path, affine, dirs, pixels, width, height):
         # 원시 쌍을 남긴다. 이게 없으면 "왜 오차가 컸는지" 를 되짚을 방법이 없다.
         "gaze_dirs": np.asarray(dirs, dtype=float).tolist(),
         "target_pixels": [[int(u), int(v)] for u, v in pixels],
+        # affine 은 이 안구 중심을 기준으로 한 시선 벡터에만 맞는다. 재시작하면 중심이
+        # 새로 추정되므로 같이 남긴다 (--restore-eye-model). 자동 모드였으면 None.
+        "eye_model": current_eye_model(),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -225,6 +259,17 @@ def load_affine_calibration(path, width, height):
             raise ValueError(f"행렬 크기가 {affine.shape}, 기대값은 (2, 3)")
         if (payload.get("image_width"), payload.get("image_height")) != (width, height):
             raise ValueError("저장 당시와 현재 씬 영상 해상도가 다름")
+        if payload.get("version", 1) < AFFINE_FEATURES_VERSION:
+            # 옛 입력 모델로 맞춘 행렬은 지금 gaze_features 와 안 맞는다. 원시 쌍이
+            # 남아 있으면 새 모델로 다시 맞추고, 없으면 쓰지 않는다.
+            dirs, pixels = payload.get("gaze_dirs"), payload.get("target_pixels")
+            if not dirs or not pixels:
+                raise ValueError("옛 형식(x/z) 파일인데 원시 시선/픽셀 쌍이 없어 재계산 불가")
+            affine = calibrate_affine(dirs, [tuple(p) for p in pixels])
+            payload["mean_pixel_error"] = float(np.sqrt(
+                affine_reprojection_error(affine, dirs, pixels) / len(dirs)))
+            print(f"[calib] 옛 형식 파일 -> 원시 (x,y) 로 재계산: {os.path.basename(path)} "
+                  f"({len(dirs)}점, {payload['mean_pixel_error']:.1f}px)")
         return affine, payload
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
         print(f"[calib] 저장 파일 불러오기 실패: {e}")
@@ -606,6 +651,9 @@ def main():
     ap.add_argument("--pose-stale-sec", type=float, default=0.3,
                     help="이 시간 동안 포즈가 안 오면 추적 상실로 보고 송신을 막는다")
     ap.add_argument("--no-rerun", action="store_true", help="Rerun 로깅 끄기 (cv2 창만 사용)")
+    ap.add_argument("--restore-eye-model", action="store_true",
+                    help="캘리브 파일에 저장된 안구 중심을 복원하고 고정한다. 안경을 벗지 않고 "
+                         "뷰어만 재시작했을 때용 — 다시 썼으면 새로 캘리브할 것")
     ap.add_argument("--rerun-every", type=int, default=3,
                     help="Rerun에 영상을 N프레임마다 1번만 로깅 (기본 3). 매 프레임 원본 "
                          "해상도로 다 보내면 gRPC 버퍼(1GiB)가 몇 분 안에 차서 뷰어가 죽는다 "
@@ -647,6 +695,17 @@ def main():
         scene_cap = None
         if args.send_udp:
             ros_src.enable_pose(args.pose_topic, args.pose_stale_sec)
+    else:
+        try:
+            eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
+        except (OSError, RuntimeError) as e:
+            eye_cap = None
+            print(f"[startup] 눈 카메라 없음 — 연결 대기: {e}")
+        try:
+            scene_cap = open_scene(args.scene_width, args.scene_height)
+        except (OSError, RuntimeError) as e:
+            scene_cap = None
+            print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
 
     udp_sender = None
     if args.send_udp:
@@ -661,17 +720,6 @@ def main():
                   f"— 비율 {ocams_calib.GEOMETRIC_BASELINE_M/baseline_m:.2f}배. "
                   f"둘 중 하나는 틀렸고, 틀린 쪽만큼 p_W 가 어긋난다. "
                   f"verify_depth_scale.py 로 실측 확인할 것.")
-    else:
-        try:
-            eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
-        except (OSError, RuntimeError) as e:
-            eye_cap = None
-            print(f"[startup] 눈 카메라 없음 — 연결 대기: {e}")
-        try:
-            scene_cap = open_scene(args.scene_width, args.scene_height)
-        except (OSError, RuntimeError) as e:
-            scene_cap = None
-            print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
 
     if (args.scene_width, args.scene_height) != (ocams_calib.IMAGE_WIDTH, ocams_calib.IMAGE_HEIGHT):
         print(f"[경고] --scene-width/height가 캘리브레이션 해상도"
@@ -717,7 +765,7 @@ def main():
     udp_status = "대기"
     print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
-    print("[키] c=1점 / m=affine 다점(한 거리) / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) "
+    print("[키] f=안구모델 고정/해제 / c=1점 / m=affine 다점(한 거리) / u=마지막 점 취소 / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) "
           "/ d=깊이 좌클릭 모드 / x,y=축 반전 / s=저장 / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
@@ -740,6 +788,17 @@ def main():
         print(f"[calib] affine 자동 불러오기: {calib_path} "
               f"(samples={loaded_meta.get('sample_count')}, "
               f"error={loaded_meta.get('mean_pixel_error', float('nan')):.1f}px)")
+        eye_model = loaded_meta.get("eye_model")
+        if eye_model and args.restore_eye_model:
+            restore_eye_model(eye_model)
+            print(f"[calib] 안구 모델 복원·고정: 중심={eye_model['center']} "
+                  f"— 안경을 다시 썼다면 틀린다. 'f' 로 풀고 새로 캘리브할 것.")
+        elif eye_model:
+            print("[calib] 파일에 안구 모델이 있지만 복원 안 함(기본). 이 affine 은 새 세션의 "
+                  "안구 모델과 안 맞으니 새로 캘리브하거나 --restore-eye-model 을 쓸 것.")
+        else:
+            print("[calib] 파일에 안구 모델 없음 — 이 affine 은 새 세션에서 정확하지 않다. "
+                  "새로 캘리브할 것.")
 
     multi_mode = False
     calib_dirs = []    # 다점 캘리브: 클릭 순간의 시선벡터들
@@ -792,6 +851,8 @@ def main():
     def reconnect_eye():
         """USB 재연결로 /dev/videoN이 바뀌어도 by-id로 눈 카메라를 다시 연다."""
         nonlocal eye_cap, smooth_dir, next_eye_retry
+        if ros_src is not None:
+            return          # 토픽 모드에서는 로컬 USB 를 열면 안 된다
         now = time.monotonic()
         if eye_cap is not None or now < next_eye_retry:
             return
@@ -859,7 +920,13 @@ def main():
             eye = None
             if eye_cap is not None:
                 ok, eye = eye_cap.read()
-                if not ok or eye is None:
+                if (not ok or eye is None) and ros_src is not None:
+                    # 토픽 모드: 이번 프레임만 건너뛴다. shim 을 버리면 reconnect_eye 가
+                    # 로컬 USB 를 열려다 영원히 실패하고, 토픽이 돌아와도 복구되지 않는다.
+                    eye = None
+                    if frame_idx % 60 == 0:
+                        print(f"[ros] 눈 토픽 대기 중 — {ros_src.eye_topic}")
+                elif not ok or eye is None:
                     print("[disconnect] 눈 카메라 프레임 끊김 — 자동 재연결 대기")
                     eye_cap.release()
                     eye_cap = None
@@ -966,6 +1033,9 @@ def main():
                     calib_dirs.append(smooth_dir.copy())
                     calib_pixels.append((cu, cv_))
                     print(f"[다점] 포인트 추가 #{len(calib_dirs)}: 시선={smooth_dir.round(3)} <-> 픽셀=({cu},{cv_})")
+                    if tracker.eye_sphere_adjustment_enabled:
+                        print("[다점][주의] 안구 모델이 자동 갱신 중 — 'f' 로 고정하지 않으면 "
+                              "캘리브 도중 시선 기준이 움직인다.")
                     if len(calib_dirs) >= 3:
                         try:
                             gaze_affine = calibrate_affine(calib_dirs, calib_pixels)
@@ -977,9 +1047,17 @@ def main():
                             if len(calib_dirs) >= 5:
                                 print_calib_report(gaze_affine, calib_dirs, calib_pixels)
                             if len(calib_dirs) >= 9:
-                                save_affine_calibration(
-                                    calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
-                                print(f"[calib] 9점 이상 자동 저장: {calib_path}")
+                                # 2026-09-23: 17.7px 결과 뒤에 깜빡임 점 하나(142px)가
+                                # 들어가 55.8px 로 자동 덮어쓴 일이 있었다.
+                                bad, last_err = last_point_is_outlier(
+                                    gaze_affine, calib_dirs, calib_pixels)
+                                if bad:
+                                    print(f"[calib] 마지막 점이 불량({last_err:.0f}px) — "
+                                          f"자동 저장 안 함. 'u' 로 되돌리기.")
+                                else:
+                                    save_affine_calibration(
+                                        calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
+                                    print(f"[calib] 9점 이상 자동 저장: {calib_path}")
                         except ValueError as e:
                             print(f"[다점-affine] 계산 대기: {e}")
                     else:
@@ -1039,11 +1117,6 @@ def main():
                 else:
                     cv2.putText(scene, "invalid gaze", (20, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            elif udp_sender is not None:
-                # 캘리브 전이거나 동공을 놓친 상태. 무소식보다 "지금은 못 믿는다"를
-                # 명시적으로 보내야 로봇팔 쪽이 마지막 유효점을 붙들지 않는다.
-                udp_sender.send([0.0, 0.0, 0.0], valid=False)
-                udp_status = "미캘리브" if not calibrated else "동공놓침"
                 if (args.enable_experimental_depth
                         and affine_05 is not None and affine_10 is not None):
                     status = "CALIBRATED DEPTH 0.5-1.0m"
@@ -1051,6 +1124,11 @@ def main():
                     status = "CALIBRATED AFFINE" if gaze_affine is not None else "CALIBRATED R"
                 color = (0, 255, 0)
             else:
+                if udp_sender is not None:
+                    # 캘리브 전이거나 동공을 놓친 상태. 무소식보다 "지금은 못 믿는다"를
+                    # 명시적으로 보내야 로봇팔 쪽이 마지막 유효점을 붙들지 않는다.
+                    udp_sender.send([0.0, 0.0, 0.0], valid=False)
+                    udp_status = "미캘리브" if not calibrated else "동공놓침"
                 status, color = "NOT CALIBRATED - look at scene cam, press 'c'", (0, 200, 255)
 
             if depth_probe_result is not None:
@@ -1077,6 +1155,12 @@ def main():
             mc_color = (0, 255, 0) if n_model >= 30 else (0, 165, 255)   # 30 미만이면 주황
             cv2.putText(scene, mc_text, (SW - mc_w - 12, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, mc_color, 2)
+            # 안구 구 모델이 자동 갱신 중이면 캘리브 도중에도 시선 벡터 기준이 움직인다.
+            sphere_locked = not tracker.eye_sphere_adjustment_enabled
+            sp_text = "sphere=LOCKED" if sphere_locked else "sphere=AUTO (F)"
+            (sp_w, _), _ = cv2.getTextSize(sp_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.putText(scene, sp_text, (SW - sp_w - 12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0) if sphere_locked else (0, 165, 255), 2)
             cv2.putText(scene, f"{mirror}  (x/y=toggle)", (20, 58),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
             multi_color = (0, 255, 255) if multi_mode else (150, 150, 150)
@@ -1108,6 +1192,9 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
+            elif key in (ord('f'), ord('F')):
+                # 트래커 자체 루프에만 있던 키. 여기 없어서 그동안 F 가 무시됐다.
+                tracker.toggle_eye_sphere_adjustment()
             elif key == ord('c'):
                 if smooth_dir is None:
                     print("[calib] 아직 시선벡터가 없다 — 눈을 굴려 모델을 세우고 다시.")
@@ -1139,10 +1226,28 @@ def main():
             elif key == ord('s'):
                 if gaze_affine is None or len(calib_dirs) < 3:
                     print("[calib] 저장할 affine 다점 데이터가 없습니다.")
+                elif last_point_is_outlier(gaze_affine, calib_dirs, calib_pixels)[0]:
+                    print("[calib] 마지막 점이 불량 — 저장 안 함. 'u' 로 되돌린 뒤 다시 's'.")
                 else:
                     saved_err = save_affine_calibration(
                         calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
                     print(f"[calib] 저장 완료: {calib_path} (error={saved_err:.1f}px)")
+            elif key == ord('u'):
+                if not calib_dirs:
+                    print("[다점] 되돌릴 점이 없다.")
+                else:
+                    calib_dirs.pop()
+                    du_, dv_ = calib_pixels.pop()
+                    print(f"[다점] 마지막 점 ({du_},{dv_}) 삭제 — 남은 {len(calib_dirs)}점")
+                    if len(calib_dirs) >= 3:
+                        try:
+                            gaze_affine = calibrate_affine(calib_dirs, calib_pixels)
+                            px_err = np.sqrt(affine_reprojection_error(
+                                gaze_affine, calib_dirs, calib_pixels) / len(calib_dirs))
+                            print(f"[다점-affine] {len(calib_dirs)}점으로 재계산. "
+                                  f"평균 픽셀오차={px_err:.1f}px")
+                        except ValueError as e:
+                            print(f"[다점-affine] 계산 대기: {e}")
             elif key == ord('r'):
                 calibrated = False
                 gaze_affine = None
