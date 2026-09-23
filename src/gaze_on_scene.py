@@ -51,6 +51,8 @@ except ImportError:
 
 import ocams_calib
 import eye_scene_extrinsic
+import fusion
+from gaze_udp_sender import GazeUdpSender
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "external", "EyeTracker", "3DTracker")))
@@ -166,6 +168,32 @@ def affine_reprojection_error(affine, dirs, pixels):
     return float(np.sum((predicted - actual) ** 2))
 
 
+def print_calib_report(affine, dirs, pixels):
+    """점별 오차와 방향 분포를 찍는다. 평균만으로는 원인을 못 가린다.
+
+    - 한두 점만 크면 -> 그 점만 잘못 들어간 것
+    - 전부 고르게 크면 -> 모델이 안 맞는 것(시차/비선형)
+    - 방향 분포가 작으면 -> 눈을 안 움직이고 고개를 돌린 것
+    """
+    X = np.stack([gaze_features(d) for d in dirs])
+    pred = X @ np.asarray(affine, dtype=np.float64).T
+    act = np.asarray(pixels, dtype=np.float64)
+    per = np.linalg.norm(pred - act, axis=1)
+
+    arr = np.asarray(dirs, dtype=np.float64)
+    arr = arr / np.linalg.norm(arr, axis=1, keepdims=True)
+    spread = float(np.degrees(np.arccos(np.clip(arr @ arr.T, -1, 1))).max())
+    cond = float(np.linalg.cond(X))
+
+    print(f"[진단] 시선 방향 분포={spread:.1f}도  조건수={cond:.1f}")
+    med = float(np.median(per))
+    for i, (e, (u, v)) in enumerate(zip(per, pixels), 1):
+        flag = "  <-- 이 점이 나쁨" if e > 2.5 * max(med, 1.0) else ""
+        print(f"        {i:2d}. 클릭({u:3d},{v:3d})  오차 {e:6.1f}px{flag}")
+    if spread < 10.0:
+        print("[진단] 방향이 거의 안 벌어졌다 — 고개를 고정하고 '눈만' 움직였는지 확인할 것.")
+
+
 def save_affine_calibration(path, affine, dirs, pixels, width, height):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     px_error = np.sqrt(affine_reprojection_error(affine, dirs, pixels) / len(dirs))
@@ -177,6 +205,9 @@ def save_affine_calibration(path, affine, dirs, pixels, width, height):
         "mean_pixel_error": float(px_error),
         "image_width": int(width),
         "image_height": int(height),
+        # 원시 쌍을 남긴다. 이게 없으면 "왜 오차가 컸는지" 를 되짚을 방법이 없다.
+        "gaze_dirs": np.asarray(dirs, dtype=float).tolist(),
+        "target_pixels": [[int(u), int(v)] for u, v in pixels],
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -210,6 +241,162 @@ def solve_rotation_svd(dirs, rays):
     D = np.diag([1.0, 1.0, np.linalg.det(U @ Vt)])
     R = U @ D @ Vt
     return R.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# ROS2 토픽에서 프레임 받기 (--source ros)
+#
+# 카메라가 라즈베리파이에 붙어 있고 Pi 는 토픽만 쏜다. 무거운 동공 검출과
+# 시선 계산은 이 데스크탑에서 한다.
+#
+# 중요: Pi 의 ocams_stereo_imu_node 는 좌/우 분리와 rectification 을 이미 끝내고
+# 발행한다 (right=split[0], left=split[1] — 이 파일 scene_stereo 와 같은 규약).
+# 그래서 여기서 또 쪼개거나 remap 하면 안 된다.
+# --------------------------------------------------------------------------
+
+class RosFrameSource:
+    """압축 토픽을 구독해 스트림별 '최신 한 장'만 들고 있는다.
+
+    큐를 쌓지 않는 이유: 데스크탑 처리가 느려져도 지연이 누적되면 안 된다.
+    실시간에서는 밀린 프레임보다 건너뛴 프레임이 낫다.
+    """
+
+    def __init__(self, eye_topic, left_topic, right_topic, stale_after=1.0):
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        from sensor_msgs.msg import CompressedImage
+        import threading
+
+        self._stale_after = stale_after
+        self._lock = threading.Lock()
+        self._frames = {}          # topic -> (image, 수신시각)
+
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        self._rclpy = rclpy
+        self._node = Node("gaze_on_scene_source")
+
+        # BEST_EFFORT: 무선 구간에서 재전송을 기다리느니 프레임을 버린다.
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.eye_topic, self.left_topic, self.right_topic = eye_topic, left_topic, right_topic
+        for t in (eye_topic, left_topic, right_topic):
+            self._node.create_subscription(
+                CompressedImage, t, lambda m, _t=t: self._on_image(_t, m), qos)
+
+        self._exec = rclpy.executors.SingleThreadedExecutor()
+        self._exec.add_node(self._node)
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        print(f"[ros] 구독: {eye_topic} / {left_topic} / {right_topic}")
+
+    def enable_pose(self, topic="/orbslam3/pose", stale_after=0.3):
+        """SLAM 헤드 포즈 구독을 이 노드에 얹는다.
+
+        별도 노드/executor 를 만들지 않는 이유: 이미 도는 executor 에 구독 하나를
+        더 거는 게 훨씬 싸고, 영상과 포즈가 같은 스레드에서 갱신돼 경합이 준다.
+
+        stale_after 가 영상(1.0s)보다 짧은 게 핵심이다. stereo-inertial 노드는
+        추적 상태가 OK 일 때만 pose 를 낸다(stereo-inertial-node.cpp 의
+        GetTrackingState() == OK 가드). 즉 "포즈가 끊겼다" == "추적을 잃었다" 이고,
+        이 staleness 가 그대로 유효성 게이트가 된다. 추적을 잃은 뒤의 마지막 포즈를
+        붙들고 있으면 엉뚱한 세계 좌표를 로봇팔로 쏘게 된다.
+        """
+        from geometry_msgs.msg import PoseStamped
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+
+        self._pose_stale_after = stale_after
+        self._pose = None          # (T_WS 4x4, 수신시각)
+        self.pose_topic = topic
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self._node.create_subscription(PoseStamped, topic, self._on_pose, qos)
+        print(f"[ros] SLAM 포즈 구독: {topic} (staleness {stale_after:.2f}s = 추적 상실 판정)")
+
+    def _on_pose(self, msg):
+        p, q = msg.pose.position, msg.pose.orientation
+        try:
+            T_WS = fusion.pose_to_matrix([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
+        except ValueError:
+            return
+        with self._lock:
+            self._pose = (T_WS, time.time())
+
+    def latest_pose(self):
+        """최신 T_WS (4x4). 추적 상실/미수신이면 None."""
+        with self._lock:
+            got = getattr(self, "_pose", None)
+        if got is None:
+            return None
+        T_WS, t = got
+        if time.time() - t > self._pose_stale_after:
+            return None
+        return T_WS
+
+    def _spin(self):
+        try:
+            self._exec.spin()
+        except Exception:
+            pass
+
+    def _on_image(self, topic, msg):
+        buf = np.frombuffer(msg.data, np.uint8)
+        # 씬은 mono8, 눈은 컬러. UNCHANGED 로 원본 채널 수를 보존한다.
+        img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return
+        with self._lock:
+            self._frames[topic] = (img, time.time())
+
+    def _latest(self, topic):
+        with self._lock:
+            got = self._frames.get(topic)
+        if got is None:
+            return None
+        img, t = got
+        if time.time() - t > self._stale_after:
+            return None          # 발행이 끊겼다 — 호출자가 재연결 대기로 처리
+        return img
+
+    def eye_frame(self):
+        """눈 영상 BGR. 없으면 None."""
+        img = self._latest(self.eye_topic)
+        if img is None:
+            return None
+        if img.ndim == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        return img
+
+    def scene_pair(self):
+        """(left, right) 모노. Pi 가 이미 분리·rectify 한 것을 그대로 쓴다."""
+        left, right = self._latest(self.left_topic), self._latest(self.right_topic)
+        if left is None or right is None:
+            return None, None
+        if left.ndim == 3:
+            left = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
+        if right.ndim == 3:
+            right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
+        return np.ascontiguousarray(left), np.ascontiguousarray(right)
+
+    def shutdown(self):
+        try:
+            self._exec.shutdown()
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+class RosEyeCap:
+    """눈 카메라 자리에 끼우는 shim. 기존 eye_cap.read()/.release() 를 그대로 쓴다."""
+
+    def __init__(self, source):
+        self._src = source
+
+    def read(self):
+        f = self._src.eye_frame()
+        return (f is not None), f
+
+    def release(self):
+        pass
 
 
 def open_eye(width, height, fps):
@@ -289,7 +476,9 @@ def make_stereo_matcher():
     )
 
 
-def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5):
+def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5,
+             min_valid_ratio=0.7, max_relative_mad=0.08,
+             max_relative_spread=0.2):
     if disparity is None:
         return None, 0
     h, w = disparity.shape
@@ -298,15 +487,74 @@ def depth_at(disparity, u, v, fx, baseline_m, radius=3, min_valid=5):
     y1, y2 = max(0, v - radius), min(h, v + radius + 1)
     roi = disparity[y1:y2, x1:x2]
     valid = roi[np.isfinite(roi) & (roi > 0)]
-    if len(valid) < min_valid:
+    required = max(min_valid, int(np.ceil(roi.size * min_valid_ratio)))
+    if len(valid) < required:
         return None, int(len(valid))
     disp = float(np.median(valid))
+    mad = float(np.median(np.abs(valid - disp)))
+    p10, p90 = np.percentile(valid, [10, 90])
+    if (disp <= 0 or mad / disp > max_relative_mad or (p90 - p10) / disp > max_relative_spread):
+        return None, int(len(valid))
     return float(fx * baseline_m / disp), int(len(valid))
 
 
 def interpolate_affine(depth_m, affine_05, affine_10):
     alpha = float(np.clip((depth_m - 0.5) / 0.5, 0.0, 1.0))
     return ((1.0 - alpha) * affine_05 + alpha * affine_10).astype(np.float32)
+
+
+# 로봇팔로 보낼 깊이의 허용 범위. 팔이 닿는 거리(테이블 위 컵)를 넘어서는 값은
+# 대부분 배경을 잘못 짚은 것이라 보내지 않는다.
+FUSE_MIN_DEPTH_M = 0.15
+FUSE_MAX_DEPTH_M = 2.5
+
+
+def fuse_and_send(sender, ros_src, gaze_valid, u, v, disparity, baseline_m,
+                  last_depth_m, scene_flipped, sw, sh):
+    """시선 픽셀 + 스테레오 깊이 + SLAM 포즈 -> 세계좌표 p_W -> UDP 송신.
+
+    반환: (갱신된 last_depth_m, 상태문자열)
+
+    유효하지 않으면 valid=False 패킷을 보낸다. 조용히 안 보내면 gaze_bridge 쪽에서
+    "아직 안 왔다"와 "지금 못 믿는다"를 구분할 수 없고, dwell_detector 가 마지막
+    유효 샘플을 계속 붙들게 된다.
+    """
+    if not gaze_valid:
+        sender.send([0.0, 0.0, 0.0], valid=False)
+        return last_depth_m, "시선없음"
+
+    # --scene-flip 은 표시용 이미지만 180도 돌린다. 캘리브레이션은 그 돌아간 화면 위에서
+    # 클릭해서 만들었으므로 (u,v) 는 '돌아간' 좌표계다. 반면 disparity 는 돌리기 전
+    # left_gray/right_gray 로 계산했고 K(RECTIFIED_K) 도 돌리기 전 좌표계 기준이다.
+    # 깊이 조회와 역투영은 둘 다 돌리기 전 좌표로 해야 한다.
+    if scene_flipped:
+        u_cam, v_cam = sw - 1 - u, sh - 1 - v
+    else:
+        u_cam, v_cam = u, v
+
+    D, _n = depth_at(disparity, u_cam, v_cam,
+                     ocams_calib.RECTIFIED_K[0, 0], baseline_m, radius=5)
+    if D is None:
+        sender.send([0.0, 0.0, 0.0], valid=False)
+        return last_depth_m, "깊이없음"
+    if not (FUSE_MIN_DEPTH_M <= D <= FUSE_MAX_DEPTH_M):
+        sender.send([0.0, 0.0, 0.0], valid=False)
+        return last_depth_m, f"깊이범위밖 {D:.2f}m"
+
+    T_WS = ros_src.latest_pose() if ros_src is not None else None
+    if T_WS is None:
+        # 포즈는 추적 OK 일 때만 발행된다 -> 없음 == 추적 상실.
+        sender.send([0.0, 0.0, 0.0], valid=False)
+        return D, "SLAM끊김"
+
+    p_W, _origin, _ray = fusion.gaze_point_world(
+        u_cam, v_cam, D, ocams_calib.RECTIFIED_K, T_WS)
+    if not np.all(np.isfinite(p_W)):
+        sender.send([0.0, 0.0, 0.0], valid=False)
+        return D, "p_W 비정상"
+
+    sender.send(p_W, valid=True, T_WS=T_WS)
+    return D, f"송신 ({p_W[0]:+.2f},{p_W[1]:+.2f},{p_W[2]:+.2f})"
 
 
 def main():
@@ -323,14 +571,16 @@ def main():
                          "캘리브레이션 값을 그대로 씀(근사 아님) — 스테레오 깊이(docs/03)와 "
                          "좌표계를 맞추려면 이 기본값을 그대로 쓸 것")
     ap.add_argument("--baseline-m", type=float, default=None,
-                    help="스테레오 baseline(m) 강제 지정, 진단용. 미지정시 ocams_calib.BASELINE_M "
-                         "(Kalibr 계산값, 실측 아님). 2026-08-29: 실측 baseline(캘리퍼스 12cm)이 "
-                         "8/11 재캘리브레이션 값(10.67cm)과 달라 깊이가 실제보다 짧게 나오는 문제 "
-                         "진단 중 — rectification(R1/R2)은 그대로 두고 이 상수만 바꿔서 baseline만 "
-                         "따로 검증하기 위해 추가.")
+                    help="SGBM 깊이 baseline(m) 강제 지정, 진단용. 미지정시 0.5/1.05/1.5m 실측으로 "
+                         "검증한 ocams_calib.DEPTH_BASELINE_M을 사용한다.")
     ap.add_argument("--smooth", type=float, default=0.25,
                     help="시선벡터 EMA 계수(0=고정,1=생값). 7/2 노트의 프레임간 튐(std0.18) 완화")
-    ap.add_argument("--flip", action="store_true", help="눈 영상 상하반전")
+    # 주의: --flip 은 이름과 달리 180도 회전(상하+좌우)이다. 기존 동작을 바꾸면
+    # 이미 이걸로 맞춰둔 설정이 깨지므로 그대로 두고, 축별 옵션을 따로 뒀다.
+    ap.add_argument("--flip", action="store_true",
+                    help="눈 영상 180도 회전 (상하+좌우 동시)")
+    ap.add_argument("--flip-v", action="store_true", help="눈 영상 상하만 반전")
+    ap.add_argument("--flip-h", action="store_true", help="눈 영상 좌우만 반전")
     ap.add_argument("--scene-flip", action="store_true", help="씬 카메라(oCamS) 180도 반전 (카메라가 거꾸로 장착된 경우)")
     ap.add_argument("--enable-experimental-depth", action="store_true",
                     help="검증되지 않은 스테레오 깊이 기반 0.5m/1.0m affine 보간 사용")
@@ -338,6 +588,23 @@ def main():
                     help="시선 x축 반전을 끈다. 기본은 켬 — 눈 카메라는 사용자를 마주보므로 "
                          "씬 카메라와 좌우가 뒤집힌다(1점 캘리브의 최소회전으로는 못 고침)")
     ap.add_argument("--mirror-y", action="store_true", help="시선 y축도 반전(상하가 뒤집힐 때)")
+    ap.add_argument("--source", choices=["local", "ros"], default="local",
+                    help="local=USB 카메라 직접 / ros=라즈베리파이가 쏘는 토픽 구독")
+    ap.add_argument("--eye-topic", default="/eye/image_raw/compressed")
+    ap.add_argument("--left-topic", default="/camera/left/compressed")
+    ap.add_argument("--right-topic", default="/camera/right/compressed")
+    # --- 로봇팔 연동 (융합 송신) ---
+    ap.add_argument("--send-udp", action="store_true",
+                    help="시선 3D 세계좌표를 gaze_bridge 로 UDP 송신. --source ros 필요 "
+                         "(SLAM 포즈 T_WS 를 같은 rclpy 노드에서 구독한다)")
+    ap.add_argument("--udp-host", default="127.0.0.1",
+                    help="gaze_bridge 가 도는 호스트 (기본 127.0.0.1)")
+    ap.add_argument("--udp-port", type=int, default=55055,
+                    help="gaze_bridge 의 udp_port 파라미터와 같아야 한다 (기본 55055)")
+    ap.add_argument("--pose-topic", default="/orbslam3/pose",
+                    help="SLAM 헤드 포즈 토픽 (PoseStamped, frame=map)")
+    ap.add_argument("--pose-stale-sec", type=float, default=0.3,
+                    help="이 시간 동안 포즈가 안 오면 추적 상실로 보고 송신을 막는다")
     ap.add_argument("--no-rerun", action="store_true", help="Rerun 로깅 끄기 (cv2 창만 사용)")
     ap.add_argument("--rerun-every", type=int, default=3,
                     help="Rerun에 영상을 N프레임마다 1번만 로깅 (기본 3). 매 프레임 원본 "
@@ -346,12 +613,13 @@ def main():
                          "Rerun 쪽 영상만 덜 자주 보냄")
     args = ap.parse_args()
 
-    baseline_m = args.baseline_m if args.baseline_m is not None else ocams_calib.BASELINE_M
+    baseline_m = args.baseline_m if args.baseline_m is not None else ocams_calib.DEPTH_BASELINE_M
     if args.baseline_m is not None:
-        print(f"[baseline] 강제 지정: {baseline_m:.4f}m (캘리브레이션값 {ocams_calib.BASELINE_M:.4f}m 대신)")
+        print(f"[baseline] 강제 지정: {baseline_m:.4f}m "
+              f"(검증 기본값 {ocams_calib.DEPTH_BASELINE_M:.4f}m 대신)")
 
     if args.enable_experimental_depth:
-        print("[경고] 스테레오 깊이는 현재 검증 실패 상태입니다. 로봇팔 제어에 사용하지 마세요.")
+        print("[경고] SGBM 거리 스케일은 검증됐지만 거리별 시선 affine 보간은 아직 실험 기능입니다.")
 
     if rr is None and not args.no_rerun:
         print("[rerun] 패키지 없음 — cv2 창만 사용")
@@ -365,16 +633,45 @@ def main():
                      -1.0 if args.mirror_y else 1.0,
                      1.0], dtype=np.float32)
 
-    try:
-        eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
-    except (OSError, RuntimeError) as e:
-        eye_cap = None
-        print(f"[startup] 눈 카메라 없음 — 연결 대기: {e}")
-    try:
-        scene_cap = open_scene(args.scene_width, args.scene_height)
-    except (OSError, RuntimeError) as e:
+    if args.send_udp and args.source != "ros":
+        # 로컬 USB 모드에는 SLAM 포즈를 받을 rclpy 노드가 없다. 조용히 안 보내는
+        # 것보다 여기서 멈추는 게 낫다 — 로봇팔이 대기만 하다 끝나는 걸 디버깅하기 어렵다.
+        ap.error("--send-udp 는 --source ros 가 필요하다 (SLAM 포즈 구독 경로가 거기에만 있다)")
+
+    ros_src = None
+    if args.source == "ros":
+        ros_src = RosFrameSource(args.eye_topic, args.left_topic, args.right_topic)
+        # 눈은 shim 으로 기존 eye_cap 경로를 그대로 태운다.
+        # 씬은 이미 rectify 된 쌍이 오므로 루프에서 따로 분기한다.
+        eye_cap = RosEyeCap(ros_src)
         scene_cap = None
-        print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
+        if args.send_udp:
+            ros_src.enable_pose(args.pose_topic, args.pose_stale_sec)
+
+    udp_sender = None
+    if args.send_udp:
+        udp_sender = GazeUdpSender(args.udp_host, args.udp_port)
+        print(f"[udp] 시선 3D점 송신: {args.udp_host}:{args.udp_port}")
+        # 스케일 불일치 경고. depth 와 pose 가 서로 다른 '미터'를 쓰면 p_W 는 의미가 없다.
+        # ocams_calib 은 SGBM 용으로 10.5cm(2026-09-22 실측 보정), SLAM 설정은 기하값
+        # 17.16cm 를 쓴다 — 비율 1.63배. 어느 쪽이 맞는지는 줄자 실측으로만 정해진다.
+        if abs(baseline_m - ocams_calib.GEOMETRIC_BASELINE_M) > 1e-4:
+            print(f"[udp][주의] 깊이 baseline({baseline_m*100:.1f}cm)이 SLAM 기하 "
+                  f"baseline({ocams_calib.GEOMETRIC_BASELINE_M*100:.1f}cm)과 다르다 "
+                  f"— 비율 {ocams_calib.GEOMETRIC_BASELINE_M/baseline_m:.2f}배. "
+                  f"둘 중 하나는 틀렸고, 틀린 쪽만큼 p_W 가 어긋난다. "
+                  f"verify_depth_scale.py 로 실측 확인할 것.")
+    else:
+        try:
+            eye_cap = open_eye(args.eye_width, args.eye_height, args.eye_fps)
+        except (OSError, RuntimeError) as e:
+            eye_cap = None
+            print(f"[startup] 눈 카메라 없음 — 연결 대기: {e}")
+        try:
+            scene_cap = open_scene(args.scene_width, args.scene_height)
+        except (OSError, RuntimeError) as e:
+            scene_cap = None
+            print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
 
     if (args.scene_width, args.scene_height) != (ocams_calib.IMAGE_WIDTH, ocams_calib.IMAGE_HEIGHT):
         print(f"[경고] --scene-width/height가 캘리브레이션 해상도"
@@ -384,7 +681,16 @@ def main():
     else:
         left_maps, right_maps = ocams_calib.build_rectify_maps()
 
-    probe_left, probe_right = scene_stereo(scene_cap, left_maps, right_maps) if scene_cap is not None else (None, None)
+    if ros_src is not None:
+        # 토픽이 붙을 때까지 잠깐 기다린다. 첫 프레임이 없으면 해상도 추정을 못 한다.
+        for _ in range(50):
+            probe_left, probe_right = ros_src.scene_pair()
+            if probe_left is not None:
+                break
+            time.sleep(0.1)
+    else:
+        probe_left, probe_right = (scene_stereo(scene_cap, left_maps, right_maps)
+                                   if scene_cap is not None else (None, None))
     probe = probe_left
     if probe is None:
         if scene_cap is not None:
@@ -408,10 +714,11 @@ def main():
     latest_disparity = None
     latest_depth_m = None
     depth_valid_count = 0
+    udp_status = "대기"
     print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
-    print("[키] c=1점 / m=affine 다점 / M=R,p_eye 최소제곱 다점(6+, docs/12) "
-          "/ d=깊이 좌클릭 모드 / s=저장 / r=리셋 / q=종료")
+    print("[키] c=1점 / m=affine 다점(한 거리) / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) "
+          "/ d=깊이 좌클릭 모드 / x,y=축 반전 / s=저장 / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
     gaze_affine = None
@@ -500,6 +807,8 @@ def main():
     def reconnect_scene():
         """USB 재연결로 /dev/videoN이 바뀌어도 by-id로 씬 카메라를 다시 연다."""
         nonlocal scene_cap, next_scene_retry
+        if ros_src is not None:
+            return          # 토픽 모드에서는 로컬 USB 를 열면 안 된다
         now = time.monotonic()
         if scene_cap is not None or now < next_scene_retry:
             return
@@ -516,7 +825,22 @@ def main():
             reconnect_scene()
 
             scene = None
-            if scene_cap is not None:
+            if ros_src is not None:
+                # Pi 가 이미 분리·rectify 해서 보낸다. 여기서 또 하면 안 된다.
+                left_gray, right_gray = ros_src.scene_pair()
+                if left_gray is None or right_gray is None:
+                    if frame_idx % 60 == 0:
+                        print("[ros] 씬 토픽 대기 중 — Pi 의 ocams.sh 가 떠 있는지 확인")
+                else:
+                    scene = cv2.cvtColor(left_gray, cv2.COLOR_GRAY2BGR)
+                    if frame_idx % 3 == 0 and (
+                            depth_mode or args.enable_experimental_depth or extrinsic_mode
+                            or args.send_udp):
+                        latest_disparity = (
+                            stereo_matcher.compute(left_gray, right_gray).astype(np.float32) / 16.0)
+                    if args.scene_flip:
+                        scene = cv2.flip(scene, -1)
+            elif scene_cap is not None:
                 left_gray, right_gray = scene_stereo(scene_cap, left_maps, right_maps)
                 if left_gray is None or right_gray is None:
                     print("[disconnect] 씬 카메라 프레임 끊김 — 자동 재연결 대기")
@@ -549,7 +873,11 @@ def main():
             log_images_this_frame = rerun_ok and (frame_idx % args.rerun_every == 0)
             if eye is not None:
                 if args.flip:
-                    eye = cv2.flip(eye, -1)
+                    eye = cv2.flip(eye, -1)     # 180도
+                elif args.flip_v:
+                    eye = cv2.flip(eye, 0)      # 상하
+                elif args.flip_h:
+                    eye = cv2.flip(eye, 1)      # 좌우
 
                 if rerun_ok:
                     rr.set_time("frame", sequence=frame_idx)
@@ -646,6 +974,8 @@ def main():
                                 gaze_affine, calib_dirs, calib_pixels) / len(calib_dirs))
                             print(f"[다점-affine] {len(calib_dirs)}점으로 재계산. "
                                   f"평균 픽셀오차={px_err:.1f}px")
+                            if len(calib_dirs) >= 5:
+                                print_calib_report(gaze_affine, calib_dirs, calib_pixels)
                             if len(calib_dirs) >= 9:
                                 save_affine_calibration(
                                     calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
@@ -689,6 +1019,13 @@ def main():
                     if gaze_valid:
                         u = int(np.clip(cx + fx * (g[0] / g[2]), 0, SW - 1))
                         v = int(np.clip(cy - fy * (g[1] / g[2]), 0, SH - 1))
+
+                if udp_sender is not None:
+                    latest_depth_m, udp_status = fuse_and_send(
+                        udp_sender, ros_src, gaze_valid, u if gaze_valid else None,
+                        v if gaze_valid else None, latest_disparity, baseline_m,
+                        latest_depth_m, args.scene_flip, SW, SH)
+
                 if gaze_valid:
                     cv2.circle(scene, (u, v), 28, (0, 255, 0), 3)
                     cv2.drawMarker(scene, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
@@ -702,6 +1039,11 @@ def main():
                 else:
                     cv2.putText(scene, "invalid gaze", (20, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            elif udp_sender is not None:
+                # 캘리브 전이거나 동공을 놓친 상태. 무소식보다 "지금은 못 믿는다"를
+                # 명시적으로 보내야 로봇팔 쪽이 마지막 유효점을 붙들지 않는다.
+                udp_sender.send([0.0, 0.0, 0.0], valid=False)
+                udp_status = "미캘리브" if not calibrated else "동공놓침"
                 if (args.enable_experimental_depth
                         and affine_05 is not None and affine_10 is not None):
                     status = "CALIBRATED DEPTH 0.5-1.0m"
@@ -726,8 +1068,15 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
             mirror = f"mirror x={'ON' if sign[0] < 0 else 'off'} y={'ON' if sign[1] < 0 else 'off'}"
-            cv2.putText(scene, f"{status} | model_centers={n_model}", (20, 30),
+            # status 가 길면(NOT CALIBRATED ...) model_centers 가 화면 밖으로
+            # 밀려서 안 보였다. 같은 줄 오른쪽에 따로 붙여 항상 보이게 한다.
+            cv2.putText(scene, status, (20, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            mc_text = f"mc={n_model}"
+            (mc_w, _), _ = cv2.getTextSize(mc_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            mc_color = (0, 255, 0) if n_model >= 30 else (0, 165, 255)   # 30 미만이면 주황
+            cv2.putText(scene, mc_text, (SW - mc_w - 12, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, mc_color, 2)
             cv2.putText(scene, f"{mirror}  (x/y=toggle)", (20, 58),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
             multi_color = (0, 255, 255) if multi_mode else (150, 150, 150)
@@ -745,6 +1094,11 @@ def main():
                                 f"max={extrinsic_residuals.max()*100:.1f}")
                 cv2.putText(scene, ex_text, (20, 114),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+            if udp_sender is not None:
+                # 초록 = 로봇팔로 실제 좌표가 나가는 중. 그 외는 왜 안 나가는지 이유를 띄운다.
+                udp_color = (0, 255, 0) if udp_status.startswith("송신") else (0, 165, 255)
+                cv2.putText(scene, f"UDP {udp_status}  [{udp_sender.sent}/{udp_sender.dropped}]",
+                            (20, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.55, udp_color, 2)
             if eye_cap is None:
                 cv2.putText(scene, "EYE CAMERA DISCONNECTED (scene-only depth test OK)",
                             (20, SH - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
@@ -773,7 +1127,9 @@ def main():
             elif key == ord('m'):
                 multi_mode = not multi_mode
                 print(f"[다점] 모드 {'ON — 실제 지점을 응시한 채 그 위치를 클릭' if multi_mode else 'OFF'}")
-            elif key == ord('M'):
+            # 'e' 는 'M' 과 같은 기능. Qt 백엔드에서 Shift 조합이 waitKey 에
+            # 안 잡히는 경우가 있어 Shift 없이 쓸 수 있는 키를 하나 더 뒀다.
+            elif key in (ord('M'), ord('e')):
                 extrinsic_mode = not extrinsic_mode
                 if extrinsic_mode:
                     depth_mode = False
@@ -813,6 +1169,17 @@ def main():
                 print(f"[mirror] {'x' if i == 0 else 'y'} 반전 -> {sign[i]:+.0f} "
                       f"(캘리브 리셋됨, 다시 'c' 또는 'm'+클릭)")
     finally:
+        if udp_sender is not None:
+            # 마지막 한 발은 valid=False. 뷰어를 끄면 로봇팔이 옛 좌표를 붙들고
+            # 그리로 움직이려 할 수 있다 — 끊길 때 명시적으로 무효화한다.
+            try:
+                udp_sender.send([0.0, 0.0, 0.0], valid=False)
+            except OSError:
+                pass
+            print(f"[udp] 송신 {udp_sender.sent} / 버림 {udp_sender.dropped}")
+            udp_sender.close()
+        if ros_src is not None:
+            ros_src.shutdown()
         if eye_cap is not None:
             eye_cap.release()
         if scene_cap is not None:

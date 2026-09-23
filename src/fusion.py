@@ -81,6 +81,32 @@ def rotation_matrix_to_quat(R):
     return [float(x), float(y), float(z), float(w)]
 
 
+def quat_xyzw_to_matrix(q):
+    """쿼터니언 [x, y, z, w] -> 3x3 회전행렬. rotation_matrix_to_quat 의 역변환.
+
+    /orbslam3/pose (PoseStamped) 를 4x4 T_WS 로 만들 때 쓴다. scipy 를 안 쓰는 건
+    이 모듈의 의존성을 numpy 하나로 유지하기 위해서다(파일 상단 주석 참고).
+    """
+    x, y, z, w = (float(v) for v in q)
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n < 1e-12:
+        raise ValueError(f"영벡터 쿼터니언: {q}")
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z),     2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [    2 * (x * y + z * w), 1 - 2 * (x * x + z * z),     2 * (y * z - x * w)],
+        [    2 * (x * z - y * w),     2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], dtype=float)
+
+
+def pose_to_matrix(position, quat_xyzw):
+    """(position [x,y,z], quat [x,y,z,w]) -> 4x4 T_WS (world <- sensor)."""
+    T = np.eye(4)
+    T[:3, :3] = quat_xyzw_to_matrix(quat_xyzw)
+    T[:3, 3] = [float(v) for v in position]
+    return T
+
+
 def _project(p_cam, K):
     """검증용: 카메라 좌표 3D점 -> (u, v). gaze_point_world의 역변환."""
     x, y, z = p_cam
@@ -152,5 +178,16 @@ if __name__ == "__main__":
     disparity_px = 20.0
     D_from_disparity = K[0, 0] * OCAMS_BASELINE_M / disparity_px
     print(f"[info] baseline={OCAMS_BASELINE_M*100:.2f}cm, disparity={disparity_px}px -> D={D_from_disparity:.3f}m")
+
+    # 5) 쿼터니언 왕복 (T_WS 를 /orbslam3/pose 에서 만들 때 쓰는 경로)
+    rt_ok = True
+    for name, T in (("identity", T_identity), ("평행이동", T_translated), ("회전+평행이동", T_rotated)):
+        q = rotation_matrix_to_quat(T[:3, :3])
+        R_back = quat_xyzw_to_matrix(q)
+        err = np.max(np.abs(R_back - T[:3, :3]))
+        status = "OK" if err < 1e-12 else "FAIL"
+        rt_ok &= err < 1e-12
+        print(f"[{status}] 쿼터니언 왕복 {name}: max|R-R'|={err:.2e}")
+    all_ok &= rt_ok
 
     print("\n전체:", "PASS" if all_ok else "FAIL")
