@@ -51,7 +51,8 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from gaze_hri.kinematics import (fit_plane_ransac, height_above_plane,
-                                 project_onto_plane, quat_to_matrix)
+                                 intersect_ray_plane, project_onto_plane,
+                                 quat_to_matrix, ray_point_distance)
 
 
 class TargetResolver(Node):
@@ -186,6 +187,14 @@ class TargetResolver(Node):
         if self.expected_role == "idle":
             return
 
+        # 머리 위치(광선 원점). msg.point 와 같은 좌표계로 들어오므로 반드시
+        # 같은 변환을 태워야 한다. TF가 없으면 None 이 되고, 그러면 예전처럼
+        # 직교 투영으로 물러선다.
+        origin_base = None
+        if msg.has_origin:
+            origin_base = self.to_base([msg.origin.x, msg.origin.y, msg.origin.z],
+                                       msg.header.frame_id)
+
         h = height_above_plane(p, self.plane)
         n = np.asarray(self.plane[:3], dtype=float)
 
@@ -199,7 +208,7 @@ class TargetResolver(Node):
         target.confidence = float(msg.confidence)
 
         if self.expected_role == "pick":
-            snapped = self._snap_to_object(p)
+            snapped = self._snap_to_object(p, origin_base)
             if snapped is not None:
                 base = snapped
                 target.snapped = True
@@ -226,13 +235,18 @@ class TargetResolver(Node):
                     )
                     return
 
-            # 파지 높이 보정: 물체 표면이 아니라 "테이블에서 grasp_height 만큼 위"를 잡는다
-            on_plane = project_onto_plane(base, self.plane)
+            # 파지 높이 보정: 물체 표면이 아니라 "테이블에서 grasp_height 만큼 위"를 잡는다.
+            # 스냅된 점은 탑다운 카메라가 준 정확한 물체 중심이라 광선과 무관하다.
+            # 그대로 수직 투영한다. 스냅에 실패해 응시점을 쓰는 경우에만 광선을 쓴다.
+            if target.snapped:
+                on_plane = project_onto_plane(base, self.plane)
+            else:
+                on_plane = self._gaze_to_table(p, origin_base)
             final = on_plane + n * self.grasp_height
 
         else:  # place
             # 놓을 자리는 무조건 테이블 평면 위로 눌러준다
-            on_plane = project_onto_plane(p, self.plane)
+            on_plane = self._gaze_to_table(p, origin_base)
             final = on_plane + n * (self.grasp_height + self.place_clearance)
             target.label = "table"
 
@@ -247,11 +261,45 @@ class TargetResolver(Node):
         )
 
     # ------------------------------------------------------------------
-    def _snap_to_object(self, p):
+    def _gaze_to_table(self, p, origin_base):
+        """응시점을 테이블 평면 위의 점으로 내린다 (둘 다 base_frame 기준).
+
+        머리 위치를 알면 origin -> p 광선을 평면과 교차시킨다. 이러면 추정
+        응시점이 광선 위 어디에 있든(= 깊이 오차가 있어도) 같은 자리를 뚫으므로,
+        깊이 오차가 테이블 위 가로 오차로 새지 않는다. 직교 투영은 머리
+        0.45m / 거리 0.35m 기준으로 깊이 오차의 약 0.62배를 가로로 흘린다.
+
+        머리 위치가 없거나(has_origin=false, TF 실패) 교차가 실패하면
+        (평행하거나 머리 뒤쪽) 예전 그대로 직교 투영으로 물러선다.
+        """
+        if origin_base is not None:
+            hit = intersect_ray_plane(origin_base, p - origin_base, self.plane)
+            if hit is not None:
+                self.get_logger().info(
+                    "테이블 점: 광선-평면 교차 사용 (깊이 오차에 둔감)",
+                    throttle_duration_sec=5.0)
+                return hit
+            self.get_logger().warn(
+                "광선-평면 교차 실패(평면과 평행이거나 교점이 머리 뒤쪽). "
+                "직교 투영으로 물러섭니다.", throttle_duration_sec=5.0)
+        else:
+            self.get_logger().info(
+                "테이블 점: 직교 투영 사용 (머리 위치 없음 — /head/pose 확인)",
+                throttle_duration_sec=5.0)
+        return project_onto_plane(p, self.plane)
+
+    # ------------------------------------------------------------------
+    def _snap_to_object(self, p, origin_base=None):
         """가장 가까운 물체 중심으로 끌어당긴다.
 
         1등과 2등이 엇비슷하면 어느 컵인지 특정할 수 없으므로 거부한다.
         시선 오차가 3cm일 때 컵이 6cm 이내로 붙어 있으면 여기에 걸린다.
+
+        머리 위치(origin_base)를 알면 "시선 광선이 각 물체의 파지 높이 중심을
+        얼마나 가깝게 지나가는가"로 잰다. 물체 좌표는 테이블면(z=table)으로 들어오고
+        시선은 컵 몸통을 보므로, 응시점과 점-점으로 비교하면 응시점이 광선 위 어느
+        높이에 찍혔는지에 따라 5~8cm 가 앞뒤로 흔들린다 (머리 0.35m 위, 0.6m 거리,
+        컵 중간 4.5cm 기준). 광선 거리는 그 선택과 무관하다.
         """
         if not self.objects:
             return None
@@ -261,7 +309,14 @@ class TargetResolver(Node):
                 "검출 노드가 살아 있는지 확인하세요.", throttle_duration_sec=5.0)
             return None
 
-        dists = np.array([float(np.linalg.norm(o - p)) for o in self.objects])
+        if origin_base is not None and float(np.linalg.norm(p - origin_base)) > 1e-6:
+            n = np.asarray(self.plane[:3], dtype=float)
+            centers = [project_onto_plane(o, self.plane) + n * self.grasp_height
+                       for o in self.objects]
+            dists = np.array([ray_point_distance(origin_base, p - origin_base, c)
+                              for c in centers])
+        else:
+            dists = np.array([float(np.linalg.norm(o - p)) for o in self.objects])
         order = np.argsort(dists)
         i = int(order[0])
         if dists[i] > self.snap_radius:

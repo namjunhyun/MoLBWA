@@ -310,3 +310,63 @@ def project_onto_plane(point, plane):
 def height_above_plane(point, plane):
     p = np.asarray(point, dtype=float)
     return float(np.asarray(plane[:3]) @ p + plane[3])
+
+
+def intersect_ray_plane(origin, direction, plane, eps=1e-9):
+    """광선(origin + t*direction, t >= 0)과 평면 ax+by+cz+d=0 의 교점.
+
+    시선을 "점"이 아니라 "광선"으로 다루기 위한 함수입니다.
+    점을 그대로 평면에 수직 투영하면(project_onto_plane) 깊이 오차가 테이블 위
+    가로 오차로 새지만, 광선-평면 교차는 추정점이 광선 위 어디에 있든 같은 곳을
+    뚫으므로 깊이 오차에 둔감합니다.
+
+    None 을 돌려주는 두 경우 — 둘 다 호출자가 예전 방식으로 물러서야 합니다:
+      - 광선이 평면과 평행 (|n·dir| < eps): 교점이 없거나 무한히 많다
+      - 교점이 광선 뒤쪽 (t < 0): 머리 뒤편이므로 응시 결과일 수 없다
+    방향 벡터가 영벡터일 때도 평행으로 취급되어 None 입니다.
+
+    project_onto_plane/height_above_plane 은 |n|=1 을 암묵적으로 가정하지만,
+    여기서는 config 에서 정규화되지 않은 평면이 들어와도 되도록 방어적으로
+    정규화합니다.
+    """
+    o = np.asarray(origin, dtype=float)
+    v = np.asarray(direction, dtype=float)
+    n = np.asarray(plane[:3], dtype=float)
+    d = float(plane[3])
+
+    n_norm = float(np.linalg.norm(n))
+    v_norm = float(np.linalg.norm(v))
+    if n_norm < eps or v_norm < eps:
+        return None                      # 법선이나 방향이 정의되지 않음
+    n = n / n_norm
+    d = d / n_norm                       # 평면식 전체를 같은 값으로 나눠야 같은 평면
+    v = v / v_norm                       # t 가 미터 단위 거리가 되고, 평행 판정이
+    #                                      방향 벡터 길이에 흔들리지 않는다
+
+    denom = float(n @ v)                 # = cos(법선과 광선 사이 각)
+    if abs(denom) < eps:
+        return None                      # 평행
+
+    t = -(float(n @ o) + d) / denom
+    if t < 0.0:
+        return None                      # 광선 뒤쪽
+    return o + t * v
+
+
+def ray_point_distance(origin, direction, point, eps=1e-9):
+    """점에서 광선(origin + t*direction, t >= 0)까지의 최단 거리.
+
+    시선으로 "어느 물체를 보는가"를 가릴 때 쓴다. 응시점을 물체와 점-점 거리로
+    비교하면, 응시점이 광선 위 어느 높이에 찍혔느냐(테이블면? 컵 중간?)에 따라
+    결과가 달라진다. 광선까지의 거리는 그 선택과 무관하다.
+    점이 머리 뒤쪽(t < 0)이면 원점까지의 거리를 준다. 방향이 영벡터면 None.
+    """
+    o = np.asarray(origin, dtype=float)
+    v = np.asarray(direction, dtype=float)
+    q = np.asarray(point, dtype=float)
+    v_norm = float(np.linalg.norm(v))
+    if v_norm < eps:
+        return None
+    v = v / v_norm
+    t = max(0.0, float((q - o) @ v))
+    return float(np.linalg.norm(q - (o + t * v)))

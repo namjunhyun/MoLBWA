@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from gaze_hri.kinematics import (  # noqa: E402
     TOPDOWN_CALIB_XY, ArmGeometry, IKError, alignment_rmse, fit_plane_ransac,
     forward_kinematics, grasp_detected, height_above_plane,
-    inverse_kinematics, project_onto_plane, quat_to_matrix,
-    solve_with_fallback, umeyama_rigid)
+    intersect_ray_plane, inverse_kinematics, project_onto_plane,
+    quat_to_matrix, ray_point_distance, solve_with_fallback, umeyama_rigid)
 
 
 class TestForwardInverse(unittest.TestCase):
@@ -219,6 +219,45 @@ class TestTablePlane(unittest.TestCase):
         plane = np.array([0.0, 0.0, 1.0, 0.0])
         self.assertAlmostEqual(height_above_plane([0.3, 0.0, 0.05], plane), 0.05)
         self.assertAlmostEqual(height_above_plane([0.3, 0.0, -0.01], plane), -0.01)
+
+
+
+class TestGazeRaySnap(unittest.TestCase):
+    """시선 광선으로 물체를 고르는 판정 (2026-09-23, 태그 직결).
+
+    시연 배치: 컵 3개가 베이스 앞 0.30m 에 15cm 간격, 사용자 머리는 컵에서 0.6m,
+    테이블 위 0.35m. 시선은 가운데 컵의 몸통 중간(4.5cm)을 본다.
+    """
+
+    def setUp(self):
+        self.plane = np.array([0.0, 0.0, 1.0, 0.0])
+        self.cups = [np.array([0.30, y, 0.0]) for y in (0.15, 0.0, -0.15)]
+        self.head = np.array([0.90, 0.02, 0.35])
+        self.grasp_h = 0.045
+        self.look = self.cups[1] + [0, 0, self.grasp_h]
+
+    def test_distance_basics(self):
+        self.assertAlmostEqual(ray_point_distance([0, 0, 0], [1, 0, 0], [2, 3, 0]), 3.0)
+        # 머리 뒤쪽 점은 원점까지 거리
+        self.assertAlmostEqual(ray_point_distance([0, 0, 0], [1, 0, 0], [-4, 3, 0]), 5.0)
+        self.assertIsNone(ray_point_distance([0, 0, 0], [0, 0, 0], [1, 1, 1]))
+
+    def test_ray_snap_independent_of_sent_point(self):
+        d = self.look - self.head
+        on_table = intersect_ray_plane(self.head, d, self.plane)
+        centers = [c + [0, 0, self.grasp_h] for c in self.cups]
+        for sent in (on_table, self.look):          # 어느 높이의 점을 보내든
+            dists = [ray_point_distance(self.head, sent - self.head, c) for c in centers]
+            self.assertEqual(int(np.argmin(dists)), 1)
+            self.assertLess(min(dists), 1e-9)
+            gap = sorted(dists)[1] - min(dists)
+            self.assertGreater(gap, 0.10)            # ambiguity_margin(0.05) 여유
+
+    def test_point_snap_on_table_point_is_off_by_cm(self):
+        """대조군: 테이블 교차점을 점-점으로 비교하면 컵보다 한참 뒤에 찍힌다."""
+        on_table = intersect_ray_plane(self.head, self.look - self.head, self.plane)
+        err = float(np.linalg.norm(on_table - self.cups[1]))
+        self.assertGreater(err, 0.06)                # 스냅 반경(0.08)을 거의 다 먹는다
 
 
 if __name__ == "__main__":

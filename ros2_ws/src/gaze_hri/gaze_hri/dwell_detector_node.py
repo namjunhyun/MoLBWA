@@ -27,7 +27,7 @@ from collections import deque
 import numpy as np
 import rclpy
 from gaze_hri_msgs.msg import Fixation
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32
@@ -59,6 +59,10 @@ class DwellDetector(Node):
         qos = QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(PointStamped, "/gaze/point_raw", self.on_point, qos)
         self.create_subscription(Bool, "/gaze/valid", self.on_valid, qos)
+        # 머리 위치를 같이 모아서 Fixation.origin 으로 내보낸다. 이게 있어야
+        # target_resolver 가 시선을 광선으로 다룰 수 있다 (직교 투영은 깊이
+        # 오차를 테이블 위 가로 오차로 흘린다).
+        self.create_subscription(PoseStamped, "/head/pose", self.on_head, qos)
 
         self.pub_fix = self.create_publisher(Fixation, "/gaze/fixation", 10)
         self.pub_progress = self.create_publisher(Float32, "/gaze/dwell_progress", qos)
@@ -66,6 +70,7 @@ class DwellDetector(Node):
 
         self.buf = deque()            # (t, np.array([x,y,z]))
         self.valid_buf = deque()      # (t, bool)
+        self.head_buf = deque()       # (t, np.array([x,y,z])) 머리 위치
         self.last_fix_time = -1e9
         self.last_fix_point = None
         self.left_since_fix = True
@@ -83,6 +88,12 @@ class DwellDetector(Node):
         t = self.now()
         self.valid_buf.append((t, msg.data))
         self._trim(self.valid_buf, t)
+
+    def on_head(self, msg: PoseStamped):
+        t = self.now()
+        self.head_buf.append(
+            (t, np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])))
+        self._trim(self.head_buf, t)
 
     def on_point(self, msg: PointStamped):
         t = self.now()
@@ -109,6 +120,9 @@ class DwellDetector(Node):
         t = self.now()
         self._trim(self.buf, t)
         self._trim(self.valid_buf, t)
+        # 머리 위치도 같은 창으로 맞춰 둔다. /head/pose 가 끊기면 자연히 비게 되고,
+        # 그러면 has_origin=false 로 나가 소비자가 직교 투영으로 물러선다.
+        self._trim(self.head_buf, t)
 
         if len(self.buf) < 5:
             self.pub_progress.publish(Float32(data=0.0))
@@ -161,16 +175,32 @@ class DwellDetector(Node):
         msg.duration = float(span)
         msg.dispersion = rms
         msg.confidence = confidence
+
+        # 응시 구간(= 무게중심을 만든 그 창)의 머리 평균 위치를 광선 원점으로 싣는다.
+        # 같은 창에서 평균내야 점과 시간 정합이 맞는다.
+        if self.head_buf:
+            head_mean = np.array([h for _, h in self.head_buf]).mean(axis=0)
+            msg.origin.x, msg.origin.y, msg.origin.z = map(float, head_mean)
+            msg.has_origin = True
+        else:
+            head_mean = None
+            msg.has_origin = False       # origin 은 0으로 둔 채로 둔다
+
         self.pub_fix.publish(msg)
 
         self.last_fix_time = t
         self.last_fix_point = centroid
         self.left_since_fix = False
         self.buf.clear()
+        self.head_buf.clear()
 
+        origin_txt = (
+            f", 머리 ({head_mean[0]:.3f}, {head_mean[1]:.3f}, {head_mean[2]:.3f})"
+            if head_mean is not None else ", 머리 위치 없음(직교 투영으로 물러섬)"
+        )
         self.get_logger().info(
             f"응시 확정: ({centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}) "
-            f"산포 {rms * 1000:.1f}mm, 신뢰도 {confidence:.2f}"
+            f"산포 {rms * 1000:.1f}mm, 신뢰도 {confidence:.2f}{origin_txt}"
         )
 
     # ------------------------------------------------------------------
