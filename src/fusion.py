@@ -14,6 +14,8 @@ docs/03_fusion.md 체크리스트 1번 — gaze_point_world() 구현 + 합성 �
 위에서 캘리브레이션한다 (raw 이미지 기준이면 여기 K와 안 맞았음). K/baseline은 ocams_calib이
 유일한 출처 — 여기서 중복 정의하지 않고 그대로 가져다 쓴다.
 """
+import math
+
 import numpy as np
 
 from ocams_calib import RECTIFIED_K as OCAMS_RECTIFIED_K
@@ -39,6 +41,70 @@ def gaze_point_world(u, v, D, K, T_WS):
     ray_dir = ray_dir / np.linalg.norm(ray_dir)
 
     return p_W, origin, ray_dir
+
+
+def rotation_matrix_to_quat(R):
+    """3x3 회전행렬 -> 쿼터니언 [x, y, z, w].
+
+    ROS/TF 가 쓰는 xyzw 순서다. scipy 없이 numpy만으로 계산한다
+    (이 모듈의 의존성을 numpy 하나로 유지하기 위해서).
+
+    로봇팔 쪽(ros2_ws/src/gaze_hri)의 gaze_bridge 가 헤드 pose 를 받을 때
+    이 형식을 기대한다. docs/13_gaze_to_arm.md 참고.
+    """
+    R = np.asarray(R, dtype=float)
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        w, x, y, z = (0.25 * s,
+                      (R[2, 1] - R[1, 2]) / s,
+                      (R[0, 2] - R[2, 0]) / s,
+                      (R[1, 0] - R[0, 1]) / s)
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+        w, x, y, z = ((R[2, 1] - R[1, 2]) / s,
+                      0.25 * s,
+                      (R[0, 1] + R[1, 0]) / s,
+                      (R[0, 2] + R[2, 0]) / s)
+    elif R[1, 1] > R[2, 2]:
+        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+        w, x, y, z = ((R[0, 2] - R[2, 0]) / s,
+                      (R[0, 1] + R[1, 0]) / s,
+                      0.25 * s,
+                      (R[1, 2] + R[2, 1]) / s)
+    else:
+        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+        w, x, y, z = ((R[1, 0] - R[0, 1]) / s,
+                      (R[0, 2] + R[2, 0]) / s,
+                      (R[1, 2] + R[2, 1]) / s,
+                      0.25 * s)
+    return [float(x), float(y), float(z), float(w)]
+
+
+def quat_xyzw_to_matrix(q):
+    """쿼터니언 [x, y, z, w] -> 3x3 회전행렬. rotation_matrix_to_quat 의 역변환.
+
+    /orbslam3/pose (PoseStamped) 를 4x4 T_WS 로 만들 때 쓴다. scipy 를 안 쓰는 건
+    이 모듈의 의존성을 numpy 하나로 유지하기 위해서다(파일 상단 주석 참고).
+    """
+    x, y, z, w = (float(v) for v in q)
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n < 1e-12:
+        raise ValueError(f"영벡터 쿼터니언: {q}")
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z),     2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [    2 * (x * y + z * w), 1 - 2 * (x * x + z * z),     2 * (y * z - x * w)],
+        [    2 * (x * z - y * w),     2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], dtype=float)
+
+
+def pose_to_matrix(position, quat_xyzw):
+    """(position [x,y,z], quat [x,y,z,w]) -> 4x4 T_WS (world <- sensor)."""
+    T = np.eye(4)
+    T[:3, :3] = quat_xyzw_to_matrix(quat_xyzw)
+    T[:3, 3] = [float(v) for v in position]
+    return T
 
 
 def _project(p_cam, K):
@@ -113,5 +179,16 @@ if __name__ == "__main__":
     D_from_disparity = K[0, 0] * OCAMS_DEPTH_BASELINE_M / disparity_px
     print(f"[info] depth baseline={OCAMS_DEPTH_BASELINE_M*100:.2f}cm, "
           f"disparity={disparity_px}px -> D={D_from_disparity:.3f}m")
+
+    # 5) 쿼터니언 왕복 (T_WS 를 /orbslam3/pose 에서 만들 때 쓰는 경로)
+    rt_ok = True
+    for name, T in (("identity", T_identity), ("평행이동", T_translated), ("회전+평행이동", T_rotated)):
+        q = rotation_matrix_to_quat(T[:3, :3])
+        R_back = quat_xyzw_to_matrix(q)
+        err = np.max(np.abs(R_back - T[:3, :3]))
+        status = "OK" if err < 1e-12 else "FAIL"
+        rt_ok &= err < 1e-12
+        print(f"[{status}] 쿼터니언 왕복 {name}: max|R-R'|={err:.2e}")
+    all_ok &= rt_ok
 
     print("\n전체:", "PASS" if all_ok else "FAIL")

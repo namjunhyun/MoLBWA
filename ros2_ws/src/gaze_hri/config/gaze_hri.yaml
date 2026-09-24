@@ -1,0 +1,190 @@
+# =====================================================================
+#  gaze_hri 파라미터
+#  대회 데모 성패는 사실상 이 파일 튜닝에 달려 있습니다.
+# =====================================================================
+
+gaze_bridge:
+  ros__parameters:
+    source: "fake"          # fake | udp | inproc  (하드웨어 붙기 전엔 fake로 전체 검증)
+    udp_port: 55055
+    world_frame: "map"
+    head_frame: "head"
+    publish_rate: 30.0
+
+dwell_detector:
+  ros__parameters:
+    # 너무 짧으면 '보기만 해도 실행되는' 미다스의 손 문제가 생깁니다.
+    # 너무 길면 사용자가 지칩니다. 1.0~1.5초 사이에서 실험해 보세요.
+    dwell_time: 1.2
+    # 아이트래킹 정확도가 1도면 60cm 거리에서 약 1cm입니다.
+    # 그 3배 정도를 허용 산포로 잡으면 실사용에서 안정적입니다.
+    dispersion_radius: 0.030
+    min_valid_ratio: 0.7       # 깜빡임 허용치
+    cooldown: 1.5              # 연속 발동 방지
+    exit_radius: 0.10          # 이만큼 벗어나야 다시 선택 가능
+    max_sample_age: 0.35
+
+target_resolver:
+  ros__parameters:
+    # 모든 판정을 이 좌표계에서 한다. 들어오는 점은 전부 여기로 변환된다.
+    # table_plane 도 이 좌표계 기준으로 해석한다.
+    base_frame: "base_link"
+    # ax + by + cz + d = 0.  (a,b,c)는 위를 향하는 단위 법선.
+    # d = -table_z 관계다. topdown_click 의 table_z 를 바꾸면 여기도 같이 바꿔야 한다.
+    # table_calibration: true 로 놓고 테이블을 5~10회 응시하면
+    # 로그에 추정값이 찍힙니다. 그걸 여기 복사하세요.
+    table_plane: [0.0, 0.0, 1.0, 0.0]
+    table_calibration: false
+    snap_radius: 0.08          # 검출된 물체 중심으로 끌어당기는 허용 반경
+    object_min_height: 0.02    # 테이블에서 이보다 높아야 '물체'로 인정
+    grasp_height: 0.060        # 2026-09-24: 4.5cm 면 45° 접근 시 손가락 끝이 책상에 닿는다 (지름 7cm 컵)
+    place_clearance: 0.010
+    # 1등과 2등 물체 거리 차가 이보다 작으면 "어느 컵인지 모르겠다"로 보고 거부한다.
+    # 시선 오차 3cm 기준으로 컵이 6cm 이내로 붙어 있으면 여기에 걸린다.
+    # 틀린 컵을 집는 것보다 안 집는 게 낫다.
+    ambiguity_margin: 0.05
+    # 물체 목록이 이보다 오래되면 신뢰하지 않는다(검출 노드가 죽은 경우 대비).
+    object_timeout: 2.0
+    # 스냅 실패 시 응시점을 그대로 파지점으로 쓸지.
+    # 로봇 단독(마우스)은 클릭 자체가 정확하므로 false.
+    # 안경 연동 후에는 true 로 — gaze_hri.launch.py 가 켠다.
+    require_snap_for_pick: false
+
+task_manager:
+  ros__parameters:
+    min_separation: 0.10       # 집을 곳과 놓을 곳의 최소 거리
+    select_timeout: 15.0       # 선택 후 이 시간 지나면 자동 취소
+    min_confidence: 0.35
+    approach_pitch: -0.524     # -30도 (2026-09-24). l3=0.135 에서 -45도는 손가락 끝 여유 1.6cm, -30도는 2.6cm
+    dry_run: false
+
+arm_server:
+  ros__parameters:
+    backend: "dry_run"         # dry_run | feetech | joint
+    # feetech: 포트/0점/방향은 전부 이 파일에서 온다 (tools/so101_map_calib.py 로 실측).
+    # 파일이 없으면 arm_server 가 시작을 거부한다. 아래 serial_port/servo_* 는 feetech 에서 안 쓴다.
+    # 2026-09-23 이 책상: /dev/ttyACM0 = 리더(5V), ACM1 = 팔로워(12V). 번호는 바뀔 수 있어
+    # 맵 파일은 /dev/serial/by-id 경로를 쓴다.
+    joint_map_file: "~/MoLBWA-gaze-hri/ros2_ws/src/gaze_hri/config/so101_follower.yaml"
+    serial_port: "/dev/ttyACM0"
+    servo_ids: [1, 2, 3, 4, 5, 6]
+    servo_signs: [1, 1, 1, 1, 1, 1]     # 방향이 반대면 -1로
+    servo_offsets: [0, 0, 0, 0, 0, 0]   # 중립 위치 보정 (ticks)
+
+    base_frame: "base_link"
+    world_frame: "map"
+
+    approach_height: 0.08      # 2026-09-24: l3=0.135 로 길어져 반경 0.30m 에서 높이 0.19m 는 도달 불가
+    lift_height: 0.08          # 들고 옮길 때 다른 컵 위를 지나지 않게 배치할 것 (컵 높이 확인)
+    step_time: 0.04
+    cartesian_step: 0.008
+    gripper_open: 1.2
+    gripper_closed: 0.15
+    home_q: [0.0, -0.6, 1.2, -0.6, 0.0, 1.2]   # home_xyz 가 있으면 그리퍼(마지막 값)만 쓴다
+    # ★ 위 home_q 관절각은 이 기구학에서 팔꿈치가 베이스 바닥 아래(-0.9cm)다. 쓰지 말 것.
+    # 대신 TCP 위치로 준다: 팔꿈치 17cm / 손목 24cm / TCP 16cm — 컵 위를 넉넉히 비킨다.
+    home_xyz: [0.22, 0.0, 0.16]
+    home_pitch: -0.785
+    joint_speed_deg_s: 25.0
+    finger_tip_extra: 0.045    # 파지점(l3) -> 고정 손가락 끝. 실측 0.18 - l3
+    min_tip_z: 0.02            # 경로 전체에서 손가락 끝이 이보다 낮은 접근각은 안 쓴다 (처짐 ~1.2cm 별도)
+
+    # 안전 한계. 반드시 실제 도달 범위보다 '작아야' 한다.
+    # 링크 합(shoulder_offset+l1+l2+l3)이 최대 도달거리이고, 기본 링크값에서는
+    # 0.391 m 다. 예전 기본값 0.42 는 이보다 커서 안전 검사를 통과한 목표가
+    # 역기구학에서 실패했다. 링크 길이를 실측해 바꾸면 이 값도 같이 조정할 것.
+    # (arm_server 가 기동 시 둘을 비교해 경고한다)
+    workspace_radius: 0.38
+    min_z: -0.02
+    min_x: 0.12                # 팔 앞쪽만. 팔 뒤 태그판 쪽 목표 거부 (pan 이 -112°까지 돈다)
+    max_yaw_deg: 70.0
+
+    # ---- 파지 실패 감지 / 재시도 ----
+    # grasp_margin: 물체를 물었을 때 그리퍼가 "덜 닫히는" 정도.
+    #   컵 두께에 따라 달라집니다. 실측하는 법:
+    #   1) 컵을 물린 상태에서 ros2 topic echo /joint_states 로 gripper 값 확인
+    #   2) 빈손으로 닫았을 때 값도 확인
+    #   3) 두 값 차이의 절반 정도를 여기 넣으세요
+    grasp_margin: 0.08
+    grasp_settle: 0.9
+    min_grasp_load: 0          # 0이면 부하 검사 안 함. 실측 후 켜세요.
+    max_grasp_retries: 3
+    retry_offset: 0.006
+    simulate_fail_rate: 0.0    # dry_run에서 재시도 로직 테스트용 (0.5 = 50% 실패)
+
+    # ======= 반드시 본인 로봇 URDF 값으로 교체 =======
+    base_height: 0.0563
+    shoulder_offset: 0.0304
+    l1: 0.1160
+    l2: 0.1350
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
+
+calibrate_world_to_base:
+  ros__parameters:
+    base_height: 0.0563
+    shoulder_offset: 0.0304
+    l1: 0.1160
+    l2: 0.1350
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
+
+calib_tf_publisher:
+  ros__parameters:
+    world_frame: "map"
+    base_frame: "base_link"
+
+control_panel:
+  ros__parameters:
+    # 통합 GUI. 카메라를 직접 열고 물체 검출까지 담당하므로,
+    # topdown_click 과 동시에 띄우면 카메라를 두 번 열게 된다.
+    input_source: "mouse"      # mouse | gaze
+    camera_index: 0
+    width: 640
+    height: 480
+    sidebar_width: 320
+    table_z: 0.0
+    base_frame: "base_link"
+    hold_time: 2.0             # 클릭 후 좌표를 고정할 시간(마우스 모드)
+    detect_objects: true
+    hsv_lower: [0, 120, 80]    # 붉은 계열. 빨강은 색상환 양 끝에 걸쳐 있으므로
+    hsv_upper: [12, 255, 255]  # 하한 > 상한 으로 주면 두 구간을 자동으로 합친다
+    min_area: 400
+    show_arm_tip: true         # 관절각으로 팔 끝 위치를 계산해 화면에 표시
+    # 캘리브레이션 (GUI 에서 k 키). topdown_click 과 같은 값을 쓴다.
+    calib_height: 0.005        # 캘리브 때 그리퍼 끝을 테이블에서 띄울 높이
+    ransac_threshold_m: 0.005  # 오클릭 제외 임계값 [m]. 목표가 미터라 임계도 미터.
+
+    base_height: 0.0563
+    shoulder_offset: 0.0304
+    l1: 0.1160
+    l2: 0.1350
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
+
+topdown_click:
+  ros__parameters:
+    mode: "run"                # run | calib
+    camera_index: 0
+    width: 640
+    height: 480
+    hold_time: 2.0             # 클릭 후 좌표를 고정할 시간. dwell_time보다 커야 합니다.
+    table_z: 0.0               # 테이블면의 로봇 기준 높이. 로봇이 책상에 있으면 0.
+    # 이 노드가 내는 좌표는 호모그래피 결과 = 로봇 베이스 기준이다.
+    # "map"으로 달면 안경 연동 후 SLAM 좌표와 뒤섞인다.
+    base_frame: "base_link"
+    # 캘리브 때 그리퍼 끝을 테이블면에서 띄울 높이 [m].
+    # 캘리브 점이 전부 같은 높이여야 호모그래피(평면↔평면)가 성립한다.
+    # 작을수록 정확하지만 0이면 테이블을 긁는다.
+    calib_height: 0.005
+    # findHomography RANSAC 임계값 [m]. 목표값이 미터이므로 임계값도 미터다.
+    # (예전 값 5.0 은 '5미터'라 오클릭을 하나도 못 걸렀다)
+    ransac_threshold_m: 0.005
+
+    detect_objects: false      # 색 기반 컵 검출. 컵 색이 일정하면 켜세요.
+    hsv_lower: [0, 120, 80]    # 붉은 계열 기본값
+    hsv_upper: [12, 255, 255]
+    min_area: 400
+
+    base_height: 0.0563
+    shoulder_offset: 0.0304
+    l1: 0.1160
+    l2: 0.1350
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01

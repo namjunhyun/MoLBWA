@@ -37,3 +37,6 @@ ros2_ws/log/
 ros2_ws/src/ocams_ros2/include/
 ros2_ws/src/ocams_ros2/src/withrobot_camera.cpp
 ros2_ws/src/ocams_ros2/src/withrobot_utility.cpp
+
+# arm package
+arm/__pycache__/
