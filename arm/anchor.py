@@ -155,7 +155,7 @@ class AnchorTracker:
 def build_bundle_obj_pts(anchor_cfg: dict):
     """config 의 anchor 섹션 -> {tag_id: (4,3) 코너 좌표(armbase)}, right, up, normal.
 
-    pupil_apriltags 코너 순서는 (좌하, 우하, 우상, 좌상). 그 "오른쪽/위"가 armbase 의
+    pupil_apriltags 코너 순서는 (우상, 좌상, 좌하, 우하) — 실카메라 확인. 그 "오른쪽/위"가 armbase 의
     어느 축인지는 태그를 어떻게 붙였느냐의 문제라 config(anchor.tag_axes)로 명시한다.
     검출기 없이도 부를 수 있게 모듈 함수로 뺐다 (테스트용).
     """
@@ -178,7 +178,11 @@ def build_bundle_obj_pts(anchor_cfg: dict):
         # 태그마다 다른 면에 붙일 수 있다 (예: 수직판 2장 + 테이블에 눕힌 2장).
         # 그럴 땐 bundle 항목에 right/up 을 각각 적는다. 없으면 전역 tag_axes 를 쓴다.
         r, u = _axes(t, right, up)
-        local = np.stack([-h * r - h * u, +h * r - h * u, +h * r + h * u, -h * r + h * u])
+        # ★ pupil_apriltags 실제 모서리 순서 = (우상, 좌상, 좌하, 우하) — 태그를 정면에서 똑바로
+        # 봤을 때 (2026-09-24 실카메라 확인). 예전 가정 (좌하, 우하, 우상, 좌상)은 정확히 180°
+        # 돌아간 순서였고 합성 데이터로만 검증돼 있었다 (합성은 가정대로 이미지를 만들어서 통과).
+        # 실기에서 같은 층 두 장 번들 재투영이 27px(= 태그 한 변) 나와 드러났다. 고친 뒤 0.3px.
+        local = np.stack([+h * r + h * u, -h * r + h * u, -h * r - h * u, +h * r - h * u])
         obj[t["id"]] = np.asarray(t["pos"], float) + local
     return obj, right, up, normal
 
@@ -199,7 +203,8 @@ class TagBundleDetector:
     """AprilTag 번들 -> T_hc_ab. 단일 태그의 rotation flip 을 피하려고 여러 태그를 한 번에 PnP 한다.
 
     ★ 코너 순서 / 축 방향 (2026-08-19 수정)
-    pupil_apriltags 는 코너를 태그 자체 기준으로 (좌하, 우하, 우상, 좌상) 순서로 준다.
+    pupil_apriltags 는 코너를 (우상, 좌상, 좌하, 우하) 순서로 준다 (2026-09-24 실카메라 확인;
+    예전 문서의 (좌하, 우하, 우상, 좌상)은 180° 돌아간 틀린 가정이었다).
     그 "오른쪽/위"가 armbase 의 어느 축인지는 **태그를 어떻게 붙였느냐**의 문제라서
     코드가 마음대로 정할 수 없다 -> config 의 anchor.tag_axes 로 명시한다.
 
