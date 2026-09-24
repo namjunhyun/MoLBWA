@@ -214,6 +214,11 @@ class ArmServer(Node):
         self.declare_parameter("home_q", [0.0, -0.6, 1.2, -0.6, 0.0, 1.2])
         self.declare_parameter("workspace_radius", 0.42)  # 안전 반경 [m]
         self.declare_parameter("min_z", -0.02)            # 이보다 낮으면 거부 [m]
+        # 팔 앞쪽만 (2026-09-24). pan 은 한계상 뒤쪽(-112°)까지 돌 수 있어서, 시선이 팔 뒤의
+        # 태그판을 찍으면 팔이 뒤로 돌아 판을 친다. x 가 이보다 작거나 정면에서 max_yaw 넘게
+        # 벗어난 목표는 거부한다.
+        self.declare_parameter("min_x", 0.12)
+        self.declare_parameter("max_yaw_deg", 70.0)
 
         # ---- 파지 실패 감지 / 재시도 ----
         # 물체를 물었다면 그리퍼가 끝까지 닫히지 못합니다. 그 차이로 판별합니다.
@@ -385,6 +390,12 @@ class ArmServer(Node):
         radius = float(np.linalg.norm(p[:2]))
         if radius > float(self.get_parameter("workspace_radius").value):
             raise IKError(f"{label} 목표가 안전 반경 밖입니다 (수평거리 {radius:.3f} m)")
+        if p[0] < float(self.get_parameter("min_x").value):
+            raise IKError(f"{label} 목표가 팔 앞쪽이 아닙니다 (x={p[0]:.3f} m) — 팔 뒤(태그판)로 "
+                          "돌지 않도록 거부")
+        yaw = math.degrees(math.atan2(p[1], p[0]))
+        if abs(yaw) > float(self.get_parameter("max_yaw_deg").value):
+            raise IKError(f"{label} 목표가 정면에서 {yaw:.0f}° 벗어났습니다 — 거부")
         if p[2] < float(self.get_parameter("min_z").value):
             raise IKError(f"{label} 목표가 너무 낮습니다 (z={p[2]:.3f} m). 테이블 평면 캘리브레이션을 확인하세요.")
 

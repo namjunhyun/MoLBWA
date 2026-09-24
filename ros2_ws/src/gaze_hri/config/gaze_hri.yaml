@@ -96,6 +96,8 @@ arm_server:
     # (arm_server 가 기동 시 둘을 비교해 경고한다)
     workspace_radius: 0.38
     min_z: -0.02
+    min_x: 0.12                # 팔 앞쪽만. 팔 뒤 태그판 쪽 목표 거부 (pan 이 -112°까지 돈다)
+    max_yaw_deg: 70.0
 
     # ---- 파지 실패 감지 / 재시도 ----
     # grasp_margin: 물체를 물었을 때 그리퍼가 "덜 닫히는" 정도.
