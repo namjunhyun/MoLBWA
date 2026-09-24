@@ -94,7 +94,8 @@ ros2 run orbslam3 stereo-inertial \
   pose 스트림(`/orbslam3/pose`) 발행 → [notes/2026-07-14_ocams_ros2_slam_live.md](notes/2026-07-14_ocams_ros2_slam_live.md)
 - ✅ oCamS camera–IMU 외부 파라미터 Kalibr 실측 및 `IMU.T_b_c1` 반영
   → [docs/11_camera_imu_calibration.md](docs/11_camera_imu_calibration.md)
-- ⬜ 스테레오 깊이 `D` (oCamS 캘리브 + 우영상 + SGM) ← **현재 병목**
+- ✅ 스테레오 깊이 `D` (oCamS rectification + 우영상 + StereoSGBM): 0.5/1.05/1.5m
+  실측, SGBM 전용 baseline 0.105m, 2026-09-22
 - ⬜ ORB-SLAM3 pose `T_WS` → 융합 `p_W` → Rerun 3D 시각화
 
 세부 순서는 [docs/09_visualization.md](docs/09_visualization.md) §7.

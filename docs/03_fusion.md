@@ -48,5 +48,6 @@ def gaze_point_world(u, v, D, K, T_WS):
 ## 체크리스트
 - [x] `gaze_point_world` 단위 테스트 (합성 데이터) — `src/fusion.py`, 항등/평행이동/회전+평행이동
       3가지 pose로 순방향→역복원 왕복 검증, 오차 1e-15 수준. `python src/fusion.py`로 재현.
-- [ ] 실물 물체로 D/p_W 정확도 확인
+- [x] 실물 평면으로 D 정확도 확인 — 0.5/1.05/1.5m, SGBM 전용 baseline 0.105m
+- [ ] 실물 물체의 p_W 정확도 확인
 - [ ] pose 이동 시 p_W 월드 고정성 확인
