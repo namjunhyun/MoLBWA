@@ -36,7 +36,7 @@ class ArmGeometry:
     shoulder_offset: float = 0.0304  # 회전축에서 shoulder_lift 축까지의 수평 오프셋
     l1: float = 0.1160               # shoulder_lift -> elbow_flex
     l2: float = 0.1350               # elbow_flex   -> wrist_flex
-    l3: float = 0.1100               # wrist_flex   -> 그리퍼 파지 중심(TCP)
+    l3: float = 0.1350               # wrist_flex   -> 그리퍼 파지 중심(TCP). 2026-09-24 실측 기반
 
     # 관절 한계 (URDF와 일치시킬 것)
     limits: dict = field(default_factory=lambda: {

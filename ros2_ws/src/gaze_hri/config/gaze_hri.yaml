@@ -37,7 +37,7 @@ target_resolver:
     table_calibration: false
     snap_radius: 0.08          # 검출된 물체 중심으로 끌어당기는 허용 반경
     object_min_height: 0.02    # 테이블에서 이보다 높아야 '물체'로 인정
-    grasp_height: 0.045        # 컵 높이의 절반 정도. 컵 바꾸면 반드시 다시 재세요.
+    grasp_height: 0.060        # 2026-09-24: 4.5cm 면 45° 접근 시 손가락 끝이 책상에 닿는다 (지름 7cm 컵)
     place_clearance: 0.010
     # 1등과 2등 물체 거리 차가 이보다 작으면 "어느 컵인지 모르겠다"로 보고 거부한다.
     # 시선 오차 3cm 기준으로 컵이 6cm 이내로 붙어 있으면 여기에 걸린다.
@@ -55,7 +55,7 @@ task_manager:
     min_separation: 0.10       # 집을 곳과 놓을 곳의 최소 거리
     select_timeout: 15.0       # 선택 후 이 시간 지나면 자동 취소
     min_confidence: 0.35
-    approach_pitch: -0.785     # -45도. SO-ARM101에서 가장 안정적인 접근각.
+    approach_pitch: -0.524     # -30도 (2026-09-24). l3=0.135 에서 -45도는 손가락 끝 여유 1.6cm, -30도는 2.6cm
     dry_run: false
 
 arm_server:
@@ -74,8 +74,8 @@ arm_server:
     base_frame: "base_link"
     world_frame: "map"
 
-    approach_height: 0.10
-    lift_height: 0.12
+    approach_height: 0.08      # 2026-09-24: l3=0.135 로 길어져 반경 0.30m 에서 높이 0.19m 는 도달 불가
+    lift_height: 0.08          # 들고 옮길 때 다른 컵 위를 지나지 않게 배치할 것 (컵 높이 확인)
     step_time: 0.04
     cartesian_step: 0.008
     gripper_open: 1.2
@@ -86,6 +86,8 @@ arm_server:
     home_xyz: [0.22, 0.0, 0.16]
     home_pitch: -0.785
     joint_speed_deg_s: 25.0
+    finger_tip_extra: 0.045    # 파지점(l3) -> 고정 손가락 끝. 실측 0.18 - l3
+    min_tip_z: 0.02            # 경로 전체에서 손가락 끝이 이보다 낮은 접근각은 안 쓴다 (처짐 ~1.2cm 별도)
 
     # 안전 한계. 반드시 실제 도달 범위보다 '작아야' 한다.
     # 링크 합(shoulder_offset+l1+l2+l3)이 최대 도달거리이고, 기본 링크값에서는
@@ -113,7 +115,7 @@ arm_server:
     shoulder_offset: 0.0304
     l1: 0.1160
     l2: 0.1350
-    l3: 0.1100
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
 
 calibrate_world_to_base:
   ros__parameters:
@@ -121,7 +123,7 @@ calibrate_world_to_base:
     shoulder_offset: 0.0304
     l1: 0.1160
     l2: 0.1350
-    l3: 0.1100
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
 
 calib_tf_publisher:
   ros__parameters:
@@ -153,7 +155,7 @@ control_panel:
     shoulder_offset: 0.0304
     l1: 0.1160
     l2: 0.1350
-    l3: 0.1100
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01
 
 topdown_click:
   ros__parameters:
@@ -183,4 +185,4 @@ topdown_click:
     shoulder_offset: 0.0304
     l1: 0.1160
     l2: 0.1350
-    l3: 0.1100
+    l3: 0.1350   # 2026-09-24: 손목축->고정손가락 끝 실측 0.18 - 컵반지름 0.035 - 여유 0.01

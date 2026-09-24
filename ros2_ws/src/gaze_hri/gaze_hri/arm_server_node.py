@@ -196,6 +196,12 @@ class ArmServer(Node):
         self.declare_parameter("home_pitch", -1.5708)
         # 관절 공간 이동(홈/goto_joints) 속도 상한 [deg/s]
         self.declare_parameter("joint_speed_deg_s", 25.0)
+        # 손가락 끝 충돌 검사 (2026-09-24). TCP(l3)는 컵 중심이 오는 파지점이고, 고정 손가락
+        # 끝은 그보다 finger_tip_extra 만큼 더 나가 있다 (실측 손목축->끝 0.18m, l3 0.135m).
+        # 45° 접근이면 끝이 TCP 보다 3.2cm 낮고, 팔꿈치가 중력으로 ~1.2cm 처진다.
+        # 경로 전체에서 끝이 min_tip_z 아래로 가는 접근각은 쓰지 않는다.
+        self.declare_parameter("finger_tip_extra", 0.045)
+        self.declare_parameter("min_tip_z", 0.02)
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("world_frame", "map")
 
@@ -225,7 +231,7 @@ class ArmServer(Node):
         self.declare_parameter("shoulder_offset", 0.0304)
         self.declare_parameter("l1", 0.1160)
         self.declare_parameter("l2", 0.1350)
-        self.declare_parameter("l3", 0.1100)
+        self.declare_parameter("l3", 0.1350)
 
         self.geo = ArmGeometry(
             base_height=float(self.get_parameter("base_height").value),
@@ -406,20 +412,48 @@ class ArmServer(Node):
         TCP 직선을 따라가며 각 점에서 IK를 푼다. 중간점이 하나라도 안 풀리면
         기존처럼 관절 보간으로 떨어진다(도달 자체는 보장).
         """
-        q_goal, used_pitch = solve_with_fallback(
-            target_xyz, self.geo,
-            pitch_candidates=[pitch, -math.pi / 4, -math.pi / 3, -math.pi / 2, -math.pi / 6],
-        )
+        cands = [pitch, -math.pi / 6, -math.pi / 4, -math.pi / 3, -math.pi / 2]
+        q_goal = used_pitch = path = None
+        reasons = []
+        for cand in dict.fromkeys(cands):            # 순서 유지 중복 제거
+            try:
+                qg, up = solve_with_fallback(target_xyz, self.geo, pitch_candidates=[cand])
+            except IKError as exc:
+                reasons.append(f"{math.degrees(cand):.0f}deg IK 불가")
+                continue
+            cand_path = self._plan_path(target_xyz, qg, up)
+            low = self._lowest_tip(cand_path + [list(qg)])
+            if low < float(self.get_parameter("min_tip_z").value):
+                reasons.append(f"{math.degrees(cand):.0f}deg 손가락 끝 {low * 100:.1f}cm")
+                continue
+            q_goal, used_pitch, path = qg, up, cand_path
+            break
+        if q_goal is None:
+            raise IKError(f"{label} 목표 {np.round(np.asarray(target_xyz), 3).tolist()} "
+                          f"안전한 접근각 없음 (손가락 끝 책상 위 "
+                          f"{float(self.get_parameter('min_tip_z').value) * 100:.1f}cm 기준): "
+                          + ", ".join(reasons))
         if abs(used_pitch - pitch) > 1e-6:
             self.get_logger().info(
                 f"  접근각 {math.degrees(pitch):.0f}deg 불가 -> "
                 f"{math.degrees(used_pitch):.0f}deg 로 대체"
             )
 
-        q_start = list(self.q[:4])
         step_time = float(self.get_parameter("step_time").value)
-        step_len = float(self.get_parameter("cartesian_step").value)
+        for q in path:
+            if self._cancel:
+                return
+            self.q = list(q) + [0.0, gripper]
+            self.backend.write(self.q)
+            time.sleep(step_time)
 
+        self.q = list(q_goal) + [0.0, gripper]
+        self.backend.write(self.q)
+
+    def _plan_path(self, target_xyz, q_goal, used_pitch):
+        """TCP 직선 보간 경로(관절각 목록). 중간점이 안 풀리면 관절 보간으로."""
+        q_start = list(self.q[:4])
+        step_len = float(self.get_parameter("cartesian_step").value)
         start = forward_kinematics(q_start, self.geo)
         target = np.asarray(target_xyz, dtype=float)
         dist = float(np.linalg.norm(target - start))
@@ -445,16 +479,15 @@ class ArmServer(Node):
             for i in range(1, n + 1):
                 s = 0.5 - 0.5 * math.cos(math.pi * i / n)
                 path.append([qs + (qg - qs) * s for qs, qg in zip(q_start, q_goal)])
+        return path
 
-        for q in path:
-            if self._cancel:
-                return
-            self.q = list(q) + [0.0, gripper]
-            self.backend.write(self.q)
-            time.sleep(step_time)
-
-        self.q = list(q_goal) + [0.0, gripper]
-        self.backend.write(self.q)
+    def _lowest_tip(self, path):
+        """경로에서 고정 손가락 끝의 최저 높이 [m] (base_link z)."""
+        extra = float(self.get_parameter("finger_tip_extra").value)
+        tip_geo = ArmGeometry(base_height=self.geo.base_height,
+                              shoulder_offset=self.geo.shoulder_offset,
+                              l1=self.geo.l1, l2=self.geo.l2, l3=self.geo.l3 + extra)
+        return min(float(forward_kinematics(q, tip_geo)[2]) for q in path)
 
     def set_gripper(self, value, settle=0.6):
         if self._cancel:

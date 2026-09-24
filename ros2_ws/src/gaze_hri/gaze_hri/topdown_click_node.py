@@ -98,7 +98,7 @@ class TopdownClick(Node):
         self.declare_parameter("shoulder_offset", 0.0304)
         self.declare_parameter("l1", 0.1160)
         self.declare_parameter("l2", 0.1350)
-        self.declare_parameter("l3", 0.1100)
+        self.declare_parameter("l3", 0.1350)
 
         self.mode = self.get_parameter("mode").value
         self.hold_time = float(self.get_parameter("hold_time").value)
