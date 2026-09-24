@@ -228,7 +228,9 @@ class TagBundleDetector:
         self.ambiguity_max_m = a.get("ambiguity_max_m", 0.02)
 
         self.obj_pts, self.right, self.up, self.normal = build_bundle_obj_pts(a)
-        _warn_if_coplanar([t["pos"] for t in a["bundle"]])
+        # 중심점이 아니라 **모서리 전부**로 본다 (2026-09-24). 2층 x 2장 배치는 중심 4개가 늘 한
+        # 비스듬한 평면 위에 놓여 (두께 0.7mm) 거짓 경보가 났다. PnP 가 쓰는 건 모서리다.
+        _warn_if_coplanar(np.concatenate(list(self.obj_pts.values())))
 
     def detect(self, gray: np.ndarray) -> np.ndarray | None:
         dets = [d for d in self.det.detect(gray) if d.tag_id in self.obj_pts]
