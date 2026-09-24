@@ -112,13 +112,16 @@ def test_tag_convention():
     a = dict(CFG["anchor"])
     obj_new, right, up, normal = build_bundle_obj_pts(a)
 
-    check("태그: 법선이 팔 정면(+x)", float(normal @ np.array([1.0, 0, 0])) > 0.99,
+    # 법선은 수평(±x)이어야 한다. 배치 A(팔 뒤 태그, +x), 배치 B(컵 너머 태그, -x) 둘 다 허용.
+    check("태그: 법선이 수평 ±x", abs(float(normal @ np.array([1.0, 0, 0]))) > 0.99,
           f"normal={np.round(normal,3).tolist()}")
 
-    # 태그판이 카메라 앞 0.6m 에 보이는 상황
-    base = np.array([[0., 1., 0.], [0., 0., -1.], [-1., 0., 0.]])   # det=+1
+    # 태그판을 정면에서 0.62m 떨어져 보는 카메라. 카메라 축 = [오른쪽, 아래, 앞] = [right, -up, -normal]
+    base = np.stack([right, -up, -normal])
     assert abs(np.linalg.det(base) - 1.0) < 1e-9
-    T_hc_ab = _rt(_euler(-15, 0, 0) @ base, [0.0, 0.05, 0.62])
+    R = _euler(-15, 0, 0) @ base
+    center = np.mean(np.concatenate(list(obj_new.values())), axis=0)
+    T_hc_ab = _rt(R, -R @ center + np.array([0.0, 0.05, 0.62]))
     ids = sorted(obj_new)
     obj = np.concatenate([obj_new[i] for i in ids])
     img = _project(obj, T_hc_ab, K)
@@ -139,11 +142,10 @@ def test_tag_convention():
     check("태그: 새 코너 규약으로 PnP 복원", err_new < 0.5 and pos_err < 1e-3,
           f"재투영 {err_new:.3f}px, 위치오차 {pos_err*1000:.3f}mm")
 
-    # 예전(거울상) 규약 — y 축이 뒤집힌 코너 정의
-    h = a["tag_size_m"] / 2.0
-    local_old = np.array([[0, +h, -h], [0, -h, -h], [0, -h, +h], [0, +h, +h]], float)
-    obj_old = np.concatenate([np.asarray(t["pos"], float) + local_old
-                              for t in a["bundle"] if t["id"] in ids])
+    # 거울상 규약 — right 축을 뒤집은 코너 정의 (2026-08-19 에 실제로 있던 결함)
+    a_m = dict(a, tag_axes={"right": (-right).tolist(), "up": up.tolist()})
+    obj_m, _, _, _ = build_bundle_obj_pts(a_m)
+    obj_old = np.concatenate([obj_m[i] for i in ids])
     _, err_old = solve(obj_old)
     check("태그: 예전 거울상 규약은 재투영 오차로 걸러짐", err_old > a["max_reproj_px"],
           f"재투영 {err_old:.2f}px > 임계 {a['max_reproj_px']}px")
