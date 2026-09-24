@@ -15,6 +15,7 @@ ultralytics / pupil_apriltags / rclpy / lerobot 는 필요 없다.
   6. 검출이 한 프레임 빠져도 dwell 이 같은 컵을 유지하는가
   7. (2026-09-23) 태그 직결 유효성 정책 + 시선 픽셀 UDP 왕복
   8. (2026-09-23) gaze_tag_bridge: 시선 픽셀 -> base_link 광선
+  9. (2026-09-24) 태그+SLAM 하이브리드: 태그가 사라지면 SLAM 으로 이어 가기, 발산/맵전환 방어
 """
 
 from __future__ import annotations
@@ -274,6 +275,73 @@ def test_gaze_ray_bridge():
           ray_hit_height(np.array([0.5, 0, 0.3]), np.array([-1.0, 0, 0.2]), 0.0) is None)
 
 
+# ---------------------------------------------------------------- 9. 태그 + SLAM 하이브리드
+def test_hybrid_bridge():
+    from ocams_calib import RECTIFIED_K as K
+    from gaze_tag_bridge import GazeToBase
+    sim = SimSource(CFG, K)
+    cup = sim.cups_true_ab[1]
+    trk = {k: CFG["anchor"][k] for k in ("stale_after_s", "drift_warn_m", "drift_max_m",
+                                         "latch_ema_alpha")}
+
+    def gaze_px(T_hc_ab):
+        p_hc = (T_hc_ab @ np.r_[cup, 1.0])[:3]
+        uvw = K @ p_hc
+        return (uvw[0] / uvw[2], uvw[1] / uvw[2])
+
+    def head_moved(dyaw_deg, dx):
+        """머리를 돌리고 옮긴 뒤의 T_w_hc, 그때의 진짜 T_hc_ab."""
+        T_w_hc = sim.T_w_hc @ _rt(_euler(0, dyaw_deg, 0), [dx, 0, 0])
+        return T_w_hc, np.linalg.inv(T_w_hc) @ sim.T_w_ab
+
+    # 1) 태그 보임 -> 태그 출처, 정확
+    g = GazeToBase(K, float(cup[2]), CFG["anchor"]["direct"], trk, use_slam=True)
+    for _ in range(3):
+        g.update_slam(sim.T_w_hc, 0, True)
+        p, _, src = g.step(sim.T_hc_ab, gaze_px(sim.T_hc_ab))
+    check("하이브리드: 태그 보일 때 태그 출처", src == "tag" and np.linalg.norm(p - cup) < 1e-6,
+          f"출처 {src}, 오차 {np.linalg.norm(p - cup) * 1000:.4f}mm")
+
+    # 2) 태그 사라짐 + 머리 이동 -> SLAM 으로 이어 가고 여전히 정확
+    T_w_hc2, T_hc_ab2 = head_moved(12.0, 0.05)
+    g.update_slam(sim.T_w_hc @ _rt(_euler(0, 6.0, 0), [0.025, 0, 0]), 0, True)   # 중간 포즈
+    g.update_slam(T_w_hc2, 0, True)
+    p, _, src = g.step(None, gaze_px(T_hc_ab2))
+    check("하이브리드: 태그 없이 머리가 움직여도 SLAM 으로 정확", src == "slam"
+          and p is not None and np.linalg.norm(p - cup) < 1e-6,
+          f"출처 {src}, 오차 {np.linalg.norm(p - cup) * 1000 if p is not None else -1:.4f}mm")
+
+    # 3) SLAM 없이 태그 사라짐 -> 안 보낸다
+    g0 = GazeToBase(K, float(cup[2]), CFG["anchor"]["direct"], trk, use_slam=False)
+    for _ in range(3):
+        g0.step(sim.T_hc_ab, gaze_px(sim.T_hc_ab))
+    p, _, why = g0.step(None, gaze_px(sim.T_hc_ab))
+    check("하이브리드: SLAM 없이 태그 사라지면 무효", p is None, why)
+
+    # 4) SLAM 발산 (565m 점프, 2026-09-22 실측) -> 거부, 안 보낸다
+    T_bad = sim.T_w_hc.copy()
+    T_bad[:3, 3] += [565.9, 174.7, -144.8]
+    g.update_slam(T_bad, 0, True)
+    p, _, why = g.step(None, gaze_px(T_hc_ab2))
+    check("하이브리드: 발산 포즈(565m) 거부", p is None and g.slam_rejects >= 1, why)
+    # 4b) 발산 뒤 새 맵 원점 근처에서 매끄러운 포즈가 다시 와도 (map_id 는 여전히 0)
+    #     옛 latch 로 계산하면 안 된다 -> 태그를 다시 볼 때까지 무효
+    T_new = _rt(np.eye(3), [0.01, 0.0, 0.0])
+    for k in range(5):
+        g.update_slam(T_new @ _rt(np.eye(3), [0.002 * k, 0, 0]), 0, True)
+    p, _, why = g.step(None, gaze_px(T_hc_ab2))
+    check("하이브리드: 발산 뒤 새 맵 포즈로는 계산 안 함 (태그 재확인까지)", p is None, why)
+
+    # 5) 맵 전환 -> latch 무효
+    g5 = GazeToBase(K, float(cup[2]), CFG["anchor"]["direct"], trk, use_slam=True)
+    for _ in range(3):
+        g5.update_slam(sim.T_w_hc, 0, True)
+        g5.step(sim.T_hc_ab, gaze_px(sim.T_hc_ab))
+    g5.update_slam(sim.T_w_hc, 1, True)                   # Atlas 새 맵
+    p, _, why = g5.step(None, gaze_px(sim.T_hc_ab))
+    check("하이브리드: SLAM 맵 전환 시 무효", p is None, why)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     test_intrinsics()
@@ -284,6 +352,7 @@ if __name__ == "__main__":
     test_dwell_robustness()
     test_tag_direct()
     test_gaze_ray_bridge()
+    test_hybrid_bridge()
     print("=" * 70)
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
     print(f"{len(RESULTS) - n_fail}/{len(RESULTS)} PASS")
