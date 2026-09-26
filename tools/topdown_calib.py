@@ -181,6 +181,10 @@ def main():
                 loo.append(float(np.linalg.norm(cv2.perspectiveTransform(src[j:j + 1].reshape(-1, 1, 2), Hj).ravel() - dst[j]) * 1000))
         print("점별 오차(mm):", np.round(per, 1).tolist(), f"| LOO 평균 {np.mean(loo):.1f}mm 최대 {max(loo):.1f}mm")
         os.makedirs(os.path.dirname(OUT), exist_ok=True)
+        if os.path.exists(OUT):                  # 기존 파일(촬영용 임시값 등) 보존
+            bak = OUT.replace(".yaml", time.strftime("_bak_%Y%m%d_%H%M%S.yaml"))
+            os.rename(OUT, bak)
+            print(f"기존 파일 백업: {bak}")
         yaml.safe_dump({"H": H.tolist(), "reproj_error_mm": float(per.mean()), "loo_error_mm": float(np.mean(loo)),
                         "num_points": len(pix), "reference": "midpoint of finger tips",
                         "tip_z_m": a.tip_z, "camera_index": a.cam,

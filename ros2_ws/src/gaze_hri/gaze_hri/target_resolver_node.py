@@ -43,6 +43,7 @@ table_plane 도 base_frame 기준으로 해석합니다.
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 import tf2_ros
 from gaze_hri_msgs.msg import Fixation, GazeTarget
 from geometry_msgs.msg import PoseArray
@@ -360,11 +361,12 @@ def main():
     node = TargetResolver()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

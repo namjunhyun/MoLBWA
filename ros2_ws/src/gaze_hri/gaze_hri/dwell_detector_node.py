@@ -26,6 +26,7 @@ from collections import deque
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from gaze_hri_msgs.msg import Fixation
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
@@ -234,11 +235,12 @@ def main():
     node = DwellDetector()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ import time
 import cv2
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 import yaml
 from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray
 from rclpy.node import Node
@@ -83,6 +84,10 @@ class TopdownClick(Node):
         self.declare_parameter("base_frame", "base_link")
         # 캘리브 때 그리퍼 끝을 테이블면에서 띄울 높이 [m].
         # 0이면 테이블을 긁으므로 살짝 띄우되, 작을수록 평면 가정이 정확해진다.
+        # 실측 점이 없는 호모그래피(시연 촬영용 임시값 등)는 기본적으로 거부한다 (2026-09-24).
+        # ~/.ros/topdown_homography.yaml 에 2026-09-22 촬영용 가짜 H 가 있었고, reproj null 로
+        # 로드 로그에서 TypeError 로 죽었다. 그대로 로드됐다면 팔이 무의미한 좌표로 갔다.
+        self.declare_parameter("allow_uncalibrated_homography", False)
         self.declare_parameter("calib_height", 0.005)
         # findHomography RANSAC 임계값 [m]. 목표값이 미터이므로 임계값도 미터다.
         self.declare_parameter("ransac_threshold_m", 0.005)
@@ -174,9 +179,22 @@ class TopdownClick(Node):
             return
         with open(self.homography_path) as f:
             data = yaml.safe_load(f)
+        n = int(data.get("num_points") or 0)
+        err = data.get("reproj_error_mm")
+        if n < 4 or err is None:
+            if not bool(self.get_parameter("allow_uncalibrated_homography").value):
+                self.get_logger().error(
+                    f"호모그래피가 실측값이 아닙니다 (점 {n}개, 오차 {err}) — 로드하지 않습니다. "
+                    "tools/topdown_calib.py 로 캘리브하세요. (촬영용으로 일부러 쓰려면 "
+                    "allow_uncalibrated_homography:=true)")
+                self.H = None
+                return
+            self.get_logger().warn(f"★ 실측이 아닌 호모그래피를 씁니다 (점 {n}개) — 팔을 보내지 마세요")
         self.H = np.array(data["H"], dtype=float)
-        err = data.get("reproj_error_mm", 0.0)
-        self.get_logger().info(f"호모그래피 로드 완료 (재투영 오차 {err:.1f} mm)")
+        loo = data.get("loo_error_mm")
+        self.get_logger().info(
+            f"호모그래피 로드 완료 (점 {n}개, 재투영 {float(err or 0):.1f} mm"
+            + (f", 처음 보는 점 {float(loo):.1f} mm)" if loo is not None else ")"))
 
     def pixel_to_robot(self, u, v):
         """화면 픽셀 -> 로봇 베이스 기준 (x, y). 한 번의 행렬 곱."""
@@ -475,11 +493,12 @@ def main():
     node = TopdownClick()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

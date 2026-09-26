@@ -11,6 +11,7 @@ import os
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 import yaml
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
@@ -100,11 +101,12 @@ def main():
     node = CalibTfPublisher()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

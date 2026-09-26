@@ -25,6 +25,7 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 import tf2_ros
 from gaze_hri_msgs.action import PickPlace
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
@@ -788,12 +789,13 @@ def main():
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.backend.close()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

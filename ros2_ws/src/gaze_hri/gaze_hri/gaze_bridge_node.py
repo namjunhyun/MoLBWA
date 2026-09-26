@@ -28,6 +28,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import PointStamped, PoseStamped, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -206,11 +207,12 @@ def main():
     node = GazeBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

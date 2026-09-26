@@ -35,6 +35,7 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 import yaml
 from gaze_hri_msgs.msg import Fixation
 from rclpy.node import Node
@@ -197,12 +198,13 @@ def main():
     spin_thread.start()
     try:
         ok = node.run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         ok = False
         print("\n중단됨")
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                # SIGINT/SIGTERM 이면 rclpy 가 이미 내렸다
+            rclpy.shutdown()
     sys.exit(0 if ok else 1)
 
 
