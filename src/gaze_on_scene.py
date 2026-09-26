@@ -347,12 +347,16 @@ class RosFrameSource:
         GetTrackingState() == OK 가드). 즉 "포즈가 끊겼다" == "추적을 잃었다" 이고,
         이 staleness 가 그대로 유효성 게이트가 된다. 추적을 잃은 뒤의 마지막 포즈를
         붙들고 있으면 엉뚱한 세계 좌표를 로봇팔로 쏘게 된다.
+
+        ★ 2026-09-24: staleness 만으로는 부족하다 — 발산 중에도 30Hz 로 포즈가 나와서 565m 가
+        '신선한' 포즈로 통과했다. fusion.PoseGate 가 점프/비현실 위치를 걸러내고 latch 한다.
         """
         from geometry_msgs.msg import PoseStamped
         from rclpy.qos import QoSProfile, ReliabilityPolicy
 
         self._pose_stale_after = stale_after
         self._pose = None          # (T_WS 4x4, 수신시각)
+        self._gate = fusion.PoseGate()
         self.pose_topic = topic
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self._node.create_subscription(PoseStamped, topic, self._on_pose, qos)
@@ -363,6 +367,14 @@ class RosFrameSource:
         try:
             T_WS = fusion.pose_to_matrix([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
         except ValueError:
+            return
+        if not self._gate.accept(T_WS):
+            with self._lock:
+                was_alive = self._pose is not None
+                self._pose = None              # 이후 latest_pose() 는 None -> valid=False 송신
+            if was_alive:
+                print(f"[slam] ★ 포즈 발산/맵 재설정 감지 ({self._gate.reason}) — 이후 SLAM 포즈를 "
+                      "쓰지 않는다. T_BW 가 무효일 수 있으니 재캘리브 후 뷰어를 재시작할 것.")
             return
         with self._lock:
             self._pose = (T_WS, time.time())

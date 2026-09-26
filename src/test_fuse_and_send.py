@@ -134,6 +134,20 @@ def main():
                 not np.allclose(p_W_wrong, [0, 0, D_true], atol=0.01),
                 f"p_W={np.round(p_W_wrong, 4)} 만큼 빗나감")
 
+    # 9) SLAM 발산 게이트 (HANDOFF_2026-09-23 §6a: 565m 포즈가 staleness 게이트를 통과했다)
+    g = fusion.PoseGate()
+    walk = [fusion.pose_to_matrix([0.01 * k, 0.0, 0.0], [0, 0, 0, 1]) for k in range(20)]
+    ok &= check("PoseGate: 정상 이동은 통과", all(g.accept(T) for T in walk))
+    ok &= check("PoseGate: 565m 발산 거부",
+                not g.accept(fusion.pose_to_matrix([565.948, 174.696, -144.760], [0, 0, 0, 1])),
+                g.reason)
+    ok &= check("PoseGate: 발산 뒤 원점 근처 포즈도 계속 거부 (새 맵 = T_BW 무효)",
+                not g.accept(fusion.pose_to_matrix([0.0, 0.0, 0.0], [0, 0, 0, 1])))
+    g2 = fusion.PoseGate()
+    g2.accept(fusion.pose_to_matrix([0.2, 0, 0], [0, 0, 0, 1]))
+    ok &= check("PoseGate: 한 프레임 0.5m 점프 거부",
+                not g2.accept(fusion.pose_to_matrix([0.7, 0, 0], [0, 0, 0, 1])), g2.reason)
+
     print("\n전체:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

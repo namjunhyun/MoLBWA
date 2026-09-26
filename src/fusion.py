@@ -99,6 +99,44 @@ def quat_xyzw_to_matrix(q):
     ], dtype=float)
 
 
+class PoseGate:
+    """SLAM 포즈 발산 방어 (HANDOFF_2026-09-23 §6a).
+
+    ORB-SLAM3 는 발산 중에도 30Hz 로 포즈를 낸다 — 2026-09-22 실측에서 565m 가 '신선한'
+    포즈로 통과해 staleness 게이트가 무력했다. 여기서는
+      * 원점에서 max_norm_m 넘게 멀거나, 직전 포즈에서 max_jump_m 넘게 튀면 거부
+      * 한 번 걸리면 **계속 거부**(latch). 추적을 잃고 새 맵이 생기면 world 원점이 바뀌어 T_BW 가
+        무효가 되는데, 튄 프레임만 거르면 새 맵 포즈가 매끄럽게 이어져 조용히 틀린 p_W 를 낸다.
+        재캘리브 후 reset() 또는 프로세스 재시작으로만 푼다.
+    """
+
+    def __init__(self, max_jump_m=0.3, max_norm_m=10.0):
+        self.max_jump_m = max_jump_m
+        self.max_norm_m = max_norm_m
+        self._last = None
+        self.dead = False
+        self.reason = ""
+
+    def accept(self, T_WS):
+        if self.dead:
+            return False
+        pos = np.asarray(T_WS, dtype=float)[:3, 3]
+        if not np.all(np.isfinite(T_WS)):
+            why = "포즈에 NaN/inf"
+        elif np.linalg.norm(pos) > self.max_norm_m:
+            why = f"원점에서 {np.linalg.norm(pos):.1f}m"
+        elif self._last is not None and np.linalg.norm(pos - self._last) > self.max_jump_m:
+            why = f"한 번에 {np.linalg.norm(pos - self._last):.2f}m 점프"
+        else:
+            self._last = pos
+            return True
+        self.dead, self.reason = True, why
+        return False
+
+    def reset(self):
+        self._last, self.dead, self.reason = None, False, ""
+
+
 def pose_to_matrix(position, quat_xyzw):
     """(position [x,y,z], quat [x,y,z,w]) -> 4x4 T_WS (world <- sensor)."""
     T = np.eye(4)
