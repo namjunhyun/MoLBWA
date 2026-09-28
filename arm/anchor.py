@@ -231,6 +231,7 @@ class TagBundleDetector:
         self.min_tags = a["min_tags_for_latch"]
         self.max_reproj_px = a.get("max_reproj_px", 3.0)
         self.ambiguity_max_m = a.get("ambiguity_max_m", 0.02)
+        self.require_noncoplanar = bool(a.get("require_noncoplanar", True))
 
         self.obj_pts, self.right, self.up, self.normal = build_bundle_obj_pts(a)
         # 중심점이 아니라 **모서리 전부**로 본다 (2026-09-24). 2층 x 2장 배치는 중심 4개가 늘 한
@@ -241,6 +242,16 @@ class TagBundleDetector:
         dets = [d for d in self.det.detect(gray) if d.tag_id in self.obj_pts]
         if len(dets) < self.min_tags:
             return None
+        # 2026-09-28: 윗줄(0,1)만 보이면 같은 평면이라 거울 자세가 재투영 1px 안쪽으로 똑같이
+        # 맞는다. 아래 solvePnPGeneric(ITERATIVE)는 해를 1개만 돌려줘서 모호성 검사가 걸리지
+        # 않았다 -> 머리 높이가 0.45 -> 0.28m 로 틀리고 'o' 보정이 23° 로 잘못 들어갔다.
+        # 보이는 태그 중심들이 한 평면(깊이 차 < 1cm)이면 관측을 버린다.
+        if self.require_noncoplanar:
+            centers = np.array([self.obj_pts[d.tag_id].mean(axis=0) for d in dets])
+            depth = centers @ np.asarray(self.normal, float)
+            if float(depth.max() - depth.min()) < 0.01:
+                self.n_coplanar_rejects = getattr(self, "n_coplanar_rejects", 0) + 1
+                return None
         obj = np.concatenate([self.obj_pts[d.tag_id] for d in dets])
         img = np.concatenate([np.asarray(d.corners, float) for d in dets])
         # ★ 평면 모호성 검사 (2026-08-19).

@@ -71,6 +71,7 @@ anchor:
   #   - {id: 4, pos: [0.10, 0.0, -0.11], right: [0, 1, 0], up: [-1, 0, 0]}   # 테이블에 눕힌 태그
 
   ambiguity_max_m: 0.02             # PnP 후보해가 이보다 벌어지면 모호 -> 관측 버림
+  require_noncoplanar: true         # 2026-09-28: 윗줄(0,1)만 보이면 거울 자세가 조용히 채택됨 -> 두 줄 다 보일 때만 사용
 
   # ★ 태그 로컬 축 -> armbase 축. right/up = 태그를 정면에서 보는 사람 기준 오른쪽/위.
   # 법선 = right x up. 기본값은 법선 +x(팔 정면), right +y(왼쪽), up +z(위).

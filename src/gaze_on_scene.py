@@ -53,7 +53,7 @@ import ocams_calib
 import eye_scene_extrinsic
 import fusion
 from gaze_udp_sender import GazeUdpSender
-from gaze_px_udp import GazePixelSender
+from gaze_px_udp import ArmPointReceiver, GazePixelSender, GazeRaySender
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "external", "EyeTracker", "3DTracker")))
@@ -87,13 +87,16 @@ def rotation_from_a_to_b(a, b):
         axis = np.array([0.0, 1.0, 0.0]) if abs(a[0]) > 0.9 else np.array([1.0, 0.0, 0.0])
         v = np.cross(a, axis)
         v /= np.linalg.norm(v)
-        s = 1.0
+        s = 0.0      # 180°: sinθ=0, cosθ=-1 (예전 s=1 은 나눗셈 회피용이었는데 이제 불필요)
         c = -1.0
     else:
         v = v / s
     vx, vy, vz = v
     K = np.array([[0, -vz, vy], [vz, 0, -vx], [-vy, vx, 0]], dtype=np.float32)
-    return (np.eye(3, dtype=np.float32) + K * s + (K @ K) * ((1 - c) / (s ** 2))).astype(np.float32)
+    # v 는 위에서 단위축으로 정규화됐다 -> 로드리게스: I + sinθ·K + (1-cosθ)·K².
+    # 2026-09-27 수정: 예전엔 (1-c)/s² (정규화 안 된 축용 계수)를 섞어 써서 회전이 아니었다
+    # (|R@a| != 1). 'c' 1점 캘리브도 이 함수를 써서 그동안 틀렸었다.
+    return (np.eye(3, dtype=np.float32) + K * s + (K @ K) * (1 - c)).astype(np.float32)
 
 
 def pixel_to_ray(u, v, fx, fy, cx, cy):
@@ -274,6 +277,51 @@ def load_affine_calibration(path, width, height):
         return affine, payload
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
         print(f"[calib] 저장 파일 불러오기 실패: {e}")
+        return None
+
+
+EXTRINSIC_CALIB_VERSION = 1
+
+
+def save_extrinsic_calibration(path, R, p_eye, dirs, points, residuals, sign=None):
+    """docs/12 (R,p_eye) 캘리브 결과 저장 — arm/gaze_tag_bridge.py 실전 연결(광선 송신)에 씀.
+    affine 저장과 마찬가지로 원시 (시선방향, 3D점) 쌍을 남겨 재계산/검증이 가능하게 한다."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "version": EXTRINSIC_CALIB_VERSION,
+        "model": "eye_scene_R_p_eye",
+        "R_3x3": np.asarray(R, dtype=float).tolist(),
+        "p_eye": np.asarray(p_eye, dtype=float).tolist(),
+        "sample_count": len(dirs),
+        "mean_residual_m": float(np.mean(residuals)),
+        "max_residual_m": float(np.max(residuals)),
+        "gaze_dirs": np.asarray(dirs, dtype=float).tolist(),
+        "target_points": np.asarray(points, dtype=float).tolist(),
+        # affine 과 동일 이유 — 재시작하면 안구 중심이 새로 추정되므로 같이 남긴다.
+        "eye_model": current_eye_model(),
+        # 시선벡터 축 반전(sign). 다르게 재시작하면 거울상이 되므로 불러올 때 대조한다.
+        "sign": None if sign is None else np.asarray(sign, dtype=float).tolist(),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def load_extrinsic_calibration(path):
+    """-> (R, p_eye, dirs, points, residuals, meta) 또는 None."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        R = np.asarray(payload["R_3x3"], dtype=np.float64)
+        p_eye = np.asarray(payload["p_eye"], dtype=np.float64)
+        if R.shape != (3, 3) or p_eye.shape != (3,):
+            raise ValueError(f"행렬/벡터 크기 이상: R={R.shape} p_eye={p_eye.shape}")
+        dirs = [np.asarray(d, dtype=np.float64) for d in payload.get("gaze_dirs", [])]
+        points = [np.asarray(p, dtype=np.float64) for p in payload.get("target_points", [])]
+        return R, p_eye, dirs, points, payload
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
+        print(f"[R,p_eye][calib] 저장 파일 불러오기 실패: {e}")
         return None
 
 
@@ -667,6 +715,9 @@ def main():
                     help="시선 픽셀 (u,v) 를 arm/run_demo.py --tag-direct 로 UDP 송신 (SLAM 불필요)")
     ap.add_argument("--gaze-px-host", default="127.0.0.1")
     ap.add_argument("--gaze-px-port", type=int, default=55056)
+    ap.add_argument("--gaze-ray-port", type=int, default=GazeRaySender.DEFAULT_PORT,
+                     help="docs/12 (R,p_eye) 캘리브로 구한 3D 광선(씬카메라 좌표) 송신 포트 "
+                          "— arm/gaze_tag_bridge.py 가 받는다. --send-gaze-px 와 같이 켜짐")
     ap.add_argument("--no-rerun", action="store_true", help="Rerun 로깅 끄기 (cv2 창만 사용)")
     ap.add_argument("--restore-eye-model", action="store_true",
                     help="캘리브 파일에 저장된 안구 중심을 복원하고 고정한다. 안경을 벗지 않고 "
@@ -725,9 +776,14 @@ def main():
             print(f"[startup] 씬 카메라 없음 — 연결 대기: {e}")
 
     px_sender = None
+    ray_sender = None
     if args.send_gaze_px:
         px_sender = GazePixelSender(args.gaze_px_host, args.gaze_px_port)
         print(f"[gaze-px] 시선 픽셀 송신: {args.gaze_px_host}:{args.gaze_px_port}")
+        # docs/12 (R,p_eye) 실전 연결 — 픽셀과 별개로 3D 광선도 같이 보낸다.
+        # gaze_tag_bridge.py 는 이 광선이 있으면 그걸 우선 쓰고, 없으면 옛 픽셀 경로로 대체한다.
+        ray_sender = GazeRaySender(args.gaze_px_host, args.gaze_ray_port)
+        print(f"[gaze-ray] R,p_eye 3D 광선 송신: {args.gaze_px_host}:{args.gaze_ray_port}")
 
     udp_sender = None
     if args.send_udp:
@@ -742,6 +798,12 @@ def main():
                   f"— 비율 {ocams_calib.GEOMETRIC_BASELINE_M/baseline_m:.2f}배. "
                   f"둘 중 하나는 틀렸고, 틀린 쪽만큼 p_W 가 어긋난다. "
                   f"verify_depth_scale.py 로 실측 확인할 것.")
+
+    # docs/12 R,p_eye 캘리브용 — arm/eye_scene_calib_helper.py 가 보내는 3D점 수신.
+    # 스테레오 깊이(검증 실패) 대신 태그+로봇팔 FK로 구한 점을 쓴다.
+    arm_point_receiver = ArmPointReceiver()
+    print(f"[R,p_eye] 팔 기반 3D점 수신 대기: {ArmPointReceiver.DEFAULT_PORT} "
+          "(arm/eye_scene_calib_helper.py 필요)")
 
     if (args.scene_width, args.scene_height) != (ocams_calib.IMAGE_WIDTH, ocams_calib.IMAGE_HEIGHT):
         print(f"[경고] --scene-width/height가 캘리브레이션 해상도"
@@ -787,7 +849,7 @@ def main():
     udp_status = "대기"
     print(f"[scene] {SW}x{SH}  fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
-    print("[키] f=안구모델 고정/해제 / c=1점 / m=affine 다점(한 거리) / u=마지막 점 취소 / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) "
+    print("[키] f=안구모델 고정/해제 / c=1점 / m=affine 다점(한 거리) / u=마지막 점 취소 / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) / o=R,p_eye 드리프트 1점 보정(그리퍼 응시) "
           "/ d=깊이 좌클릭 모드 / x,y=축 반전 / s=저장 / r=리셋 / q=종료")
 
     R = np.eye(3, dtype=np.float32)
@@ -839,6 +901,50 @@ def main():
     extrinsic_R = None
     extrinsic_p_eye = None
     extrinsic_residuals = None
+
+    extrinsic_calib_path = os.path.abspath(
+        os.path.join(HERE, "..", "calibration", "gaze_scene_extrinsic.json"))
+    # 파일에서 불러온 R,p_eye 인지. 이번 세션에 새 캘리브('c', 'm' affine)를 하면 버린다.
+    extrinsic_from_file = False
+    # 'o' 드리프트 보정: 측정창 상태 + 보정 전 R (다시 누르면 누적 말고 원래 R 기준으로 재보정)
+    drift_capture = None
+    drift_base_R = None
+    drift_applied_R = None
+    loaded_extrinsic = load_extrinsic_calibration(extrinsic_calib_path)
+    if loaded_extrinsic is not None:
+        # 코드리뷰 #1: R,p_eye 는 저장 당시 안구 모델 기준 시선벡터로 풀렸다. 새 세션의
+        # 자동 추정 모델에 옛 R 을 쓰면 광선이 조용히 틀어지고, 광선은 픽셀보다 우선이라
+        # 새로 한 affine 까지 가려진다. 그래서 안구 모델을 같이 복원할 때만 쓴다.
+        # 옛 (시선, 3D점) 쌍은 리스트에 넣지 않는다 — 새 점과 섞여 재계산되면 안 된다.
+        ex_R, ex_p_eye, _, _, ex_meta = loaded_extrinsic
+        ex_eye = ex_meta.get("eye_model")
+        affine_eye = loaded_meta.get("eye_model") if loaded_calib is not None else None
+        affine_restored = bool(affine_eye and args.restore_eye_model)
+        if not args.restore_eye_model:
+            print(f"[R,p_eye] {extrinsic_calib_path} 있음 — 안 씀 (안구 모델 복원 안 하면 "
+                  "새 세션과 안 맞음). 쓰려면 --restore-eye-model, 아니면 새로 캘리브(f→e).")
+        elif not ex_eye:
+            print("[R,p_eye] 파일에 안구 모델 없음 — 안 씀. 새로 캘리브(f→e)할 것.")
+        elif (ex_meta.get("sign") is not None
+              and not np.allclose(ex_meta["sign"], sign)):
+            # 2026-09-27: y 반전('y')하고 찍은 캘리브를 반전 없이 재시작하면 거울상 광선이 된다.
+            print(f"[R,p_eye] 축 반전 불일치 — 파일 sign={ex_meta['sign']} vs 지금 "
+                  f"{sign.tolist()}. 안 씀. --mirror-y/--no-mirror-x 를 저장 당시와 맞출 것.")
+        elif affine_restored and affine_eye != ex_eye:
+            print(f"[R,p_eye] 안구 모델 충돌 — affine 파일 {affine_eye} vs "
+                  f"R,p_eye 파일 {ex_eye}. R,p_eye 안 씀. 새로 캘리브(f→e)할 것.")
+        else:
+            if not affine_restored:
+                restore_eye_model(ex_eye)
+                print(f"[R,p_eye] 안구 모델 복원·고정: 중심={ex_eye['center']}")
+            extrinsic_R, extrinsic_p_eye = ex_R, ex_p_eye
+            # 잔차는 저장 당시 평균값 하나 — HUD/로그 표시용. 광선 계산은 R,p_eye 만 쓴다.
+            extrinsic_residuals = np.array([ex_meta.get("mean_residual_m", 0.0)])
+            extrinsic_from_file = True
+            print(f"[R,p_eye] 자동 불러오기: {extrinsic_calib_path} "
+                  f"(samples={ex_meta.get('sample_count')}, "
+                  f"평균잔차={ex_meta.get('mean_residual_m', float('nan'))*100:.1f}cm) "
+                  f"— 실전 광선 송신에 쓰인다. 새로 'e' 로 찍으면 6점째에 교체됨.")
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -1021,28 +1127,52 @@ def main():
                 if smooth_dir is None:
                     print("[R,p_eye] 아직 시선벡터가 없다 — 눈을 굴려 모델을 세우고 다시.")
                 else:
-                    D, valid_n = depth_at(
-                        latest_disparity, eu, ev, ocams_calib.RECTIFIED_K[0, 0],
-                        baseline_m, radius=5)
-                    if D is None or not (0.1 < D < 5.0):
-                        print(f"[R,p_eye] ({eu},{ev}) 깊이 측정 실패(유효 disparity {valid_n}개) "
-                              "— 텍스처 있는 곳을 다시 클릭.")
+                    # 2026-09-27: 스테레오 깊이(검증 실패, docs/12) 대신 태그+로봇팔 FK로
+                    # 구한 3D점을 쓴다. 클릭한 화면 픽셀(eu,ev)은 이제 X 계산에 안 쓰이고,
+                    # "지금 응시 중"이라는 트리거로만 쓴다 — 그리퍼를 직접 응시할 것.
+                    arm_pt = arm_point_receiver.latest_valid()
+                    if arm_pt is None:
+                        print("[R,p_eye] 팔 기반 3D점 없음 — arm/eye_scene_calib_helper.py 떠있는지, "
+                              "태그가 보이는지 확인.")
                     else:
-                        Kinv = np.linalg.inv(ocams_calib.RECTIFIED_K)
-                        X = D * (Kinv @ np.array([eu, ev, 1.0], dtype=np.float64))
+                        X = np.array(arm_pt, dtype=np.float64)
                         extrinsic_dirs.append(smooth_dir.copy())
                         extrinsic_points.append(X)
-                        print(f"[R,p_eye] 포인트 추가 #{len(extrinsic_dirs)}: "
-                              f"D={D:.3f}m X={np.round(X, 3)}")
+                        print(f"[R,p_eye] 포인트 추가 #{len(extrinsic_dirs)}: X={np.round(X, 3)}")
                         if len(extrinsic_dirs) >= 6:
                             try:
                                 extrinsic_R, extrinsic_p_eye, extrinsic_residuals = \
                                     eye_scene_extrinsic.calibrate_r_p_eye(
                                         extrinsic_dirs, extrinsic_points)
+                                extrinsic_from_file = False     # 이번 세션 점으로 교체됨
                                 print(f"[R,p_eye] {len(extrinsic_dirs)}점으로 재계산. "
                                       f"p_eye={np.round(extrinsic_p_eye, 4)}m 잔차(cm): "
                                       f"평균={extrinsic_residuals.mean()*100:.1f} "
                                       f"최대={extrinsic_residuals.max()*100:.1f}")
+                                if eye_scene_extrinsic.p_eye_at_bound(extrinsic_p_eye):
+                                    print(f"[R,p_eye][주의] p_eye 가 ±{eye_scene_extrinsic.P_EYE_BOUND_M*100:.0f}cm "
+                                          "경계에 붙음 — 점들의 각도/거리 폭이 좁아 p_eye 를 못 정한다. "
+                                          "고개를 앞뒤로 옮겨 가며(거리 다르게) 점을 더 찍을 것.")
+                                # 축 부호 점검: 목표 방향과 시선 방향의 축별 상관이 음수면 그 축이
+                                # 거울상이다 — 회전으론 못 맞춘다(2026-09-27 y축 corr -0.91 실측).
+                                if len(extrinsic_dirs) >= 5:
+                                    _X = np.asarray(extrinsic_points); _d = np.asarray(extrinsic_dirs)
+                                    for _ax, _nm, _key in ((0, "x", "x"), (1, "y", "y")):
+                                        _t = np.arctan2(_X[:, _ax], _X[:, 2])
+                                        _g = np.arctan2(_d[:, _ax], _d[:, 2])
+                                        if np.ptp(_t) > np.radians(3) and np.ptp(_g) > 1e-6:
+                                            _c = float(np.corrcoef(_t, _g)[0, 1])
+                                            if _c < -0.5:
+                                                print(f"[R,p_eye][주의] {_nm}축 거울상 의심 "
+                                                      f"(목표↔시선 상관 {_c:+.2f}) — '{_key}' 로 반전 후 "
+                                                      "다시 찍을 것(반전하면 점이 리셋됨).")
+                                # 실기 클릭 한 점 한 점이 아깝다 — affine처럼 9점 문턱 없이
+                                # 재계산될 때마다 바로 저장(다음 재계산이 이어받아 덮어씀).
+                                save_extrinsic_calibration(
+                                    extrinsic_calib_path, extrinsic_R, extrinsic_p_eye,
+                                    extrinsic_dirs, extrinsic_points, extrinsic_residuals,
+                                    sign=sign)
+                                print(f"[R,p_eye] 자동 저장: {extrinsic_calib_path}")
                             except ValueError as e:
                                 print(f"[R,p_eye] 계산 대기: {e}")
                         else:
@@ -1066,6 +1196,13 @@ def main():
                         try:
                             gaze_affine = calibrate_affine(calib_dirs, calib_pixels)
                             calibrated = True
+                            if extrinsic_from_file:
+                                # 광선이 픽셀보다 우선이라, 옛 파일 R,p_eye 가 남아 있으면
+                                # 방금 만든 affine 이 팔 쪽에서 가려진다.
+                                extrinsic_R = extrinsic_p_eye = extrinsic_residuals = None
+                                extrinsic_from_file = False
+                                print("[R,p_eye] 새 affine 캘리브 — 파일에서 불러온 R,p_eye 폐기 "
+                                      "(팔 쪽은 픽셀 경로로 대체). 광선 쓰려면 'e' 로 새로 찍기.")
                             px_err = np.sqrt(affine_reprojection_error(
                                 gaze_affine, calib_dirs, calib_pixels) / len(calib_dirs))
                             print(f"[다점-affine] {len(calib_dirs)}점으로 재계산. "
@@ -1090,9 +1227,28 @@ def main():
                         print(f"[다점-affine] {len(calib_dirs)}/3점 — affine 계산 대기")
 
             n_model = len(getattr(tracker, "model_centers", []))
-            if calibrated and smooth_dir is not None:
+            gaze_offscreen = None
+            if (calibrated or extrinsic_R is not None) and smooth_dir is not None:
                 gaze_valid = True
-                if (args.enable_experimental_depth
+                if extrinsic_R is not None and extrinsic_p_eye is not None:
+                    # 2026-09-28: 커서도 팔로 가는 것과 같은 (R,p_eye) 광선으로 그린다. 예전 affine
+                    # (다른 세션·반전 전 기준)으로 그려서 y 가 479 에 붙어 사용자를 헷갈리게 했다.
+                    # 광선 위 1m 점을 씬카메라(rectified 좌영상)에 투영.
+                    _X = extrinsic_p_eye + (extrinsic_R @ smooth_dir) / np.linalg.norm(extrinsic_R @ smooth_dir)
+                    gaze_valid = _X[2] > 1e-6
+                    if gaze_valid:
+                        _u = cx + fx * _X[0] / _X[2]
+                        _v = cy + fy * _X[1] / _X[2]
+                        if args.scene_flip:
+                            _u, _v = SW - 1 - _u, SH - 1 - _v
+                        u = int(np.clip(_u, 0, SW - 1))
+                        v = int(np.clip(_v, 0, SH - 1))
+                        # 2026-09-28: 테이블을 내려다보면 광선이 씬카메라 화면 아래(>27°)로 나가
+                        # 커서가 y=479 에 붙었다. 화면 밖이면 표시로 알려준다(광선 자체는 정상).
+                        _off = [nm for c, nm in ((_v > SH - 1, "below"), (_v < 0, "above"),
+                                                 (_u > SW - 1, "right"), (_u < 0, "left")) if c]
+                        gaze_offscreen = "/".join(_off) if _off else None
+                elif (args.enable_experimental_depth
                         and affine_05 is not None and affine_10 is not None):
                     depth_guess = latest_depth_m if latest_depth_m is not None else 0.75
                     measured_depth = None
@@ -1139,8 +1295,12 @@ def main():
                         px_sender.send(0, 0, valid=False)
 
                 if gaze_valid:
-                    cv2.circle(scene, (u, v), 28, (0, 255, 0), 3)
-                    cv2.drawMarker(scene, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 22, 2)
+                    _gc = (0, 0, 255) if gaze_offscreen else (0, 255, 0)
+                    cv2.circle(scene, (u, v), 28, _gc, 3)
+                    cv2.drawMarker(scene, (u, v), _gc, cv2.MARKER_CROSS, 22, 2)
+                    if gaze_offscreen:
+                        cv2.putText(scene, f"gaze off-screen ({gaze_offscreen}) - see topdown",
+                                    (20, SH - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     depth_label = (f" depth={latest_depth_m:.2f}m"
                                    if latest_depth_m is not None else " depth=N/A")
                     cv2.putText(scene, f"gaze ({u},{v}){depth_label}", (u + 34, v - 8),
@@ -1166,6 +1326,80 @@ def main():
                     udp_sender.send([0.0, 0.0, 0.0], valid=False)
                     udp_status = "미캘리브" if not calibrated else "동공놓침"
                 status, color = "NOT CALIBRATED - look at scene cam, press 'c'", (0, 200, 255)
+
+            # 2026-09-28 진단: 1초마다 "지금 광선 vs 팔 그리퍼" 각도를 남긴다(보정은 안 함).
+            # 'o' 가 23~43° 로 크게 나와서, 보정 없이 원래 오차가 얼마인지 보려고.
+            if extrinsic_R is not None and extrinsic_p_eye is not None and smooth_dir is not None:
+                _tn = time.time()
+                if _tn - getattr(arm_point_receiver, "_diag_t", 0.0) > 1.0:
+                    arm_point_receiver._diag_t = _tn
+                    _ap = arm_point_receiver.latest_valid(0.5)
+                    if _ap is not None:
+                        _r = extrinsic_R @ smooth_dir
+                        _v = np.asarray(_ap, dtype=np.float64) - extrinsic_p_eye
+                        _ang = np.degrees(np.arccos(np.clip(np.dot(_r / np.linalg.norm(_r),
+                                                                    _v / np.linalg.norm(_v)), -1, 1)))
+                        _ra = np.degrees([np.arctan2(_r[0], _r[2]), np.arctan2(_r[1], _r[2])])
+                        _va = np.degrees([np.arctan2(_v[0], _v[2]), np.arctan2(_v[1], _v[2])])
+                        print(f"[진단] 광선-그리퍼 {_ang:.1f}° (좌우 광선 {_ra[0]:+.1f} 그리퍼 {_va[0]:+.1f} / "
+                              f"상하 광선 {_ra[1]:+.1f} 그리퍼 {_va[1]:+.1f}, 씬카메라 기준)", flush=True)
+            if drift_capture is not None:
+                _now = time.time()
+                if drift_capture["start"] <= _now <= drift_capture["end"]:
+                    if smooth_dir is not None:
+                        drift_capture["dirs"].append(np.asarray(smooth_dir, dtype=np.float64).copy())
+                    _pt = arm_point_receiver.latest()
+                    if _pt is not None:
+                        drift_capture["pts"].append(np.asarray(_pt, dtype=np.float64))
+                elif _now > drift_capture["end"]:
+                    _dirs, _pts = drift_capture["dirs"], drift_capture["pts"]
+                    drift_capture = None
+                    _spread = None
+                    if len(_dirs) >= 5:
+                        _D = np.asarray(_dirs)
+                        _spread = float(np.degrees(np.arccos(np.clip(
+                            _D @ (_D.mean(0) / np.linalg.norm(_D.mean(0))), -1, 1))).max())
+                    if len(_dirs) < 5 or len(_pts) < 3:
+                        print(f"[R,p_eye-보정] 실패 — 시선 {len(_dirs)}개 / 그리퍼점 {len(_pts)}개 "
+                              "(태그·동공 확인 후 다시 'o').")
+                    elif extrinsic_R is None or extrinsic_p_eye is None:
+                        print("[R,p_eye-보정] 측정 중 캘리브가 지워짐 — 취소.")
+                    elif _spread > 5.0:
+                        # 2026-09-28: 흔들림 41.8° 측정으로 22° 보정이 들어가 시선이 망가졌다.
+                        print(f"[R,p_eye-보정] 거부 — 측정 중 시선이 {_spread:.1f}° 움직였다(기준 5°). "
+                              "그리퍼 끝만 3초 보고 다시 'o'. 기존 보정 유지.")
+                    else:
+                        # 이전 'o' 결과 위에 누적하지 않는다 — 다시 누르면 원래 R 기준으로 재보정.
+                        if drift_applied_R is not None and extrinsic_R is drift_applied_R:
+                            _base = drift_base_R
+                        else:
+                            _base = extrinsic_R
+                        _d = _D.mean(0); _d /= np.linalg.norm(_d)
+                        cur = _base @ _d
+                        tgt = np.median(np.asarray(_pts), axis=0) - extrinsic_p_eye
+                        Rc = rotation_from_a_to_b(cur, tgt).astype(np.float64)
+                        ang = np.degrees(np.arccos(np.clip(
+                            np.dot(cur / np.linalg.norm(cur), tgt / np.linalg.norm(tgt)), -1, 1)))
+                        drift_base_R = _base
+                        extrinsic_R = Rc @ _base
+                        drift_applied_R = extrinsic_R
+                        print(f"[R,p_eye-보정] {ang:.1f}° 보정 적용 (시선 {len(_dirs)}개, 그리퍼점 "
+                              f"{len(_pts)}개, 측정 중 시선 흔들림 최대 {_spread:.1f}°). "
+                              "세션 한정, 파일 저장 안 함.")
+
+            # docs/12 실전 연결 — (R,p_eye) 가 있으면 3D 광선을 보낸다. origin=p_eye,
+            # direction=R@시선. eye_scene_calib_helper 의 3D점과 같은 좌표계(뒤집지 않은
+            # /camera/left)라 scene_flip 보정 불필요. ★ affine/R 캘리브(calibrated) 여부와
+            # 무관해야 한다 — 'y' 반전은 calibrated 를 끄므로, 예전엔 e 모드만 한 세션에서
+            # 광선이 한 번도 안 나갔다(2026-09-27 실측: 브리지 '시선 없음' 100%).
+            if ray_sender is not None:
+                ray_dir = (extrinsic_R @ smooth_dir
+                           if extrinsic_R is not None and extrinsic_p_eye is not None
+                           and smooth_dir is not None else None)
+                if ray_dir is not None and np.linalg.norm(ray_dir) > 1e-9:
+                    ray_sender.send(extrinsic_p_eye, ray_dir / np.linalg.norm(ray_dir), valid=True)
+                else:
+                    ray_sender.send((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), valid=False)
 
             if depth_probe_result is not None:
                 du, dv, probe_z, probe_n = depth_probe_result
@@ -1242,6 +1476,11 @@ def main():
                     gaze_affine = None
                     calibrated = True
                     print(f"[calib] 완료. 기준 시선={smooth_dir.round(3)} → 씬 정면 [0,0,1]")
+                    if extrinsic_from_file:
+                        extrinsic_R = extrinsic_p_eye = extrinsic_residuals = None
+                        extrinsic_from_file = False
+                        print("[R,p_eye] 새 1점 캘리브 — 파일에서 불러온 R,p_eye 폐기 "
+                              "(팔 쪽은 픽셀 경로로 대체).")
             elif key == ord('d'):
                 depth_mode = not depth_mode
                 if depth_mode:
@@ -1268,6 +1507,19 @@ def main():
                     saved_err = save_affine_calibration(
                         calib_path, gaze_affine, calib_dirs, calib_pixels, SW, SH)
                     print(f"[calib] 저장 완료: {calib_path} (error={saved_err:.1f}px)")
+                # R,p_eye 는 6점 넘으면 재계산될 때마다 이미 자동 저장되지만(위 참고),
+                # 수동으로도 한 번 더 확인 저장할 수 있게 's'에 같이 얹는다.
+                # 2026-09-28: 원시 점 없이(파일에서 불러온 세션) 's' 를 누르면 samples=0 파일이
+                # 저장됐고, 거기에 'o' 세션 보정(잘못된 23°)까지 섞여 들어갔다. 한글 입력 중
+                # 'ㄴ'(=s) 가 씬 창에 들어가 실제로 일어났다. 이번 세션에 찍은 점이 있고 'o'
+                # 보정이 안 걸린 R 일 때만 저장한다.
+                if (extrinsic_R is not None and extrinsic_p_eye is not None
+                        and len(extrinsic_dirs) >= 6 and extrinsic_R is not drift_applied_R):
+                    save_extrinsic_calibration(
+                        extrinsic_calib_path, extrinsic_R, extrinsic_p_eye,
+                        extrinsic_dirs, extrinsic_points, extrinsic_residuals,
+                        sign=sign)
+                    print(f"[R,p_eye] 저장 완료: {extrinsic_calib_path}")
             elif key == ord('u'):
                 if not calib_dirs:
                     print("[다점] 되돌릴 점이 없다.")
@@ -1296,7 +1548,19 @@ def main():
                 extrinsic_R = None
                 extrinsic_p_eye = None
                 extrinsic_residuals = None
+                extrinsic_from_file = False
                 print("[calib] 리셋 (다점 캘리브 포인트 + fx + R/p_eye 캘리브 포인트도 초기값으로 복원됨)")
+            elif key == ord('o'):
+                # R,p_eye 드리프트 1점 보정 (2026-09-27: 재시작 후 좌우는 맞고 상하만 10.7° 밀림
+                # — 안경이 코에서 흘러내린 전형). 누른 '순간' 시선을 쓰면 키보드/화면을 보는
+                # 시선이 들어간다(실측: 14° 보정이 57° 오차를 만듦). 그래서 누르고 2초 뒤부터
+                # 1초간 시선·그리퍼점을 모아 평균낸다 — 그동안 그리퍼 끝을 볼 것.
+                if extrinsic_R is None or extrinsic_p_eye is None:
+                    print("[R,p_eye-보정] R,p_eye 캘리브가 없다 — 먼저 e 로 찍거나 불러올 것.")
+                else:
+                    t0 = time.time()
+                    drift_capture = {"start": t0 + 2.0, "end": t0 + 3.0, "dirs": [], "pts": []}
+                    print("[R,p_eye-보정] 2초 뒤 1초간 측정 — 지금 그리퍼 끝을 보세요.")
             elif key in (ord('x'), ord('y')):
                 # 축 부호를 바꾸면 기존 R은 무효 → 캘리브 리셋 후 다시 'c'
                 i = 0 if key == ord('x') else 1
@@ -1307,12 +1571,20 @@ def main():
                 calib_dirs.clear()
                 calib_pixels.clear()
                 fx = fy = fx0
+                # 부호가 바뀐 smooth_dir 에는 R,p_eye 도 안 맞는다 — 출처(파일/세션) 무관하게 리셋.
+                extrinsic_dirs.clear()
+                extrinsic_points.clear()
+                extrinsic_R = extrinsic_p_eye = extrinsic_residuals = None
+                extrinsic_from_file = False
                 print(f"[mirror] {'x' if i == 0 else 'y'} 반전 -> {sign[i]:+.0f} "
-                      f"(캘리브 리셋됨, 다시 'c' 또는 'm'+클릭)")
+                      f"(캘리브 리셋됨 — R,p_eye 포함, 다시 'c' 또는 'm'+클릭 / 'e')")
     finally:
         if px_sender is not None:
             px_sender.send(0, 0, valid=False)     # 끊길 때 옛 시선을 붙들지 않게
             px_sender.close()
+        if ray_sender is not None:
+            ray_sender.send((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), valid=False)
+            ray_sender.close()
         if udp_sender is not None:
             # 마지막 한 발은 valid=False. 뷰어를 끄면 로봇팔이 옛 좌표를 붙들고
             # 그리로 움직이려 할 수 있다 — 끊길 때 명시적으로 무효화한다.

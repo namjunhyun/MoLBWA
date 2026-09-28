@@ -41,7 +41,7 @@ import numpy as np
 import yaml
 
 from anchor import AnchorTracker, TagBundleDetector, TagDirectAnchor
-from perception import gaze_ray_in_base, ray_hit_height
+from perception import gaze_ray_in_base, gaze_ray_in_base_from_ray, ray_hit_height
 from run_demo import GazeSource, load_intrinsics
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -57,7 +57,7 @@ class GazeToBase:
     """
 
     def __init__(self, K, plane_z, direct_cfg=None, tracker_cfg=None, use_slam=False,
-                 max_pose_jump_m=0.3, max_pose_norm_m=10.0):
+                 max_pose_jump_m=0.3, max_pose_norm_m=10.0, calib_mode=False, hold_s=0.0):
         self.K = K
         self.plane_z = plane_z
         self.direct = TagDirectAnchor(**(direct_cfg or {}))
@@ -66,6 +66,15 @@ class GazeToBase:
         self.max_pose_norm_m = max_pose_norm_m
         self._last_slam_pos = None
         self.slam_rejects = 0
+        # ★ 2026-09-27: --calib-mode. T_BW 캘리브는 그리퍼 끝(공중, 다양한 높이)을 본다.
+        # 평면 교차(plane_z)는 그 높이에서 대부분 "광선이 테이블 쪽을 안 향함"으로 막힌다.
+        # 이 모드에서는 교차 대신 광선 위의 임의 점(1m 지점)을 그대로 보낸다.
+        # 소비자(calibrate_world_to_base)가 origin+point로 광선을 재구성해 진짜 높이와
+        # 교차시키므로, 어느 점이든 광선 위에 있기만 하면 된다.
+        self.calib_mode = calib_mode
+        self.last_ray = None
+        self.hold_s = 0.0 if calib_mode else hold_s   # 캘리브 때는 옛 자세를 섞지 않는다
+        self._last_T, self._last_T_t = None, 0.0
 
     def update_slam(self, T_w_hc, map_id, ok, t=None):
         """SLAM 포즈 입력. 발산 방어: ORB-SLAM3 는 발산 중에도 30Hz 로 포즈를 낸다
@@ -88,8 +97,18 @@ class GazeToBase:
         self._last_slam_pos = pos if np.all(np.isfinite(pos)) else None
         self.tracker.update_slam(np.asarray(T_w_hc, float), map_id, ok, t)
 
-    def step(self, T_tag, gaze_uv, t=None):
-        """-> (p_ab or None, T_ab_hc or None, 출처 'tag'/'slam' 또는 무효 사유)"""
+    def step(self, T_tag, gaze_uv, t=None, gaze_ray=None):
+        """-> (p_ab or None, T_origin or None, 출처 'tag'/'slam' 또는 무효 사유)
+
+        gaze_ray: (origin_hc, direction_hc) 또는 None. docs/12 (R,p_eye) 실전 연결 —
+        있으면 이걸 우선 쓴다(픽셀+K 역투영 없이 광선을 그대로 armbase로 옮김,
+        gaze_ray_in_base_from_ray 참고). 없으면 옛 픽셀 경로(gaze_uv+K)로 대체한다.
+
+        T_origin: 회전은 T_ab_hc, 이동은 **실제 광선 원점**. 하류(/head/pose →
+        dwell_detector, target_resolver, calibrate_world_to_base)는 이 이동만 광선
+        원점으로 쓰므로, 광선 경로에서 헤드캠 위치를 보내면 p_eye 오프셋만큼 다른
+        직선이 재구성된다(코드리뷰 #2). 픽셀 경로에서는 원점 = 헤드캠 위치라 변화 없음.
+        """
         if T_tag is not None:
             self.direct.update_tag(T_tag)
             if self.tracker is not None:
@@ -98,6 +117,15 @@ class GazeToBase:
             self.direct.miss()
 
         T, src = self.direct.T_headcam_to_armbase(), "tag"
+        # 2026-09-27: 태그가 한두 프레임 깜빡이면 즉시 무효 -> dwell 버퍼가 0.35초마다 리셋돼
+        # 컵을 2초 봐도 응시 확정이 안 났다(실측 태그 유효 34~75%). 시선 '선택'용으로는 0.3초
+        # 전 머리 자세를 써도 무해하다(팔 좌표는 탑다운 스냅이 정한다). 그 이상은 안 이어 쓴다.
+        now = time.time() if t is None else t
+        if T is not None:
+            self._last_T, self._last_T_t = T, now
+        elif (self._last_T is not None and self.hold_s > 0
+              and now - self._last_T_t <= self.hold_s):
+            T, src = self._last_T, "tag-hold"
         if T is None and self.tracker is not None:
             T, src = self.tracker.T_headcam_to_armbase(), "slam"
         if T is None:
@@ -105,13 +133,25 @@ class GazeToBase:
             if self.tracker is not None:
                 st += f"/SLAM {self.tracker.state.value}"
             return None, None, f"태그 {st}"
-        if gaze_uv is None:
+        if gaze_ray is not None:
+            origin, direction = gaze_ray_in_base_from_ray(gaze_ray[0], gaze_ray[1], T)
+        elif gaze_uv is not None:
+            origin, direction = gaze_ray_in_base(gaze_uv, self.K, T)
+        else:
             return None, None, "시선 없음"
-        origin, direction = gaze_ray_in_base(gaze_uv, self.K, T)
-        p = ray_hit_height(origin, direction, self.plane_z)
-        if p is None:
-            return None, None, "광선이 테이블 쪽을 안 향함"
-        return p, np.linalg.inv(T), src
+        self.last_ray = (origin, direction)   # --debug-ray 진단용 (무효 판정 전 광선)
+        if self.calib_mode:
+            norm = np.linalg.norm(direction)
+            if norm < 1e-9:
+                return None, None, "광선 방향 계산 불가"
+            p = origin + direction / norm * 1.0
+        else:
+            p = ray_hit_height(origin, direction, self.plane_z)
+            if p is None:
+                return None, None, "광선이 테이블 쪽을 안 향함"
+        T_origin = np.linalg.inv(T).copy()
+        T_origin[:3, 3] = origin      # 하류가 origin→p 로 광선을 재구성 — 진짜 원점을 싣는다
+        return p, T_origin, src
 
 
 def main():
@@ -125,8 +165,18 @@ def main():
     ap.add_argument("--udp-port", type=int, default=55055)
     ap.add_argument("--scene-topic", default="/camera/left/compressed")
     ap.add_argument("--gaze-px-port", type=int, default=55056)
+    ap.add_argument("--gaze-ray-port", type=int, default=55059,
+                    help="docs/12 (R,p_eye) 3D 광선 수신 포트. 안 켜져 있거나 아직 캘리브 "
+                         "전이면 자동으로 옛 픽셀(--gaze-px-port) 경로로 대체됨")
     ap.add_argument("--slam", action="store_true",
                     help="태그가 안 보일 때 SLAM(/orbslam3/pose)으로 이어 간다")
+    ap.add_argument("--calib-mode", action="store_true",
+                    help="T_BW 캘리브용. 테이블 평면 교차 대신 광선 위 점을 그대로 보낸다 "
+                         "(그리퍼 끝처럼 공중의 점을 볼 때 쓸 것)")
+    ap.add_argument("--tag-hold-s", type=float, default=0.3,
+                    help="태그를 놓친 프레임에 직전 머리 자세를 이어 쓰는 최대 시간 [s] (0=끔)")
+    ap.add_argument("--debug-ray", action="store_true",
+                    help="2초마다 armbase 기준 광선 원점/방향 중앙값과 평면까지 거리 출력")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -137,17 +187,18 @@ def main():
     g2b = GazeToBase(K, args.table_z + args.gaze_height, a.get("direct", {}),
                      {k: a[k] for k in ("stale_after_s", "drift_warn_m", "drift_max_m",
                                         "latch_ema_alpha")},
-                     use_slam=args.slam)
+                     use_slam=args.slam, calib_mode=args.calib_mode, hold_s=args.tag_hold_s)
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
-                     gaze_px_port=args.gaze_px_port)
+                     gaze_px_port=args.gaze_px_port, gaze_ray_port=args.gaze_ray_port)
     sender = GazeUdpSender(args.udp_host, args.udp_port)
     log.info("송신 %s:%d, 응시점 높이 z=%.3f (테이블 %.3f + %.3f), SLAM %s",
              args.udp_host, args.udp_port, g2b.plane_z, args.table_z, args.gaze_height,
              "사용" if args.slam else "안 씀(태그 전용)")
 
     import cv2
-    n_frames = n_valid = 0
+    n_frames = n_valid = n_ray_input = 0
     why, srcs = {}, {}
+    dbg_o, dbg_d = [], []
     next_report = time.time() + 2.0
     try:
         while src.ok():          # SIGTERM 이면 rclpy 가 컨텍스트를 내린다 -> 빠져나감
@@ -160,11 +211,17 @@ def main():
             if args.slam:
                 g2b.update_slam(*src.slam())
             T = tags.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-            p, T_ab_hc, info = g2b.step(T, gaze_uv)
+            gaze_ray = src.gaze_ray()
+            if gaze_ray is not None:
+                n_ray_input += 1
+            g2b.last_ray = None
+            p, T_origin, info = g2b.step(T, gaze_uv, gaze_ray=gaze_ray)
+            if args.debug_ray and g2b.last_ray is not None:
+                dbg_o.append(g2b.last_ray[0]); dbg_d.append(g2b.last_ray[1])
 
             # 무효일 때도 매 프레임 보낸다 — 안 보내면 dwell_detector 가 마지막 유효점을 붙든다
             if p is not None:
-                sender.send(p, valid=True, T_WS=T_ab_hc)
+                sender.send(p, valid=True, T_WS=T_origin)  # 이동 = 광선 원점(p_eye 반영)
                 n_valid += 1
                 srcs[info] = srcs.get(info, 0) + 1
             else:
@@ -178,10 +235,21 @@ def main():
                     d = g2b.tracker.last_drift_m
                     extra = (f", SLAM drift {d * 100:.1f}cm" if np.isfinite(d) else ", SLAM drift -")
                     extra += f", SLAM 포즈 거부 {g2b.slam_rejects}"
-                log.info("프레임 %d, 유효 송신 %d (%.0f%%, 출처 %s), 무효 사유 %s, 태그 재투영 %.2fpx%s",
+                log.info("프레임 %d, 유효 송신 %d (%.0f%%, 출처 %s), 무효 사유 %s, 태그 재투영 %.2fpx, "
+                         "시선 입력=%s (광선 수신 %d/%d프레임)%s",
                          n_frames, n_valid, 100.0 * n_valid / max(n_frames, 1),
-                         srcs or "-", why or "-", reproj, extra)
-                n_frames = n_valid = 0
+                         srcs or "-", why or "-", reproj,
+                         "광선(R,p_eye)" if n_ray_input else "픽셀(구형)", n_ray_input, n_frames, extra)
+                if args.debug_ray and dbg_o:
+                    o = np.median(dbg_o, axis=0); dd = np.median(dbg_d, axis=0)
+                    dd = dd / np.linalg.norm(dd)
+                    t = (g2b.plane_z - o[2]) / dd[2] if abs(dd[2]) > 1e-6 else float("inf")
+                    elev = np.degrees(np.arcsin(dd[2]))
+                    log.info("  [debug-ray] n=%d 원점=%s 방향=%s (앙각 %+.1f°, 평면까지 t=%.2fm, "
+                             "방향 z 표준편차 %.3f)", len(dbg_o), np.round(o, 3), np.round(dd, 3),
+                             elev, t, float(np.std(np.asarray(dbg_d)[:, 2])))
+                dbg_o, dbg_d = [], []
+                n_frames = n_valid = n_ray_input = 0
                 why, srcs = {}, {}
                 next_report = time.time() + 2.0
     except KeyboardInterrupt:

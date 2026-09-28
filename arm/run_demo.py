@@ -68,7 +68,7 @@ class GazeSource:
 
     def __init__(self, use_ros: bool = True, pose_timeout_s: float = 0.5,
                  tag_direct: bool = False, scene_topic: str = "/camera/left/compressed",
-                 gaze_px_port: int = 55056):
+                 gaze_px_port: int = 55056, gaze_ray_port: int | None = None):
         self.use_ros = use_ros
         self.pose_timeout_s = pose_timeout_s
         self.tag_direct = tag_direct
@@ -76,11 +76,18 @@ class GazeSource:
         self._node = None
         self._thread = None
         self._gaze = None
+        self._gaze_ray = None
         self._last_seq = -1
         if tag_direct:
             from gaze_px_udp import GazePixelReceiver
             self._gaze = GazePixelReceiver(port=gaze_px_port)
             log.info("시선 픽셀 UDP 수신 대기: %d", gaze_px_port)
+            if gaze_ray_port is not None:
+                # docs/12 (R,p_eye) 실전 연결 — 있으면 픽셀 대신 이 3D 광선을 우선 쓴다
+                # (gaze_tag_bridge.GazeToBase.step 참고).
+                from gaze_px_udp import GazeRayReceiver
+                self._gaze_ray = GazeRayReceiver(port=gaze_ray_port)
+                log.info("시선 3D 광선(R,p_eye) UDP 수신 대기: %d", gaze_ray_port)
         if use_ros:
             self._init_ros()
 
@@ -183,6 +190,15 @@ class GazeSource:
         self._last_seq = got[1]
         return got[0], self._gaze.latest(), None
 
+    def gaze_ray(self):
+        """-> (origin_hc, direction_hc) 또는 None. docs/12 (R,p_eye) 실전 연결용.
+
+        gaze_ray_port 가 안 켜졌거나 아직 광선이 안 왔으면 None — 그러면 호출부가
+        frame()의 gaze_uv(픽셀) 경로로 대체해야 한다."""
+        if self._gaze_ray is None:
+            return None
+        return self._gaze_ray.latest()
+
     def ok(self) -> bool:
         """rclpy 는 SIGTERM/SIGINT 를 가로채 컨텍스트만 내리고 프로세스는 살려 둔다.
         루프가 이걸 안 보면 kill 로 안 죽는다 (2026-09-23 실측)."""
@@ -191,6 +207,8 @@ class GazeSource:
     def shutdown(self):
         if self._gaze is not None:
             self._gaze.close()
+        if self._gaze_ray is not None:
+            self._gaze_ray.close()
         if self._node is not None and self._rclpy.ok():   # SIGTERM 이면 이미 내려가 있다
             self._rclpy.shutdown()
 

@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "src")))
 from anchor import AnchorState, AnchorTracker, TagDirectAnchor, build_bundle_obj_pts  # noqa: E402
 from kinematics import ArmModel, IKError                        # noqa: E402
 from perception import (Cup, GazeDwell, cup_position_on_table,  # noqa: E402
-                        gaze_ray_in_base, ray_hit_height)
+                        gaze_ray_in_base, gaze_ray_in_base_from_ray, ray_hit_height)
 from sim_source import SimSource, _euler, _rt                   # noqa: E402
 
 CFG = yaml.safe_load(open(os.path.join(HERE, "config.yaml")))
@@ -277,6 +277,76 @@ def test_gaze_ray_bridge():
           ray_hit_height(np.array([0.5, 0, 0.3]), np.array([-1.0, 0, 0.2]), 0.0) is None)
 
 
+# --------------------------------------------------- 8b. 실전 연결: (R,p_eye) 3D 광선 -> base_link
+def test_ray_bridge_r_p_eye():
+    """2026-09-27 실전 연결. docs/12 (R,p_eye) 캘리브가 만드는 건 픽셀이 아니라 헤드캠(씬카메라)
+    좌표계의 광선(origin=p_eye, direction) 이다. gaze_ray_in_base(픽셀+K)와 달리
+    origin 이 핀홀 중심이 아니어도(p_eye != 0) 정확히 armbase로 옮겨져야 한다 —
+    바로 그 origin 오프셋이 (R,p_eye)가 옛 방식보다 나은 이유였다."""
+    from ocams_calib import RECTIFIED_K as K
+    from gaze_tag_bridge import GazeToBase
+    sim = SimSource(CFG, K)
+    p_eye_hc = np.array([0.02, -0.015, 0.03])   # 핀홀 중심이 아닌 임의의 눈 원점(헤드캠 좌표)
+    for c in sim.cups_true_ab:
+        p_hc_true = (sim.T_hc_ab @ np.r_[c, 1.0])[:3]
+        direction_hc = p_hc_true - p_eye_hc
+        direction_hc /= np.linalg.norm(direction_hc)
+        origin_ab, dir_ab = gaze_ray_in_base_from_ray(p_eye_hc, direction_hc, sim.T_hc_ab)
+        # origin 이 헤드캠 위치(T_ab_hc[:3,3])가 아니라 p_eye 오프셋이 반영된 점이어야 한다.
+        headcam_pos_ab = np.linalg.inv(sim.T_hc_ab)[:3, 3]
+        check("실전광선: origin이 핀홀중심이 아닌 p_eye 오프셋을 반영",
+              float(np.linalg.norm(origin_ab - headcam_pos_ab)) > 1e-4,
+              f"origin-headcam 거리 {np.linalg.norm(origin_ab - headcam_pos_ab)*1000:.2f}mm")
+        p = ray_hit_height(origin_ab, dir_ab, float(c[2]))
+        check("실전광선: (R,p_eye) 광선이 컵 높이에서 컵을 뚫음",
+              p is not None and float(np.linalg.norm(p - c)) < 1e-6,
+              f"오차 {0 if p is None else np.linalg.norm(p - c)*1000:.4f}mm")
+
+    # GazeToBase.step() 이 gaze_ray 를 주면 gaze_uv(구형 픽셀)보다 우선해야 한다.
+    c = sim.cups_true_ab[0]
+    p_hc_true = (sim.T_hc_ab @ np.r_[c, 1.0])[:3]
+    direction_hc = p_hc_true - p_eye_hc
+    direction_hc /= np.linalg.norm(direction_hc)
+    wrong_uv = (10.0, 10.0)   # 완전히 다른(틀린) 픽셀 — 광선 쪽이 이겨야 함
+    trk = {k: CFG["anchor"][k] for k in ("stale_after_s", "drift_warn_m", "drift_max_m",
+                                         "latch_ema_alpha")}
+    g2b = GazeToBase(K, float(c[2]), CFG["anchor"]["direct"], trk, use_slam=False)
+    for _ in range(CFG["anchor"]["direct"]["min_consecutive"] - 1):
+        g2b.step(sim.T_hc_ab, wrong_uv)   # 연속 검출로 ANCHORED 되기 전엔 T가 None
+    p, T_origin, info = g2b.step(sim.T_hc_ab, wrong_uv, gaze_ray=(p_eye_hc, direction_hc))
+    check("실전광선: step()이 gaze_ray를 gaze_uv보다 우선 사용",
+          p is not None and float(np.linalg.norm(p - c)) < 1e-6 and info == "tag",
+          f"결과={None if p is None else np.round(p, 4)} 기대={np.round(c, 4)}")
+    # 코드리뷰 #2: 하류는 /head/pose 이동을 광선 원점으로 쓴다 -> p_eye(armbase)여야 한다.
+    origin_ab_true, dir_ab_true = gaze_ray_in_base_from_ray(p_eye_hc, direction_hc, sim.T_hc_ab)
+    check("실전광선: 반환 포즈 이동 = 광선 원점(p_eye 오프셋)",
+          T_origin is not None and float(np.linalg.norm(T_origin[:3, 3] - origin_ab_true)) < 1e-9,
+          f"차이 {np.linalg.norm(T_origin[:3, 3] - origin_ab_true)*1000:.4f}mm")
+
+    def dist_to_ray(x, o, d):
+        v = np.asarray(x) - o
+        return float(np.linalg.norm(v - np.dot(v, d) * d))
+
+    # calib-mode: 보내는 점과 원점 둘 다 진짜 광선 위에 있어야 하류 재구성(원점→점)이 맞다.
+    g2c = GazeToBase(K, float(c[2]), CFG["anchor"]["direct"], trk, use_slam=False,
+                     calib_mode=True)
+    for _ in range(CFG["anchor"]["direct"]["min_consecutive"] - 1):
+        g2c.step(sim.T_hc_ab, None)
+    pc, Tc, _ = g2c.step(sim.T_hc_ab, None, gaze_ray=(p_eye_hc, direction_hc))
+    ok_c = pc is not None and Tc is not None
+    e_p = dist_to_ray(pc, origin_ab_true, dir_ab_true) if ok_c else float("inf")
+    e_o = dist_to_ray(Tc[:3, 3], origin_ab_true, dir_ab_true) if ok_c else float("inf")
+    check("실전광선: calib-mode 점·원점이 진짜 광선 위", max(e_p, e_o) < 1e-9,
+          f"점 {e_p*1000:.4f}mm, 원점 {e_o*1000:.4f}mm")
+    # gaze_ray 없이 부르면 여전히 옛 픽셀 경로가 동작해야 한다(하위호환).
+    uv_true, _ = sim._project_ab(c)
+    p2, T2, info2 = g2b.step(sim.T_hc_ab, uv_true)
+    check("실전광선: gaze_ray 없으면 옛 픽셀 경로로 대체(하위호환)",
+          p2 is not None and float(np.linalg.norm(p2 - c)) < 1e-6, f"결과={p2}")
+    check("실전광선: 픽셀 경로 포즈 이동 = 헤드캠 위치(변화 없음)",
+          T2 is not None and np.allclose(T2, np.linalg.inv(sim.T_hc_ab), atol=1e-9))
+
+
 # ---------------------------------------------------------------- 9. 태그 + SLAM 하이브리드
 def test_hybrid_bridge():
     from ocams_calib import RECTIFIED_K as K
@@ -354,6 +424,7 @@ if __name__ == "__main__":
     test_dwell_robustness()
     test_tag_direct()
     test_gaze_ray_bridge()
+    test_ray_bridge_r_p_eye()
     test_hybrid_bridge()
     print("=" * 70)
     n_fail = sum(1 for _, ok, _ in RESULTS if not ok)

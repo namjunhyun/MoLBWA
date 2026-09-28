@@ -102,6 +102,22 @@ def gaze_ray_in_base(gaze_uv, K: np.ndarray, T_hc_ab: np.ndarray):
     return T_ab_hc[:3, 3].copy(), d_ab / np.linalg.norm(d_ab)
 
 
+def gaze_ray_in_base_from_ray(origin_hc, direction_hc, T_hc_ab: np.ndarray):
+    """docs/12 (R,p_eye) 실전 연결용 — gaze_ray_in_base 와 달리 픽셀+K 역투영을 안 쓴다.
+
+    gaze_on_scene.py 가 이미 (R,p_eye) 캘리브로 헤드캠(씬카메라) 좌표계 광선
+    (origin=p_eye, direction)을 직접 계산해 보낸다. 여기서 그걸 픽셀로 다시 투영했다가
+    K 로 역투영하면, (R,p_eye)가 고치려던 "단일 시점(핀홀 중심)" 가정이 되살아나
+    버린다 — 그래서 광선 그대로 armbase 좌표로만 옮긴다.
+
+    T_hc_ab : p_hc = T_hc_ab @ p_ab (gaze_ray_in_base 와 동일 규약)
+    """
+    T_ab_hc = np.linalg.inv(T_hc_ab)
+    origin_ab = T_ab_hc[:3, :3] @ np.asarray(origin_hc, dtype=np.float64) + T_ab_hc[:3, 3]
+    d_ab = T_ab_hc[:3, :3] @ np.asarray(direction_hc, dtype=np.float64)
+    return origin_ab, d_ab / np.linalg.norm(d_ab)
+
+
 def ray_hit_height(origin, direction, z: float, max_range_m: float = 3.0):
     """광선이 armbase 높이 z 평면(수평)을 뚫는 점. 평행/뒤쪽/너무 멀면 None."""
     if abs(direction[2]) < 1e-6:
