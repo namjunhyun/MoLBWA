@@ -59,7 +59,7 @@ from gaze_hri.hud import Hud
 from gaze_hri.kinematics import (TOPDOWN_CALIB_XY, ArmGeometry,
                                  forward_kinematics)
 from gaze_hri.panel_render import PanelState, render
-from gaze_hri.table_view import (HomographyCalibration, ObjectDetector,
+from gaze_hri.table_view import (HomographyCalibration, ObjectDetector, YoloDetector,
                                  TableHomography, find_camera,
                                  hsv_range_from_pixel)
 
@@ -73,6 +73,7 @@ class ControlPanel(Node):
 
         self.declare_parameter("input_source", "mouse")   # mouse | gaze
         self.declare_parameter("camera_index", 0)
+        self.declare_parameter("ocams", False)
         self.declare_parameter("width", 640)
         self.declare_parameter("height", 480)
         self.declare_parameter("sidebar_width", 320)
@@ -85,6 +86,11 @@ class ControlPanel(Node):
         self.declare_parameter("hsv_lower", [0, 120, 80])
         self.declare_parameter("hsv_upper", [12, 255, 255])
         self.declare_parameter("min_area", 400)
+        self.declare_parameter("detector", "color")          # color | yolo
+        self.declare_parameter("yolo_python", "~/yolo-env/bin/python")
+        self.declare_parameter("yolo_model", "~/yolo-env/yolo11s.pt")
+        self.declare_parameter("yolo_conf", 0.25)
+        self.declare_parameter("yolo_classes", ["cup", "bottle"])
         self.declare_parameter("show_arm_tip", True)
         # 캘리브레이션 (GUI 안에서 k 키로 실행)
         self.declare_parameter("calib_height", 0.005)
@@ -123,15 +129,44 @@ class ControlPanel(Node):
                 "    ros2 launch gaze_hri robot_only.launch.py mode:=calib "
                 "backend:=feetech"
             )
-        self.detector = ObjectDetector(
-            self.get_parameter("hsv_lower").value,
-            self.get_parameter("hsv_upper").value,
-            self.get_parameter("min_area").value)
-        # 카메라 인덱스는 USB 를 다시 꽂으면 바뀐다. 지정한 게 안 열리면 훑는다.
-        self.cap, cam_idx = find_camera(self.get_parameter("camera_index").value,
-                                        self.get_parameter("width").value,
-                                        self.get_parameter("height").value)
-        self.get_logger().info(f"카메라 {cam_idx} 사용")
+        if self.get_parameter("detector").value == "yolo":
+            self.detector = YoloDetector(
+                self.get_parameter("yolo_python").value,
+                self.get_parameter("yolo_model").value,
+                self.get_parameter("yolo_conf").value,
+                self.get_parameter("yolo_classes").value,
+                self.get_parameter("min_area").value,
+                logger=self.get_logger())
+            self.get_logger().info("물체 검출: YOLO")
+        else:
+            self.detector = ObjectDetector(
+                self.get_parameter("hsv_lower").value,
+                self.get_parameter("hsv_upper").value,
+                self.get_parameter("min_area").value)
+        self.ocams = bool(self.get_parameter("ocams").value)
+        if self.ocams:
+            # oCamS-1MGN-U 는 YUYV raw 로 받아야 Y채널(=좌영상)을 꺼낼 수 있다.
+            # 그냥 읽으면 YUYV 를 BGR 로 오해해서 화면 전체가 초록색으로 나온다.
+            cam_idx = int(self.get_parameter("camera_index").value)
+            self.cap = cv2.VideoCapture(cam_idx, cv2.CAP_V4L2)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,
+                         int(self.get_parameter("width").value))
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,
+                         int(self.get_parameter("height").value))
+            self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            if not self.cap.isOpened():
+                raise RuntimeError(
+                    f"oCamS 카메라 {cam_idx} 를 열 수 없습니다. "
+                    "`ls /dev/v4l/by-id` 로 인덱스를 확인하세요.")
+            self.get_logger().info(f"카메라 {cam_idx} 사용 (oCamS 좌영상)")
+        else:
+            # 카메라 인덱스는 USB 를 다시 꽂으면 바뀐다. 지정한 게 안 열리면 훑는다.
+            self.cap, cam_idx = find_camera(
+                self.get_parameter("camera_index").value,
+                self.get_parameter("width").value,
+                self.get_parameter("height").value)
+            self.get_logger().info(f"카메라 {cam_idx} 사용")
 
         # 캘리브레이션 (GUI 안에서 바로 한다 — 카메라를 두 프로그램이 다투지 않도록)
         self.calib = None
@@ -375,6 +410,9 @@ class ControlPanel(Node):
         ok, frame = self.cap.read()
         if not ok:
             return
+        if self.ocams and frame.ndim == 3 and frame.shape[2] == 2:
+            frame = cv2.cvtColor(np.ascontiguousarray(frame[:, :, 0]),
+                                 cv2.COLOR_GRAY2BGR)
         self.frame = frame
         now = time.time()
 
@@ -470,6 +508,8 @@ class ControlPanel(Node):
 
     # ------------------------------------------------------------------
     def destroy_node(self):
+        if hasattr(self.detector, "close"):
+            self.detector.close()
         try:
             self.cap.release()
             cv2.destroyAllWindows()

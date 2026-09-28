@@ -26,7 +26,7 @@ from gaze_hri.so101_driver import JointMap, SafetyStop, So101Bus, move_smooth  #
 
 MAP = os.path.join(PKG, "config", "so101_follower.yaml")
 REST = os.path.expanduser("~/.ros/so101_rest_ticks.json")
-HOME_XYZ, HOME_PITCH, HOME_GRIP = [0.22, 0.0, 0.16], -0.785, 1.2
+HOME_XYZ, HOME_PITCH, HOME_GRIP = [0.25, 0.0, 0.12], -1.2, 1.2  # 2026-09-27: gaze_hri.yaml home 과 같게 (태그 안 가림)
 
 
 def heights(q, g):

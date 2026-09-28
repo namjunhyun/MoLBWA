@@ -102,18 +102,27 @@ def main():
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             k = 0
             for c in cnts:
-                if cv2.contourArea(c) < a.min_area:
+                area = cv2.contourArea(c)
+                bx, by, bw, bh = cv2.boundingRect(c)
+                if area < a.min_area:
+                    if area >= 60:      # 버려진 덩어리 (min_area 미달) — 왜 안 잡히는지 보라고 회색으로
+                        cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (160, 160, 160), 1)
+                        cv2.putText(vis, f"{int(area)}", (bx, by - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                    (200, 200, 200), 1)
                     continue
                 M = cv2.moments(c)
                 u, v = M["m10"] / M["m00"], M["m01"] / M["m00"]
                 k += 1
                 cv2.drawContours(vis, [c], -1, (0, 255, 0), 2)
-                label = f"#{k}"
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 255, 255), 2)
+                label = f"#{k} a={int(area)}"
                 if H is not None:
                     p = H @ [u, v, 1.0]
                     label += f" ({p[0] / p[2]:.3f}, {p[1] / p[2]:+.3f})"
-                cv2.putText(vis, label, (int(u) + 8, int(v)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            cv2.putText(vis, f"cups: {k}", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(vis, label, (bx, max(12, by - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.putText(vis, f"cups: {k}  min_area={a.min_area}  (gray=too small)", (10, 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.imshow("mask", mask)
         cv2.imshow(win, vis)
         key = cv2.waitKey(20) & 0xFF
         if key == ord("q"):

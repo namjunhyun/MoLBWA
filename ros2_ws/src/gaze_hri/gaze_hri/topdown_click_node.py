@@ -50,10 +50,10 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 import yaml
-from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, Empty, Float64MultiArray, String
+from std_msgs.msg import Bool, Empty, Float32, Float64MultiArray, String
 
 from gaze_hri.kinematics import (TOPDOWN_CALIB_XY, ArmGeometry, IKError,
                                  forward_kinematics, solve_with_fallback)
@@ -64,6 +64,20 @@ from gaze_hri.kinematics import (TOPDOWN_CALIB_XY, ArmGeometry, IKError,
 CALIB_XY = TOPDOWN_CALIB_XY
 
 WIN = "topdown (click = gaze)"
+
+
+class _HomographyAdapter:
+    """table_view.YoloDetector.detect() 가 기대하는 .ready / .to_robot(u,v) 모양."""
+
+    def __init__(self, node):
+        self.node = node
+
+    @property
+    def ready(self):
+        return self.node.H is not None
+
+    def to_robot(self, u, v):
+        return self.node.pixel_to_robot(u, v)
 
 
 class TopdownClick(Node):
@@ -97,6 +111,18 @@ class TopdownClick(Node):
         self.declare_parameter("hsv_lower", [0, 120, 80])
         self.declare_parameter("hsv_upper", [12, 255, 255])
         self.declare_parameter("min_area", 400)
+        # 2026-09-27: 안경 시연(run_b_demo)은 이 노드를 쓰는데 YOLO 는 control_panel 에만
+        # 붙어 있어서, 컵이 있어도 /objects/poses 가 늘 비어 스냅이 전부 실패했다.
+        # 2026-09-28: 안경 시연에서 마우스가 창에 한 번 들어가면 커서 위치가 매 프레임
+        # /gaze/point_raw 로 나가 안경 시선과 섞였다(응시 확정 0회). 안경 모드에서는 끈다.
+        self.declare_parameter("mouse_gaze", True)
+        self.declare_parameter("detector", "color")          # color | yolo
+        self.declare_parameter("yolo_python", "~/yolo-env/bin/python")
+        self.declare_parameter("yolo_model", "~/yolo-env/yolo11l.pt")
+        self.declare_parameter("yolo_conf", 0.15)
+        self.declare_parameter("yolo_classes", ["cup", "bottle"])
+        # 이 노드의 호모그래피는 tip_z 0.13m 평면 -> 박스 중심이 맞다 (table_view 주석 참고)
+        self.declare_parameter("yolo_anchor", "center")
 
         # 기구학 (순기구학으로 손끝 좌표를 구할 때 사용)
         self.declare_parameter("base_height", 0.0563)
@@ -137,10 +163,22 @@ class TopdownClick(Node):
         self.pub_valid = self.create_publisher(Bool, "/gaze/valid", qos)
         self.pub_objects = self.create_publisher(PoseArray, "/objects/poses", 10)
         self.pub_cancel = self.create_publisher(Empty, "/task/cancel", 10)
+        self.pub_confirm = self.create_publisher(Empty, "/gaze/confirm", 10)
         self.pub_joints = self.create_publisher(
             Float64MultiArray, "/arm/goto_joints", 10)
 
         self.create_subscription(String, "/task/state", self.on_state, 10)
+        # 2026-09-28: 안경 모드(mouse_gaze=False)에선 커서를 마우스가 아니라 안경 시선으로 그린다.
+        # gaze_bridge 가 내는 /gaze/point_raw(base_link, 테이블 위 4.5cm 평면)를 호모그래피 역변환.
+        self._eye_pt = None          # (x, y, 수신시각)
+        self._dwell_prog = 0.0
+        if not bool(self.get_parameter("mouse_gaze").value):
+            self.create_subscription(PointStamped, "/gaze/point_raw", self.on_eye_point, qos)
+            self.create_subscription(Float32, "/gaze/dwell_progress", self.on_dwell_prog, qos)
+            # 광선 원점(머리 = p_eye). 평면 교차점 하나만 찍으면 키 큰 물체를 볼 때 교차점이
+            # 물체 뒤로 밀려 "어긋나 보인다" -> 광선 전체를 선으로 그린다.
+            self._head = None
+            self.create_subscription(PoseStamped, "/head/pose", self.on_head, qos)
         self.task_state = "IDLE"
 
         # ---- 상태 ----
@@ -148,6 +186,7 @@ class TopdownClick(Node):
         self.held_until = 0.0       # 이 시각까지 클릭 지점 고정
         self.held_px = None
         self.H = None               # 호모그래피 3x3
+        self._yolo = None           # detector:=yolo 일 때 첫 검출에서 띄운다
         self.calib_poses = []       # IK로 생성된 캘리브 자세
         self.calib_targets = []     # 각 자세의 테이블면 목표 (x, y)
         self.calib_target = (0.0, 0.0)
@@ -305,6 +344,67 @@ class TopdownClick(Node):
     # ==================================================================
     # 마우스
     # ==================================================================
+    def on_eye_point(self, msg):
+        if msg.header.frame_id and msg.header.frame_id != self.base_frame:
+            return
+        self._eye_pt = (msg.point.x, msg.point.y, time.time())
+
+    def on_head(self, msg):
+        if msg.header.frame_id and msg.header.frame_id != self.base_frame:
+            return
+        p = msg.pose.position
+        self._head = (np.array([p.x, p.y, p.z]), time.time())
+
+    def on_dwell_prog(self, msg):
+        self._dwell_prog = float(msg.data)
+
+    def robot_to_pixel(self, x, y):
+        """로봇 베이스 (x, y) -> 화면 픽셀 (pixel_to_robot 의 역)."""
+        if self.H is None:
+            return None
+        p = np.linalg.inv(self.H) @ np.array([float(x), float(y), 1.0])
+        if abs(p[2]) < 1e-9:
+            return None
+        return float(p[0] / p[2]), float(p[1] / p[2])
+
+    def draw_eye_cursor(self, vis, now):
+        pt = self._eye_pt
+        if pt is None or now - pt[2] > 0.3:
+            cv2.putText(vis, "gaze: -", (10, vis.shape[0] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
+            return
+        px = self.robot_to_pixel(pt[0], pt[1])
+        if px is None:
+            return
+        h, w = vis.shape[:2]
+        u, v = int(np.clip(px[0], 0, w - 1)), int(np.clip(px[1], 0, h - 1))
+        color = (0, 140, 255)                      # 주황 = 안경 시선
+        # 광선을 선으로: 머리 -> 응시점 방향으로 높이 25cm ~ 0cm 구간을 그린다. 이 선이 물체를
+        # 지나가면 그 물체를 보고 있는 것 (선택도 광선-물체 중심 거리로 한다).
+        hd = self._head
+        if hd is not None and now - hd[1] < 0.5:
+            o = hd[0]
+            d = np.array([pt[0], pt[1], self.table_z + 0.045]) - o
+            if abs(d[2]) > 1e-6:
+                seg = []
+                for z in (0.25, 0.0):
+                    t = (self.table_z + z - o[2]) / d[2]
+                    if t > 0:
+                        q = self.robot_to_pixel(*(o + t * d)[:2])
+                        if q is not None:
+                            seg.append((int(np.clip(q[0], -2000, 4000)), int(np.clip(q[1], -2000, 4000))))
+                if len(seg) == 2:
+                    cv2.line(vis, seg[0], seg[1], (0, 140, 255), 1, cv2.LINE_AA)
+        cv2.line(vis, (u - 16, v), (u + 16, v), color, 2)
+        cv2.line(vis, (u, v - 16), (u, v + 16), color, 2)
+        cv2.circle(vis, (u, v), 24, color, 1)
+        if self._dwell_prog > 0:
+            cv2.ellipse(vis, (u, v), (24, 24), -90, 0, int(360 * min(1.0, self._dwell_prog)), color, 4)
+        cv2.putText(vis, "SPACE = select here", (10, vis.shape[0] - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+        cv2.putText(vis, f"gaze ({pt[0]:+.3f}, {pt[1]:+.3f})", (u + 30, v + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
     def on_mouse(self, event, x, y, flags, param):
         if event == cv2.EVENT_MOUSEMOVE:
             self.cursor = (x, y)
@@ -339,6 +439,20 @@ class TopdownClick(Node):
     def detect_objects(self, frame):
         if not self._detect_enabled():
             return []
+        if self.get_parameter("detector").value == "yolo":
+            if self._yolo is None:
+                from gaze_hri.table_view import YoloDetector
+                self._yolo = YoloDetector(
+                    self.get_parameter("yolo_python").value,
+                    self.get_parameter("yolo_model").value,
+                    self.get_parameter("yolo_conf").value,
+                    self.get_parameter("yolo_classes").value,
+                    self.get_parameter("min_area").value,
+                    logger=self.get_logger(),
+                    anchor=self.get_parameter("yolo_anchor").value)
+                self.get_logger().info(
+                    f"물체 검출: YOLO (좌표 기준점: {self.get_parameter('yolo_anchor').value})")
+            return self._yolo.detect(frame, _HomographyAdapter(self))
         lo = np.array(self.get_parameter("hsv_lower").value, dtype=np.uint8)
         hi = np.array(self.get_parameter("hsv_upper").value, dtype=np.uint8)
         min_area = int(self.get_parameter("min_area").value)
@@ -373,6 +487,19 @@ class TopdownClick(Node):
         now = time.time()
 
         objects = self.detect_objects(frame)
+        # 2026-09-28: 컵이 화면에 있는데 노란 박스가 안 뜨는 원인을 밖에서 보려고 — 2초마다
+        # 최신 프레임을 저장하고 검출 개수를 남긴다 (카메라는 이 노드만 열 수 있다).
+        if now - getattr(self, "_last_dump", 0.0) > 2.0:
+            self._last_dump = now
+            try:
+                cv2.imwrite(os.path.expanduser("~/.ros/topdown_last.jpg"), frame)
+            except Exception:
+                pass
+            if self._detect_enabled():
+                self.get_logger().info(
+                    f"물체 검출 {len(objects)}개: "
+                    + ", ".join(f"({xy[0]:.3f},{xy[1]:.3f})" for (_, xy, _) in objects),
+                    throttle_duration_sec=5.0)
 
         # 검출이 켜져 있으면 결과가 0개여도 발행한다.
         # 컵을 치웠는데 옛 목록이 남아 있으면 없는 컵으로 스냅하기 때문이다.
@@ -392,7 +519,9 @@ class TopdownClick(Node):
             cv2.circle(vis, (int(px[0]), int(px[1])), 4, (0, 200, 255), -1)
 
         # ---- 시선 지점 결정 ----
-        if self.mode == "run":
+        if self.mode == "run" and not bool(self.get_parameter("mouse_gaze").value):
+            self.draw_eye_cursor(vis, now)
+        elif self.mode == "run":
             if now < self.held_until and self.held_px is not None:
                 gaze_px = self.held_px
                 holding = True
@@ -401,7 +530,8 @@ class TopdownClick(Node):
                 holding = False
 
             if gaze_px is not None:
-                xy = self.pixel_to_robot(*gaze_px)
+                xy = (self.pixel_to_robot(*gaze_px)
+                      if bool(self.get_parameter("mouse_gaze").value) else None)
                 if xy is not None:
                     msg = PointStamped()
                     msg.header.stamp = self.get_clock().now().to_msg()
@@ -420,6 +550,10 @@ class TopdownClick(Node):
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             raise KeyboardInterrupt
+        elif key == ord(" ") and not bool(self.get_parameter("mouse_gaze").value):
+            # 2026-09-28: 안경 모드 — 스페이스바 = 지금 보고 있는 곳으로 확정 (dwell 대기 대신)
+            self.pub_confirm.publish(Empty())
+            self.get_logger().info("스페이스: 지금 시선으로 확정 요청")
         elif key == ord("c"):
             self.held_until = 0.0
             self.held_px = None
@@ -480,6 +614,8 @@ class TopdownClick(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
     def destroy_node(self):
+        if self._yolo is not None and hasattr(self._yolo, "close"):
+            self._yolo.close()
         try:
             self.cap.release()
             cv2.destroyAllWindows()

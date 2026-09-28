@@ -272,6 +272,7 @@ class ArmServer(Node):
         self.create_subscription(
             Float64MultiArray, "/arm/goto_joints", self.on_goto_joints, 10)
 
+        self._goal_active = False   # execute 진행 중 여부 (goto_joints 동시 실행 방지)
         self._cancel = False
         cb = ReentrantCallbackGroup()
         self._server = ActionServer(
@@ -349,8 +350,22 @@ class ArmServer(Node):
             return
         while len(target) < 6:
             target.append(self.q[len(target)])
+        # 코드리뷰(2026-09-28): 작업(execute) 중이면 거부한다. 예전엔 여기서 _cancel 을 무조건
+        # 지워서, 작업 중 취소 직후 온 goto_joints 가 그 취소를 삼키고 두 동작 루프가 동시에
+        # 모터에 쓸 수 있었다(execute 는 Reentrant 그룹 + MultiThreadedExecutor).
+        if self._goal_active:
+            self.get_logger().warn("goto_joints: 집기/놓기 작업 중이라 무시합니다. 먼저 /task/cancel.")
+            return
+        # 2026-09-27: 예전 /task/cancel 로 켜진 _cancel 은 execute() 에서만 지워져서, 그 뒤의
+        # goto_joints(홈 등)가 로그 한 줄 없이 무시됐다. 작업이 없을 때의 옛 취소는 새 명령이 대체한다.
+        if self._cancel:
+            self.get_logger().info("goto_joints: 이전 취소 상태를 해제하고 이동합니다.")
+        self._cancel = False
+        self.get_logger().info(f"goto_joints: 관절 이동 시작 -> {[round(v, 3) for v in target]}")
         try:
-            self._joint_move(target)
+            done = self._joint_move(target)
+            self.get_logger().info("goto_joints: 도착" if done else
+                                   "goto_joints: /task/cancel 로 중단됨")
         except SafetyStop as exc:
             self.get_logger().error(f"안전 정지 (goto_joints): {exc}")
             self.q = list(self.backend.read())
@@ -452,12 +467,19 @@ class ArmServer(Node):
             )
 
         step_time = float(self.get_parameter("step_time").value)
+        # 2026-09-28: 직선 경로도 관절 속도 제한을 따른다. 예전엔 8cm 하강을 0.4s(10단계 x 0.04s)에
+        # 몰아서, -55° 접근에서 팔꿈치 53° 를 초당 ~130° 로 요구 -> 서보가 못 따라가 26° 추종 오차
+        # 안전정지. 각 단계 대기 = max(step_time, 가장 많이 움직이는 관절 / joint_speed_deg_s).
+        vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
+        q_prev = list(self.q[:4])
         for q in path:
             if self._cancel:
                 return
+            dq = max(abs(a - b) for a, b in zip(q[:4], q_prev))
+            q_prev = list(q[:4])
             self.q = list(q) + [0.0, gripper]
             self.backend.write(self.q)
-            time.sleep(step_time)
+            time.sleep(max(step_time, dq / vmax if vmax > 1e-6 else step_time))
 
         self.q = list(q_goal) + [0.0, gripper]
         self.backend.write(self.q)
@@ -487,7 +509,12 @@ class ArmServer(Node):
                     "  직교 경로 중간점이 안 풀려 관절 보간으로 이동합니다.")
 
         if not path:
-            n = max(6, int(np.max(np.abs(np.array(q_goal) - np.array(q_start))) / 0.03))
+            # 2026-09-27: 고정 스텝(0.03rad/step)이라 joint_speed_deg_s를 무시하고 있었다.
+            # go_home()의 _joint_move()와 같은 방식으로 속도 설정을 따르게 맞춘다.
+            vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
+            step_time = float(self.get_parameter("step_time").value)
+            span = float(np.max(np.abs(np.array(q_goal) - np.array(q_start))))
+            n = max(6, int(span / vmax / step_time))
             for i in range(1, n + 1):
                 s = 0.5 - 0.5 * math.cos(math.pi * i / n)
                 path.append([qs + (qg - qs) * s for qs, qg in zip(q_start, q_goal)])
@@ -671,6 +698,7 @@ class ArmServer(Node):
             self.backend = DryRunBackend(self.get_logger(), 0.0,
                                          held_gap=margin * 2.0)
 
+        self._goal_active = True     # finally 에서 반드시 내린다
         try:
             pick = self.transform_to_base(g.pick, g.frame_id)
             place = self.transform_to_base(g.place, g.frame_id)
@@ -766,6 +794,7 @@ class ArmServer(Node):
             result.message = f"내부 오류: {exc}"
             return result
         finally:
+            self._goal_active = False
             # 동작이 어떻게 끝나든 '지금 멈춰 있다'는 것을 GUI에 알린다
             self.pub_phase.publish(String(data=""))
             if real_backend is not None:

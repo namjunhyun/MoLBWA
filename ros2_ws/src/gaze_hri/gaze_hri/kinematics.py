@@ -32,18 +32,23 @@ import numpy as np
 @dataclass
 class ArmGeometry:
     """URDF에서 읽어와야 하는 값들 (단위: m, rad)."""
-    base_height: float = 0.0563      # base_link -> shoulder_lift 축까지의 z
+    base_height: float = 0.1300      # base_link -> shoulder_lift 축까지의 z (2026-09-27 실측, 수직)
     shoulder_offset: float = 0.0304  # 회전축에서 shoulder_lift 축까지의 수평 오프셋
     l1: float = 0.1160               # shoulder_lift -> elbow_flex
     l2: float = 0.1350               # elbow_flex   -> wrist_flex
     l3: float = 0.1350               # wrist_flex   -> 그리퍼 파지 중심(TCP). 2026-09-24 실측 기반
 
-    # 관절 한계 (URDF와 일치시킬 것)
+    # 관절 한계. 2026-09-28: IK 4관절은 URDF 추정값(±95~110°) 대신 **모터 실제 가동 범위**
+    # (so101_follower.yaml 의 틱 한계를 zero_ticks 로 환산, 양끝 3° 여유)로 바꿨다. 옛 값은
+    # 팔꿈치 ±97°/손목 ±95° 에 막혀 접근각이 -45° 로 눕혀졌고 인형을 비스듬히 눌러 못 잡았다.
+    # pan 은 반대로 실제(+68.9°)가 옛 값(+110°)보다 좁아서 더 안전해진다.
+    # ★ zero_ticks 를 바꾸면 이 값도 다시 환산할 것 (어깨는 2026-09-28 0점 2971 기준).
+    # 옛 값: pan ±1.92, lift ±1.75, elbow ±1.69, wrist ±1.66
     limits: dict = field(default_factory=lambda: {
-        "shoulder_pan": (-1.92, 1.92),
-        "shoulder_lift": (-1.75, 1.75),
-        "elbow_flex": (-1.69, 1.69),
-        "wrist_flex": (-1.66, 1.66),
+        "shoulder_pan": (-1.899, 1.150),    # 실제 -111.8 ~ 68.9°
+        "shoulder_lift": (-0.403, 3.075),   # 실제 -26.1 ~ 179.2°
+        "elbow_flex": (-2.870, 0.397),      # 실제 -167.4 ~ 25.8°
+        "wrist_flex": (-1.744, 1.719),      # 실제 -102.9 ~ 101.5°
         "wrist_roll": (-2.79, 2.79),
         "gripper": (-0.17, 1.75),
     })
@@ -181,7 +186,10 @@ def solve_with_fallback(target_xyz, geo: ArmGeometry, pitch_candidates=None):
                             -math.pi / 6, -1.2, 0.0]
     last = None
     for pitch in pitch_candidates:
-        for elbow_up in (True, False):
+        # 2026-09-28: 팔꿈치 아래(elbow_up=False) 해를 먼저. 관절 한계를 모터 실제 범위로 넓히자
+        # 접근(위 16.5cm)은 팔꿈치 +11°(위), 집기는 -64°(아래)로 갈려서 하강 중 팔꿈치가 75°
+        # 돌아야 했고 26° 추종 오차로 안전정지. 한 가지 형태로 통일한다.
+        for elbow_up in (False, True):
             try:
                 return inverse_kinematics(target_xyz, geo, pitch, elbow_up), pitch
             except IKError as exc:

@@ -120,18 +120,28 @@ class So101Bus:
 
     # ---------- 저수준 ----------
     def _r(self, sid, reg):
+        """★ 한 번 실패해도 바로 예외를 던지지 않는다 — 2026-09-27: load 레지스터
+        읽기가 한 번 실패해서 arm_server 전체가 죽었다(다단계 캘리브 도중). 접촉
+        불량성 순간 오류는 흔하니, flush 후 한 번 더 시도하고 그래도 안 되면 예외."""
         addr, n = reg
         fn = self.ph.read1ByteTxRx if n == 1 else self.ph.read2ByteTxRx
         val, res, _ = fn(self.port, sid, addr)
         if res != self._ok:
-            raise RuntimeError(f"ID{sid} 읽기 실패 (addr {addr})")
+            self._flush()
+            val, res, _ = fn(self.port, sid, addr)
+            if res != self._ok:
+                raise RuntimeError(f"ID{sid} 읽기 실패 (addr {addr})")
         return val
 
     def _w(self, sid, reg, val):
+        """_r()과 같은 이유로 한 번 재시도한다 (2026-09-27, 5번 모터 쓰기 실패로 노드 죽음)."""
         addr, n = reg
         assert addr >= 40, "EEPROM 쓰기 금지"          # 40 미만은 EEPROM 영역
         fn = self.ph.write1ByteTxRx if n == 1 else self.ph.write2ByteTxRx
         res, _ = fn(self.port, sid, addr, int(val))     # 쓰기는 (result, error) 2개다
+        if res != self._ok:
+            self._flush()
+            res, _ = fn(self.port, sid, addr, int(val))
         if res != self._ok:
             raise RuntimeError(f"ID{sid} 쓰기 실패 (addr {addr})")
 

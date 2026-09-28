@@ -49,13 +49,19 @@ from gaze_hri.kinematics import (ArmGeometry, alignment_rmse,
 # 작업 공간에 골고루 퍼지고, 한 평면에 몰리지 않게(중요!) 배치했습니다.
 # 세 점이 일직선이거나 모든 점이 한 평면에 있으면 회전이 제대로 안 풀립니다.
 CALIB_POSES = [
-    (0.0, -0.35, 1.10, -0.60),
-    (0.55, -0.20, 0.95, -0.50),
-    (-0.55, -0.20, 0.95, -0.50),
-    (0.30, 0.15, 0.70, -0.30),
-    (-0.30, 0.15, 0.70, -0.30),
-    (0.0, -0.70, 1.35, -0.35),
-    (0.40, -0.55, 1.25, -0.80),
+    # 코드리뷰(2026-09-28): 예전 자세 5개(팔꿈치 +0.95~+1.35rad, 어깨 -0.70 등)는 모터 실제 가동
+    # 범위(kinematics.ArmGeometry.limits: 팔꿈치 최대 +0.397rad) 밖이었다. 드라이버가 틱 한계로
+    # 잘라서 팔은 거기까지 못 가는데, p_B 는 명령값 q 의 FK 로 계산돼 대응점이 틀어졌다.
+    # 범위 안의 자세로 교체: 테이블 높이 3개 + arm/goto_sequence.py 의 검증된 자세 5개
+    # (전환 경로 손끝 최저 3.5cm 이상 시뮬레이션 확인, 2026-09-27).
+    (0.000, 1.394, -1.497, -1.207),    # xyz≈(0.22, 0.00, 0.10)
+    (0.559, 0.758, -0.604, -1.463),    # xyz≈(0.24, 0.15, 0.10)
+    (-0.559, 0.758, -0.604, -1.463),   # xyz≈(0.24, -0.15, 0.10)
+    (0.507, 1.483, -1.222, -1.570),    # xyz≈(0.18, 0.10, 0.15)
+    (0.278, 0.765, -0.936, -0.353),    # xyz≈(0.35, 0.10, 0.12)
+    (-0.278, 0.765, -0.936, -0.353),   # xyz≈(0.35, -0.10, 0.12)
+    (0.000, 1.670, -1.107, -1.087),    # xyz≈(0.25, 0.00, 0.25)
+    (-0.588, 0.534, -0.487, -0.833),   # xyz≈(0.30, -0.20, 0.10)
 ]
 
 
@@ -88,7 +94,12 @@ class Calibrator(Node):
         self._last_fix = None
 
     def on_fixation(self, msg: Fixation):
-        self._last_fix = np.array([msg.point.x, msg.point.y, msg.point.z])
+        point = np.array([msg.point.x, msg.point.y, msg.point.z])
+        if msg.has_origin:
+            origin = np.array([msg.origin.x, msg.origin.y, msg.origin.z])
+        else:
+            origin = None
+        self._last_fix = (point, origin, msg.header.frame_id)
         self._fix_event.set()
 
     def goto(self, q):
@@ -134,8 +145,15 @@ class Calibrator(Node):
         print(" 로봇팔이 자세를 잡을 때마다, 그리퍼 '끝'을 가만히 응시하세요.")
         print(" 초록색 커서가 커지면 인식된 겁니다. Ctrl+C로 중단.\n")
 
-        src, dst = [], []
+        src, dst, pose_idx = [], [], []
+        names = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex")
         for i, q in enumerate(CALIB_POSES, 1):
+            bad = [n for n, v in zip(names, q)
+                   if not self.geo.limits[n][0] <= v <= self.geo.limits[n][1]]
+            if bad:
+                # 범위 밖이면 드라이버가 잘라서 팔이 q 에 못 간다 -> FK(q) 대응점이 틀린다.
+                print(f"[{i}/{len(CALIB_POSES)}] 관절 한계 밖({', '.join(bad)}) — 건너뜁니다.")
+                continue
             print(f"[{i}/{len(CALIB_POSES)}] 자세 이동 중...")
             self.goto(q)
             time.sleep(2.5)
@@ -144,13 +162,38 @@ class Calibrator(Node):
             print(f"    로봇 기준 그리퍼 끝: ({p_B[0]:.3f}, {p_B[1]:.3f}, {p_B[2]:.3f})")
             print("    >>> 지금 그리퍼 끝을 응시하세요...")
 
-            p_W = self.wait_for_fixation()
-            if p_W is None:
+            fix = self.wait_for_fixation()
+            if fix is None:
                 print("    시간 초과 — 이 자세는 건너뜁니다.")
                 continue
-            print(f"    시선 기준 좌표:      ({p_W[0]:.3f}, {p_W[1]:.3f}, {p_W[2]:.3f})  OK\n")
+            point, origin, fix_frame = fix
+            # ★ 2026-09-27: gaze_tag_bridge는 응시점을 항상 고정 높이(테이블+4.5cm)
+            # 평면에 투영해서 보낸다. 캘리브 자세는 그리퍼가 10~27cm 위에 떠 있어서
+            # point를 그대로 쓰면 완전히 다른 지점이 된다(RMSE 11~15cm의 원인이었다).
+            # origin(머리 위치)이 있으면 origin->point 광선을 이 자세의 진짜 높이
+            # p_B[2]와 교차시켜서 보정한다.
+            # 코드리뷰(2026-09-28): p_B[2] 는 base_link 높이다. 광선이 base_link 좌표일 때만
+            # (태그 직결 브리지) 그 높이로 자를 수 있다. map(SLAM) 좌표면 높이 기준이 달라서
+            # 엉뚱한 곳을 자른다 -> 보정하지 않는다. 교점이 머리 뒤(t<=0)여도 버린다.
+            direction = point - origin if origin is not None else None
+            t = None
+            if (origin is not None and fix_frame == "base_link"
+                    and abs(direction[2]) > 1e-6):
+                t = (p_B[2] - origin[2]) / direction[2]
+            if t is not None and t > 0:
+                p_W = origin + t * direction
+                corrected = " (광선 보정됨)"
+            elif t is not None:
+                print("    광선 교점이 머리 뒤쪽 — 이 자세는 건너뜁니다.")
+                continue
+            else:
+                p_W = point
+                corrected = (" (머리 위치 없음 — 보정 안 됨, 부정확할 수 있음)" if origin is None
+                             else f" ({fix_frame or '?'} 좌표라 높이 보정 안 함)")
+            print(f"    시선 기준 좌표:      ({p_W[0]:.3f}, {p_W[1]:.3f}, {p_W[2]:.3f}){corrected}  OK\n")
             src.append(p_W)
             dst.append(p_B)
+            pose_idx.append(i)
 
         if len(src) < 4:
             print(f"샘플이 {len(src)}개뿐입니다. 최소 4개(권장 6개) 필요합니다.")
@@ -158,6 +201,13 @@ class Calibrator(Node):
 
         T_BW = umeyama_rigid(src, dst)
         rmse = alignment_rmse(T_BW, src, dst)
+
+        # 점별 오차 — 특정 자세 하나가 전체를 끌어올리는지 확인용.
+        src_arr, dst_arr = np.asarray(src), np.asarray(dst)
+        pred = (T_BW[:3, :3] @ src_arr.T).T + T_BW[:3, 3]
+        per_point = np.linalg.norm(pred - dst_arr, axis=1)
+        print(" 자세별 오차(mm): " + ", ".join(
+            f"[{i}]{e * 1000:.0f}" for i, e in zip(pose_idx, per_point)))
 
         print("=" * 62)
         print(f" 정합 완료 — 샘플 {len(src)}개, RMSE = {rmse * 1000:.1f} mm")

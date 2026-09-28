@@ -9,7 +9,12 @@
 카메라가 고정이라 3×3 행렬 하나로 끝난다. 깊이도 SLAM도 필요 없다.
 """
 
+import json
 import os
+import struct
+import subprocess
+import threading
+import time
 
 import cv2
 import numpy as np
@@ -121,6 +126,113 @@ class ObjectDetector:
             if xy is not None:
                 found.append(((u, v), xy, c))
         # 로봇 기준 왼쪽 -> 오른쪽 순으로 번호가 안정되게 정렬
+        found.sort(key=lambda it: it[1][1])
+        return found
+
+
+class YoloDetector:
+    """YOLO 기반 물체 검출. ObjectDetector 와 같은 형식으로 돌려준다.
+
+    torch 가 든 별도 파이썬(yolo_python)에서 yolo_worker.py 를 자식 프로세스로 돌리고,
+    프레임은 JPEG 로 넘긴다. 워커가 바쁘면 그 프레임은 건너뛰고 직전 결과를 쓴다
+    (GUI 가 검출 때문에 멈추지 않는다). 박스는 사각형 contour 로 바꿔 넘긴다.
+    """
+
+    def __init__(self, python, model, conf=0.25, classes=("cup", "bottle"), min_area=400,
+                 logger=None, anchor="bottom"):
+        self.cmd = [os.path.expanduser(python), os.path.join(os.path.dirname(__file__), "yolo_worker.py"),
+                    os.path.expanduser(model), str(conf), ",".join(classes)]
+        self.min_area = int(min_area)
+        self.anchor = anchor   # "bottom"(바닥 접촉점) | "center"(박스 중심)
+        self.log = logger
+        self._proc = None
+        self._lock = threading.Lock()
+        self._dets = []
+        self._busy = False
+        self._ready = False
+        self._retry_at = 0.0
+
+    def _warn(self, msg):
+        if self.log:
+            self.log.warn(msg)
+
+    def _start(self):
+        if time.time() < self._retry_at:
+            return False
+        self._retry_at = time.time() + 5.0
+        try:
+            self._proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError as e:
+            self._warn(f"YOLO 워커를 못 띄웠습니다: {e}")
+            self._proc = None
+            return False
+        self._ready = False
+        self._busy = False
+        # 코드리뷰(2026-09-28): 재시작 중(yolo11l 로딩 수 초) 죽은 워커의 마지막 박스가 계속
+        # 좌표로 나가 치운 컵으로 스냅될 수 있었다 -> 이전 결과를 비운다.
+        with self._lock:
+            self._dets = []
+        threading.Thread(target=self._read_loop, args=(self._proc,), daemon=True).start()
+        return True
+
+    def _read_loop(self, proc):
+        for line in iter(proc.stdout.readline, b""):
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            with self._lock:
+                if msg.get("ready"):
+                    self._ready = True
+                if "dets" in msg:
+                    self._dets = msg["dets"]
+                    self._busy = False
+
+    def close(self):
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+
+    def _submit(self, frame):
+        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            return
+        data = jpg.tobytes()
+        try:
+            self._proc.stdin.write(struct.pack("<I", len(data)) + data)
+            self._busy = True
+        except (BrokenPipeError, OSError):
+            self._proc = None
+
+    def detect(self, frame, homography):
+        if not homography.ready:
+            return []
+        if self._proc is None or self._proc.poll() is not None:
+            if not self._start():
+                return []
+        with self._lock:
+            ready, busy = self._ready, self._busy
+        if ready and not busy:
+            self._submit(frame)
+        with self._lock:
+            dets = list(self._dets)
+        found = []
+        for _, _, x1, y1, x2, y2 in dets:
+            if (x2 - x1) * (y2 - y1) < self.min_area:
+                continue
+            # 박스 중심이 아니라 아래쪽 가운데(바닥 접촉점)를 쓴다. 카메라가 비스듬히
+            # 내려다보므로, 컵처럼 높이가 있는 물체는 박스 중심을 쓰면 카메라 반대쪽으로
+            # 몇 cm씩 밀린 좌표가 나온다(2026-09-27 실측 12cm). 바닥에 가까운 아래쪽 변이
+            # 실제 접촉점에 훨씬 가깝다.
+            # 2026-09-28: topdown_click 의 호모그래피는 손끝 높이 0.13m(≈컵 테두리 높이) 평면으로
+            # 캘리브돼 있어서 박스 중심이 맞다 — 아래 변을 쓰면 7cm 빗나갔다(컵이 B' 표시 위에
+            # 있는데 (0.312,-0.178) 로 나옴). 노드마다 anchor 로 고른다.
+            u, v = (x1 + x2) / 2.0, (y2 if self.anchor == "bottom" else (y1 + y2) / 2.0)
+            xy = homography.to_robot(u, v)
+            if xy is None:
+                continue
+            box = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32).round().astype(np.int32)
+            found.append(((u, v), xy, box.reshape(-1, 1, 2)))
         found.sort(key=lambda it: it[1][1])
         return found
 

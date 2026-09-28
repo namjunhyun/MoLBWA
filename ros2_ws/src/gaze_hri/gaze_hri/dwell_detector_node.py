@@ -31,7 +31,7 @@ from gaze_hri_msgs.msg import Fixation
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Empty, Float32
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -49,6 +49,10 @@ class DwellDetector(Node):
         self.declare_parameter("cooldown", 1.5)
         self.declare_parameter("exit_radius", 0.10)
         self.declare_parameter("max_sample_age", 0.35)   # 이보다 오래 끊기면 버퍼 리셋
+        # 2026-09-28: "dwell"(1.2초 응시 유지로 자동 확정) | "key"(/gaze/confirm 을 받은 순간의
+        # 시선으로 확정 — 탑다운 창 스페이스바). key 모드에선 자동 확정을 하지 않는다.
+        self.declare_parameter("trigger_mode", "dwell")
+        self.declare_parameter("key_window_s", 0.4)      # key 확정 때 평균낼 최근 시선 구간
 
         self.dwell_time = float(self.get_parameter("dwell_time").value)
         self.dispersion_radius = float(self.get_parameter("dispersion_radius").value)
@@ -78,6 +82,12 @@ class DwellDetector(Node):
         self.frame_id = "map"
         self.last_stamp = None
 
+        self.trigger_mode = str(self.get_parameter("trigger_mode").value)
+        self.key_window_s = float(self.get_parameter("key_window_s").value)
+        self.create_subscription(Empty, "/gaze/confirm", self.on_confirm, 10)
+        self.get_logger().info(f"확정 방식: {self.trigger_mode}"
+                               + (" (탑다운 창 스페이스바 = 지금 시선으로 확정)"
+                                  if self.trigger_mode == "key" else ""))
         self.create_timer(0.05, self.evaluate)
         self.get_logger().info(
             f"dwell_detector 시작 (dwell={self.dwell_time}s, "
@@ -146,6 +156,8 @@ class DwellDetector(Node):
         progress = min(1.0, span / self.dwell_time) if stable else 0.0
         self.pub_progress.publish(Float32(data=float(progress)))
         self._publish_marker(centroid, progress, stable)
+        if self.trigger_mode == "key":
+            return          # 자동 확정 안 함 — on_confirm 이 한다
 
         if not stable:
             return
@@ -205,6 +217,38 @@ class DwellDetector(Node):
         )
 
     # ------------------------------------------------------------------
+    def on_confirm(self, _msg):
+        """키로 확정: 최근 key_window_s 동안의 시선 중앙값을 그 자리에서 Fixation 으로 낸다."""
+        t = self.now()
+        pts = [p for tt, p in self.buf if t - tt <= self.key_window_s]
+        if len(pts) < 3 or not self.buf or t - self.buf[-1][0] > self.max_sample_age:
+            self.get_logger().warn("키 확정: 최근 시선이 없다(태그/동공 확인) — 무시.")
+            return
+        P = np.array(pts)
+        centroid = np.median(P, axis=0)
+        rms = float(np.sqrt((np.linalg.norm(P - centroid, axis=1) ** 2).mean()))
+        heads = [h for tt, h in self.head_buf if t - tt <= self.key_window_s]
+
+        msg = Fixation()
+        msg.header.stamp = self.last_stamp or self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
+        msg.point.x, msg.point.y, msg.point.z = map(float, centroid)
+        msg.duration = float(self.key_window_s)
+        msg.dispersion = rms
+        msg.confidence = 1.0
+        if heads:
+            head_mean = np.array(heads).mean(axis=0)
+            msg.origin.x, msg.origin.y, msg.origin.z = map(float, head_mean)
+            msg.has_origin = True
+        else:
+            msg.has_origin = False
+        self.pub_fix.publish(msg)
+        self.last_fix_time = t
+        self.last_fix_point = centroid
+        self.get_logger().info(
+            f"키 확정: ({centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}) "
+            f"샘플 {len(pts)}개, 산포 {rms * 1000:.1f}mm, 머리 {'있음' if heads else '없음'}")
+
     def _publish_marker(self, centroid, progress, stable):
         """RViz에 응시 커서를 띄웁니다. 발표 데모에서 효과가 큽니다."""
         arr = MarkerArray()

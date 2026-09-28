@@ -79,7 +79,9 @@ def generate_launch_description():
              name="topdown_click", output="screen",
              condition=IfCondition(use_topdown),
              parameters=[params, {"mode": "run", "camera_index": cam_idx,
-                                  "detect_objects": True}]),
+                                  "detect_objects": True,
+                                  # 안경 시선과 마우스 커서가 /gaze/point_raw 에서 섞이지 않게
+                                  "mouse_gaze": False}]),
 
         Node(package="gaze_hri", executable="dwell_detector",
              name="dwell_detector", output="screen", parameters=[params]),

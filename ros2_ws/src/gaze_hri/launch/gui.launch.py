@@ -44,6 +44,7 @@ def generate_launch_description():
     source = LaunchConfiguration("source")
     calib = LaunchConfiguration("calib_file")
     cam_idx = ParameterValue(LaunchConfiguration("camera_index"), value_type=int)
+    ocams = ParameterValue(LaunchConfiguration("ocams"), value_type=bool)
 
     is_gaze = PythonExpression(["'", input_src, "' == 'gaze'"])
     # 시선 모드에서는 탑다운이 컵의 정확한 위치를 담당하므로,
@@ -59,6 +60,9 @@ def generate_launch_description():
                               description="input:=gaze 일 때 gaze_bridge 소스 "
                                           "(fake | udp | inproc)"),
         DeclareLaunchArgument("camera_index", default_value="0"),
+        DeclareLaunchArgument("ocams", default_value="false",
+                              description="true 면 oCamS-1MGN-U 의 raw YUYV 에서 "
+                                          "좌영상(Y채널)을 꺼내 쓴다"),
         DeclareLaunchArgument(
             "calib_file",
             default_value=os.path.expanduser("~/.ros/gaze_hri_calib.yaml")),
@@ -83,6 +87,7 @@ def generate_launch_description():
              name="control_panel", output="screen",
              parameters=[params, {"input_source": input_src,
                                   "camera_index": cam_idx,
+                                  "ocams": ocams,
                                   "detect_objects": True}]),
 
         # --- 파이프라인 ---

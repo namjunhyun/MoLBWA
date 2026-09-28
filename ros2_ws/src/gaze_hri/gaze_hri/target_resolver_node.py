@@ -41,6 +41,8 @@ table_plane 도 base_frame 기준으로 해석합니다.
 응시하세요. RANSAC으로 평면을 피팅해서 로그에 찍어줍니다.
 """
 
+import time
+
 import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -82,6 +84,21 @@ class TargetResolver(Node):
         #     '정확한 물체 위치를 모른다'는 뜻이고, 그대로 진행하면 시선 오차가
         #     그대로 파지 오차가 된다. gaze_hri.launch.py 가 True 로 켠다.
         self.declare_parameter("require_snap_for_pick", False)
+        # 2026-09-27: 놓을 자리는 스냅할 물체가 없어 광선-테이블 교차를 그대로 쓰는데, 머리가
+        # 낮고(0.4m) 멀어서(1m) 광선 상하 1°가 테이블 위 앞뒤 ~6cm 로 3배 증폭된다. 실측: 집을 때
+        # 광선이 컵 중심에서 3.1° 벗어나 있었고 놓을 자리는 15cm 멀리 찍혔다. 그래서 집을 때 잰
+        # "광선 -> 컵 중심" 회전을 몇 초 뒤 놓을 광선에도 적용한다 (같은 착용 상태의 드리프트).
+        self.declare_parameter("place_use_pick_correction", False)  # 실측: 방향이 매번 달라 역효과(3.8° 반대로)
+        self.declare_parameter("pick_correction_max_deg", 10.0)
+        self.declare_parameter("pick_correction_ttl", 30.0)
+        # 2026-09-27: 놓을 자리도 스냅한다. 광선-테이블 교차는 상하 오차가 앞뒤로 3배 커져
+        # (머리 0.45m, 거리 1m) 놓을 자리가 10~30cm 빗나갔다. 컵 선택은 스냅 덕에 매번 맞았다.
+        # 평평한 리스트 [x1,y1, x2,y2, ...] (ROS 파라미터는 중첩 리스트를 못 받는다). 비우면 옛 방식.
+        self.declare_parameter("place_slots", [0.0])
+        self.declare_parameter("place_snap_radius", 0.12)
+        self.declare_parameter("place_slot_occupied_radius", 0.08)  # 물체가 이만큼 안에 있으면 찬 자리
+        # 물체 검출이 테이블 밖을 호모그래피로 날려 보낸 값(실측 (5.08,-5.46))을 버린다.
+        self.declare_parameter("object_max_range", 0.6)
 
         self.base_frame = self.get_parameter("base_frame").value
         self.plane = np.array(self.get_parameter("table_plane").value, dtype=float)
@@ -91,11 +108,18 @@ class TargetResolver(Node):
         self.grasp_height = float(self.get_parameter("grasp_height").value)
         self.place_clearance = float(self.get_parameter("place_clearance").value)
         self.ambiguity_margin = float(self.get_parameter("ambiguity_margin").value)
+        flat = [float(v) for v in self.get_parameter("place_slots").value]
+        self.place_slots = ([np.array(flat[i:i + 2]) for i in range(0, len(flat) - 1, 2)]
+                            if len(flat) >= 2 else [])
+        self.place_snap_radius = float(self.get_parameter("place_snap_radius").value)
+        self.place_occupied_r = float(self.get_parameter("place_slot_occupied_radius").value)
+        self.object_max_range = float(self.get_parameter("object_max_range").value)
         self.object_timeout = float(self.get_parameter("object_timeout").value)
         self.require_snap = bool(self.get_parameter("require_snap_for_pick").value)
 
         self.expected_role = "pick"
         self.objects = []          # [np.array([x,y,z]), ...]  (base_frame 기준)
+        self._pick_corr = None     # (R 3x3, 시각) — 집을 때 잰 시선 드리프트 회전
         self.objects_stamp = None  # 마지막으로 물체 목록을 받은 시각 [s]
         self.calib_points = []
 
@@ -153,7 +177,7 @@ class TargetResolver(Node):
         for p in msg.poses:
             q = self.to_base([p.position.x, p.position.y, p.position.z],
                              msg.header.frame_id)
-            if q is not None:
+            if q is not None and float(np.linalg.norm(np.asarray(q)[:2])) <= self.object_max_range:
                 pts.append(q)
         # 빈 목록도 그대로 반영한다. 컵을 치웠는데 옛 목록이 남아 있으면
         # 없는 컵으로 스냅해 버린다.
@@ -241,15 +265,25 @@ class TargetResolver(Node):
             # 그대로 수직 투영한다. 스냅에 실패해 응시점을 쓰는 경우에만 광선을 쓴다.
             if target.snapped:
                 on_plane = project_onto_plane(base, self.plane)
+                self._store_pick_correction(p, origin_base, on_plane + n * self.grasp_height)
             else:
                 on_plane = self._gaze_to_table(p, origin_base)
             final = on_plane + n * self.grasp_height
 
         else:  # place
-            # 놓을 자리는 무조건 테이블 평면 위로 눌러준다
-            on_plane = self._gaze_to_table(p, origin_base)
+            if self.place_slots:
+                slot = self._snap_to_slot(p, origin_base)
+                if slot is None:
+                    return
+                on_plane = project_onto_plane(np.r_[slot, 0.0], self.plane)
+                target.snapped = True
+                target.label = "slot"
+            else:
+                # 놓을 자리는 무조건 테이블 평면 위로 눌러준다
+                on_plane = self._gaze_to_table(self._apply_pick_correction(p, origin_base),
+                                               origin_base)
+                target.label = "table"
             final = on_plane + n * (self.grasp_height + self.place_clearance)
-            target.label = "table"
 
         target.point.x, target.point.y, target.point.z = map(float, final)
         self.pub_target.publish(target)
@@ -262,6 +296,85 @@ class TargetResolver(Node):
         )
 
     # ------------------------------------------------------------------
+    def _snap_to_slot(self, p, origin_base):
+        """놓을 자리 후보(place_slots) 중 시선 광선이 가장 가깝게 지나는 빈 자리.
+
+        컵 스냅(_snap_to_object)과 같은 원리: 머리 위치를 알면 광선-점 거리(놓을 높이 기준),
+        모르면 응시점과의 거리. 물체가 올라가 있는 자리(= 지금 집을 컵 자리 포함)는 뺀다.
+        """
+        # 코드리뷰(2026-09-28): 물체 목록이 오래됐으면 빈 자리/찬 자리를 판단할 수 없다 —
+        # 검출이 멈춘 채 옛 목록으로 판단하면 물체 위에 또 놓을 수 있다. _snap_to_object 와 같게.
+        if not self.objects_fresh():
+            self.get_logger().warn(
+                f"물체 목록이 {self.object_timeout:.1f}초 넘게 갱신되지 않아 놓을 자리를 정하지 않습니다.",
+                throttle_duration_sec=5.0)
+            return None
+        n = np.asarray(self.plane[:3], dtype=float)
+        free = []
+        for sl in self.place_slots:
+            on_plane = project_onto_plane(np.r_[sl, 0.0], self.plane)
+            if any(float(np.linalg.norm(project_onto_plane(o, self.plane) - on_plane))
+                   < self.place_occupied_r for o in self.objects):
+                continue
+            free.append((sl, on_plane + n * self.grasp_height))
+        if not free:
+            self.get_logger().warn("빈 놓을 자리가 없습니다 (place_slots 가 전부 물체로 차 있음).")
+            return None
+        if origin_base is not None and float(np.linalg.norm(p - origin_base)) > 1e-6:
+            dists = np.array([ray_point_distance(origin_base, p - origin_base, c) for _, c in free])
+        else:
+            dists = np.array([float(np.linalg.norm(c - p)) for _, c in free])
+        order = np.argsort(dists)
+        i = int(order[0])
+        txt = ", ".join(f"({free[j][0][0]:.2f},{free[j][0][1]:.2f})={dists[j] * 100:.1f}cm"
+                        for j in order)
+        if dists[i] > self.place_snap_radius:
+            self.get_logger().warn(f"놓을 자리를 특정하지 못했습니다 — 가장 가까운 자리도 "
+                                   f"{self.place_snap_radius * 100:.0f}cm 밖 [{txt}]")
+            return None
+        if len(order) > 1 and float(dists[order[1]] - dists[i]) < self.ambiguity_margin:
+            self.get_logger().warn(f"놓을 자리가 모호합니다 [{txt}] — 선택하지 않습니다.")
+            return None
+        self.get_logger().info(f"놓을 자리 스냅: [{txt}]")
+        return free[i][0]
+
+    @staticmethod
+    def _rot_a_to_b(a, b):
+        a = np.asarray(a, float) / np.linalg.norm(a)
+        b = np.asarray(b, float) / np.linalg.norm(b)
+        v = np.cross(a, b)
+        s, c = float(np.linalg.norm(v)), float(np.dot(a, b))
+        if s < 1e-9:
+            return np.eye(3)
+        v /= s
+        K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        return np.eye(3) + s * K + (1 - c) * (K @ K)
+
+    def _store_pick_correction(self, p, origin_base, center):
+        if not bool(self.get_parameter("place_use_pick_correction").value) or origin_base is None:
+            self._pick_corr = None
+            return
+        a, b = p - origin_base, center - origin_base
+        if np.linalg.norm(a) < 1e-6 or np.linalg.norm(b) < 1e-6:
+            self._pick_corr = None
+            return
+        ang = float(np.degrees(np.arccos(np.clip(
+            np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)), -1.0, 1.0))))
+        if ang > float(self.get_parameter("pick_correction_max_deg").value):
+            self.get_logger().warn(f"집기 기준 시선 보정 {ang:.1f}° — 너무 커서 안 씀")
+            self._pick_corr = None
+            return
+        self._pick_corr = (self._rot_a_to_b(a, b), time.time())
+        self.get_logger().info(f"집기 기준 시선 보정 {ang:.1f}° 저장 — 놓을 자리 광선에 적용")
+
+    def _apply_pick_correction(self, p, origin_base):
+        if self._pick_corr is None or origin_base is None:
+            return p
+        R, t = self._pick_corr
+        if time.time() - t > float(self.get_parameter("pick_correction_ttl").value):
+            return p
+        return origin_base + R @ (p - origin_base)
+
     def _gaze_to_table(self, p, origin_base):
         """응시점을 테이블 평면 위의 점으로 내린다 (둘 다 base_frame 기준).
 
