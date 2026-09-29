@@ -348,6 +348,21 @@ class TopdownClick(Node):
     # ==================================================================
     # 마우스
     # ==================================================================
+    def _sticky_objects(self, objects, now, keep_s=1.5, merge_m=0.05):
+        """2026-09-29: YOLO 신뢰도가 기준 근처면 프레임마다 잡혔다 놓쳤다 해서 /objects/poses 가
+        비었다 -> 최근 keep_s 초 안에 본 물체는 유지한다(5cm 안이면 같은 물체로 보고 갱신)."""
+        if not hasattr(self, "_seen"):
+            self._seen = []          # [(px, xy, contour, t)]
+        for (px, xy, c) in objects:
+            for i, (_, xy0, _, _) in enumerate(self._seen):
+                if np.hypot(xy[0] - xy0[0], xy[1] - xy0[1]) < merge_m:
+                    self._seen[i] = (px, xy, c, now)
+                    break
+            else:
+                self._seen.append((px, xy, c, now))
+        self._seen = [o for o in self._seen if now - o[3] <= keep_s]
+        return [(px, xy, c) for (px, xy, c, _) in self._seen]
+
     def on_eye_point(self, msg):
         if msg.header.frame_id and msg.header.frame_id != self.base_frame:
             return
@@ -532,7 +547,7 @@ class TopdownClick(Node):
         vis = frame.copy()
         now = time.time()
 
-        objects = self.detect_objects(frame)
+        objects = self._sticky_objects(self.detect_objects(frame), now)
         # 2026-09-28: 컵이 화면에 있는데 노란 박스가 안 뜨는 원인을 밖에서 보려고 — 2초마다
         # 최신 프레임을 저장하고 검출 개수를 남긴다 (카메라는 이 노드만 열 수 있다).
         if now - getattr(self, "_last_dump", 0.0) > 2.0:

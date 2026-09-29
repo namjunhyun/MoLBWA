@@ -209,7 +209,7 @@ topdown_click:
     detect_objects: true       # 2026-09-27: 켬 — 끄면 /objects/poses 가 비어 시선 스냅이 전부 실패
     detector: "yolo"           # yolo | color (control_panel 과 같은 설정)
     yolo_model: "~/yolo-env/yolo11l.pt"
-    yolo_conf: 0.15
+    yolo_conf: 0.10            # 2026-09-29: 0.15 -> 0.10. 카메라 각도 바꾼 뒤 판다 인형(teddy bear) 신뢰도 0.15~0.20 이라 깜빡임
     yolo_classes: ["cup", "bottle", "bowl", "vase", "teddy bear"]
     hsv_lower: [0, 120, 80]    # 붉은 계열 기본값 (detector: color 일 때)
     hsv_upper: [12, 255, 255]
