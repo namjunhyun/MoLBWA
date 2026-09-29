@@ -41,6 +41,7 @@ table_plane 도 base_frame 기준으로 해석합니다.
 응시하세요. RANSAC으로 평면을 피팅해서 로그에 찍어줍니다.
 """
 
+import math
 import time
 
 import numpy as np
@@ -99,6 +100,10 @@ class TargetResolver(Node):
         self.declare_parameter("place_slot_occupied_radius", 0.08)  # 물체가 이만큼 안에 있으면 찬 자리
         # 물체 검출이 테이블 밖을 호모그래피로 날려 보낸 값(실측 (5.08,-5.46))을 버린다.
         self.declare_parameter("object_max_range", 0.6)
+        # 자유 놓기 범위 (슬롯 없을 때). -55° 접근이 모든 방향에서 풀리는 거리 = 0.14~0.29m
+        self.declare_parameter("place_min_r", 0.16)
+        self.declare_parameter("place_max_r", 0.29)
+        self.declare_parameter("place_max_yaw_deg", 65.0)
 
         self.base_frame = self.get_parameter("base_frame").value
         self.plane = np.array(self.get_parameter("table_plane").value, dtype=float)
@@ -114,6 +119,9 @@ class TargetResolver(Node):
         self.place_snap_radius = float(self.get_parameter("place_snap_radius").value)
         self.place_occupied_r = float(self.get_parameter("place_slot_occupied_radius").value)
         self.object_max_range = float(self.get_parameter("object_max_range").value)
+        self.place_min_r = float(self.get_parameter("place_min_r").value)
+        self.place_max_r = float(self.get_parameter("place_max_r").value)
+        self.place_max_yaw = math.radians(float(self.get_parameter("place_max_yaw_deg").value))
         self.object_timeout = float(self.get_parameter("object_timeout").value)
         self.require_snap = bool(self.get_parameter("require_snap_for_pick").value)
 
@@ -282,6 +290,7 @@ class TargetResolver(Node):
                 # 놓을 자리는 무조건 테이블 평면 위로 눌러준다
                 on_plane = self._gaze_to_table(self._apply_pick_correction(p, origin_base),
                                                origin_base)
+                on_plane = self._clamp_place(on_plane)
                 target.label = "table"
             final = on_plane + n * (self.grasp_height + self.place_clearance)
 
@@ -296,6 +305,28 @@ class TargetResolver(Node):
         )
 
     # ------------------------------------------------------------------
+    def _clamp_place(self, q):
+        """자유 놓기(슬롯 없음)일 때 팔이 한 가지 접근각으로 닿는 범위 안으로 당긴다.
+
+        2026-09-29: 광선-테이블 교차는 앞뒤 오차가 커서(1° -> ~3cm) 0.44~0.83m 로 찍혀
+        팔이 전부 거부했다. 방향(좌우)은 본 그대로 두고, 거리만 [place_min_r, place_max_r]
+        로 자르고 방향각은 place_max_yaw 로 자른다(pan 실제 범위 -112~+69°).
+        """
+        x, y = float(q[0]), float(q[1])
+        r = math.hypot(x, y)
+        if r < 1e-6:
+            return q
+        yaw = math.atan2(y, x)
+        r_c = min(max(r, self.place_min_r), self.place_max_r)
+        yaw_c = max(-self.place_max_yaw, min(self.place_max_yaw, yaw))
+        if abs(r_c - r) > 1e-4 or abs(yaw_c - yaw) > 1e-4:
+            self.get_logger().info(
+                f"놓을 자리 범위 보정: ({x:.3f}, {y:.3f}) r={r:.3f} -> "
+                f"({r_c * math.cos(yaw_c):.3f}, {r_c * math.sin(yaw_c):.3f}) r={r_c:.3f}")
+        out = np.array(q, dtype=float)
+        out[0], out[1] = r_c * math.cos(yaw_c), r_c * math.sin(yaw_c)
+        return out
+
     def _snap_to_slot(self, p, origin_base):
         """놓을 자리 후보(place_slots) 중 시선 광선이 가장 가깝게 지나는 빈 자리.
 

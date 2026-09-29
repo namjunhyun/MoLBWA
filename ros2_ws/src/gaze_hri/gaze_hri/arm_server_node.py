@@ -207,6 +207,10 @@ class ArmServer(Node):
         self.declare_parameter("world_frame", "map")
 
         self.declare_parameter("approach_height", 0.10)   # 목표 위 몇 m에서 접근
+        # 2026-09-29: 작업마다 -55~-30° 중 닿는 각도를 고를지. 켜면 범위는 넓어지지만 멀면 눕혀서
+        # 너무 낮게 움직인다는 피드백 -> 기본 끔(-55° 고정, 성공했던 설정).
+        self.declare_parameter("adaptive_pitch", False)
+        self.declare_parameter("pick_approach_height", 0.0)
         self.declare_parameter("lift_height", 0.12)       # 잡은 뒤 들어올리는 높이
         self.declare_parameter("step_time", 0.04)         # 보간 한 스텝 시간 [s]
         self.declare_parameter("cartesian_step", 0.008)   # 보간 간격 [m]
@@ -590,7 +594,10 @@ class ArmServer(Node):
         한 번 성공률이 80%여도 3회 시도하면 99%가 됩니다.
         투입 대비 효과가 가장 큰 개선입니다.
         """
-        approach = float(self.get_parameter("approach_height").value)
+        # 2026-09-29: 집을 때만 더 높이서 접근(pick_approach_height). 8cm 는 어깨 처짐까지 더해
+        # 손가락 끝이 실제 8~9cm(인형 몸통 중간)로 들어가 옆에서 밀었다. 0 이면 approach_height.
+        approach = float(self.get_parameter("pick_approach_height").value) or \
+            float(self.get_parameter("approach_height").value)
         g_open = float(self.get_parameter("gripper_open").value)
         max_retries = int(self.get_parameter("max_grasp_retries").value)
         offset = float(self.get_parameter("retry_offset").value)
@@ -714,6 +721,20 @@ class ArmServer(Node):
             g_open = float(self.get_parameter("gripper_open").value)
             g_close = float(self.get_parameter("gripper_closed").value)
             pitch = float(g.approach_pitch) if g.approach_pitch != 0.0 else -math.pi / 4
+            # 2026-09-29: 작업마다 접근각 하나를 고른다. 요청 각도부터 5°씩 눕혀 가며, 집기·놓기
+            # 모든 지점(접근/파지/들기/놓기 위/놓기)에서 IK 가 풀리는 가장 가파른 각도를 쓴다.
+            # 도중에 각도를 바꾸지 않으므로(손목이 휘며 물체를 밀던 문제) 범위만 넓어진다
+            # (-55° 고정 29cm -> 최대 -30° 까지 ~36cm).
+            # 2026-09-29 수정: 집기/놓기 각도를 따로 고른다. 하나로 묶으면 먼 쪽(놓을 곳)에 맞춰
+            # 집을 때도 -40° 로 눕혀 들어가 인형을 밀었다. 각도는 공중 이동(TRANSFER) 때만 바뀐다.
+            base_pitch = pitch
+            place_pitch = pitch
+            if bool(self.get_parameter("adaptive_pitch").value):
+                up_ = np.array([0.0, 0.0, 1.0])
+                pitch = self._choose_task_pitch(
+                    base_pitch, [pick + up_ * approach, pick, pick + up_ * lift], "집기")
+                place_pitch = self._choose_task_pitch(
+                    base_pitch, [place + up_ * lift, place, place + up_ * approach], "놓기")
 
             up = np.array([0.0, 0.0, 1.0])
 
@@ -746,16 +767,16 @@ class ArmServer(Node):
                 return result
 
             fb("TRANSFER", 0.65)
-            self.move_to(place + up * lift, pitch, g_close)
+            self.move_to(place + up * lift, place_pitch, g_close)
 
             fb("PLACE_DESCEND", 0.8)
-            self.move_to(place, pitch, g_close)
+            self.move_to(place, place_pitch, g_close)
 
             fb("RELEASE", 0.9)
             self.set_gripper(g_open)
 
             fb("RETREAT", 0.95)
-            self.move_to(place + up * approach, pitch, g_open)
+            self.move_to(place + up * approach, place_pitch, g_open)
             self.go_home()
 
             if self._cancel or goal_handle.is_cancel_requested:
@@ -802,6 +823,21 @@ class ArmServer(Node):
                 # dry_run 동안 self.q 만 움직였을 뿐 실제 팔은 그대로다.
                 # 상태를 되돌려 놓지 않으면 다음 실제 동작이 엉뚱한 곳에서 출발한다.
                 self.q = q_backup
+
+    def _choose_task_pitch(self, pitch, pts, label=""):
+        cand = pitch
+        while cand <= math.radians(-30.0) + 1e-9:
+            try:
+                for p in pts:
+                    solve_with_fallback(list(p), self.geo, pitch_candidates=[cand])
+                if abs(cand - pitch) > 1e-6:
+                    self.get_logger().info(
+                        f"  {label} 접근각: {math.degrees(pitch):.0f}° 로는 안 닿아 "
+                        f"{math.degrees(cand):.0f}° 로 그 구간 통일")
+                return cand
+            except IKError:
+                cand += math.radians(5.0)
+        return pitch          # 어느 각도도 전 구간이 안 되면 기존 방식(구간별 대체)으로
 
     def _safe_go_home(self):
         """복귀 시도. 복귀 자체가 실패해도 원래 오류를 덮지 않는다."""

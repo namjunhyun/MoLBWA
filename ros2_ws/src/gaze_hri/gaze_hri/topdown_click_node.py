@@ -51,6 +51,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 import yaml
 from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped
+from gaze_hri_msgs.msg import GazeTarget
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Empty, Float32, Float64MultiArray, String
@@ -179,6 +180,9 @@ class TopdownClick(Node):
             # 물체 뒤로 밀려 "어긋나 보인다" -> 광선 전체를 선으로 그린다.
             self._head = None
             self.create_subscription(PoseStamped, "/head/pose", self.on_head, qos)
+            # 확정된 목표(집을 물체/놓을 자리)를 마커로 남긴다. 작업이 IDLE 로 돌아가면 지운다.
+            self._targets = {}
+            self.create_subscription(GazeTarget, "/gaze/target", self.on_target, 10)
         self.task_state = "IDLE"
 
         # ---- 상태 ----
@@ -355,6 +359,27 @@ class TopdownClick(Node):
         p = msg.pose.position
         self._head = (np.array([p.x, p.y, p.z]), time.time())
 
+    def on_target(self, msg):
+        if msg.header.frame_id and msg.header.frame_id != self.base_frame:
+            return
+        self._targets[msg.role] = (msg.point.x, msg.point.y)
+
+    def draw_targets(self, vis):
+        for role, color, label in (("pick", (0, 220, 0), "PICK"), ("place", (255, 0, 255), "PLACE")):
+            t = getattr(self, "_targets", {}).get(role)
+            if t is None:
+                continue
+            q = self.robot_to_pixel(*t)
+            if q is None:
+                continue
+            u, v = int(q[0]), int(q[1])
+            if role == "pick":
+                cv2.circle(vis, (u, v), 30, color, 3)
+            else:
+                cv2.rectangle(vis, (u - 22, v - 22), (u + 22, v + 22), color, 3)
+            cv2.drawMarker(vis, (u, v), color, cv2.MARKER_CROSS, 18, 2)
+            cv2.putText(vis, label, (u - 24, v - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+
     def on_dwell_prog(self, msg):
         self._dwell_prog = float(msg.data)
 
@@ -368,6 +393,13 @@ class TopdownClick(Node):
         return float(p[0] / p[2]), float(p[1] / p[2])
 
     def draw_eye_cursor(self, vis, now):
+        # 팔이 놓을 수 있는 범위(0.16~0.29m, ±65°) 경계를 옅게 그린다
+        for rr in (0.16, 0.29):
+            arc = [self.robot_to_pixel(rr * np.cos(a), rr * np.sin(a))
+                   for a in np.radians(np.linspace(-65, 65, 27))]
+            arc = [(int(a[0]), int(a[1])) for a in arc if a is not None]
+            if len(arc) > 1:
+                cv2.polylines(vis, [np.array(arc, np.int32)], False, (180, 120, 180), 1, cv2.LINE_AA)
         pt = self._eye_pt
         if pt is None or now - pt[2] > 0.3:
             cv2.putText(vis, "gaze: -", (10, vis.shape[0] - 12),
@@ -386,22 +418,34 @@ class TopdownClick(Node):
             o = hd[0]
             d = np.array([pt[0], pt[1], self.table_z + 0.045]) - o
             if abs(d[2]) > 1e-6:
-                seg = []
+                seg, table_xy = [], None
                 for z in (0.25, 0.0):
                     t = (self.table_z + z - o[2]) / d[2]
                     if t > 0:
-                        q = self.robot_to_pixel(*(o + t * d)[:2])
+                        w = o + t * d
+                        if z == 0.0:
+                            table_xy = w[:2]
+                        q = self.robot_to_pixel(*w[:2])
                         if q is not None:
                             seg.append((int(np.clip(q[0], -2000, 4000)), int(np.clip(q[1], -2000, 4000))))
                 if len(seg) == 2:
                     cv2.line(vis, seg[0], seg[1], (0, 140, 255), 1, cv2.LINE_AA)
+                if table_xy is not None:
+                    # 실제로 놓이는 점 = target_resolver._clamp_place 와 같은 규칙으로 자른 테이블 교점
+                    r = float(np.hypot(*table_xy)); yaw = float(np.arctan2(table_xy[1], table_xy[0]))
+                    r_c = min(max(r, 0.16), 0.29); yaw_c = max(-np.radians(65), min(np.radians(65), yaw))
+                    q = self.robot_to_pixel(r_c * np.cos(yaw_c), r_c * np.sin(yaw_c))
+                    if q is not None:
+                        qp = (int(q[0]), int(q[1]))
+                        cv2.circle(vis, qp, 6, (255, 0, 255), -1)
+                        cv2.putText(vis, "place" + (" (clamped)" if abs(r_c - r) > 1e-3 or abs(yaw_c - yaw) > 1e-3 else ""),
+                                    (qp[0] + 8, qp[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                    (255, 0, 255), 1, cv2.LINE_AA)
         cv2.line(vis, (u - 16, v), (u + 16, v), color, 2)
         cv2.line(vis, (u, v - 16), (u, v + 16), color, 2)
         cv2.circle(vis, (u, v), 24, color, 1)
         if self._dwell_prog > 0:
             cv2.ellipse(vis, (u, v), (24, 24), -90, 0, int(360 * min(1.0, self._dwell_prog)), color, 4)
-        cv2.putText(vis, "SPACE = select here", (10, vis.shape[0] - 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
         cv2.putText(vis, f"gaze ({pt[0]:+.3f}, {pt[1]:+.3f})", (u + 30, v + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
@@ -427,6 +471,8 @@ class TopdownClick(Node):
                     )
 
     def on_state(self, msg: String):
+        if msg.data == "IDLE" and hasattr(self, "_targets"):
+            self._targets = {}                 # 작업 끝/취소/타임아웃 -> 확정 마커 지움
         if msg.data != self.task_state:
             self.task_state = msg.data
 
@@ -520,6 +566,7 @@ class TopdownClick(Node):
 
         # ---- 시선 지점 결정 ----
         if self.mode == "run" and not bool(self.get_parameter("mouse_gaze").value):
+            self.draw_targets(vis)
             self.draw_eye_cursor(vis, now)
         elif self.mode == "run":
             if now < self.held_until and self.held_px is not None:
