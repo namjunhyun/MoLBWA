@@ -63,3 +63,12 @@ cd ~/ros2_ws && colcon build --packages-select orbslam3
 - `IMU.NoiseGyro/NoiseAcc/GyroWalk/AccWalk`도 myAHRS+ 데이터시트 실측치가 아니라 일반적인 consumer
   MEMS 추정치.
 - `IMU.Frequency: 100.0`은 실측 확인됨(`ros2 topic hz /imu` ≈ 100Hz), 카메라도 30fps 실측 확인됨.
+
+## 2026-09-24: /orbslam3/map_id 퍼블리시 (`orbslam3_map_id.patch`)
+
+추적을 잃으면 Atlas 가 새 맵을 만들어 world 원점이 바뀐다. `arm/anchor.AnchorTracker` 와
+`arm/gaze_tag_bridge.py --slam` 은 map_id 가 바뀌면 태그 latch 를 버린다 — 이 토픽이 없으면
+점프 검출(한 번에 0.3m)로만 막는다.
+- `~/ORB_SLAM3/include/System.h`: 인라인 `Atlas* GetAtlasForRos()` (재빌드 불필요)
+- `stereo-inertial-node`: 매 프레임 `std_msgs/Int32` 로 현재 맵 id (추적 상태 무관)
+- 빌드 확인만 됨 (2026-09-24). 실기에서 추적 상실 시 id 가 바뀌는지는 아직 확인 못 함.

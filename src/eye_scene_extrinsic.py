@@ -42,7 +42,17 @@ def _residuals(x, d_list, X_list):
     return np.concatenate(res)
 
 
-def calibrate_r_p_eye(d_list, X_list, p_eye0=None):
+# 2026-09-27 실측: 캘리브 점들이 좁은 각도(~13°)에 모여 있으면 p_eye 가 관측 불가능해져서
+# 무제약 최적화가 p_eye 를 2.7m 밖으로 보내 잔차를 억지로 줄였다(물리적으로 눈은 씬카메라
+# 에서 수 cm). 그래서 각 성분을 ±이 값으로 묶는다. 경계에 붙으면 = 데이터가 p_eye 를 못 정한다.
+P_EYE_BOUND_M = 0.10
+
+
+def p_eye_at_bound(p_eye, bound=P_EYE_BOUND_M, tol=1e-3):
+    return bool(np.any(np.abs(np.asarray(p_eye)) >= bound - tol))
+
+
+def calibrate_r_p_eye(d_list, X_list, p_eye0=None, p_eye_bound=P_EYE_BOUND_M):
     """(R, p_eye)를 비선형 최소제곱으로 동시에 푼다.
 
     d_list: 눈 카메라 좌표계 시선 방향 단위벡터들, (N,3) — gaze_on_scene.py의 smooth_dir.
@@ -75,7 +85,14 @@ def calibrate_r_p_eye(d_list, X_list, p_eye0=None):
     rvec0, _ = cv2.Rodrigues(R0)
     x0 = np.concatenate([rvec0.flatten(), p_eye0])
 
-    result = least_squares(_residuals, x0, args=(d_arr, X_arr), method='lm')
+    if p_eye_bound is None:
+        result = least_squares(_residuals, x0, args=(d_arr, X_arr), method='lm')
+    else:
+        b = float(p_eye_bound)
+        x0[3:] = np.clip(x0[3:], -b * 0.999, b * 0.999)
+        lb = np.r_[np.full(3, -np.inf), np.full(3, -b)]
+        result = least_squares(_residuals, x0, args=(d_arr, X_arr), method='trf',
+                               bounds=(lb, -lb))
 
     rvec = result.x[:3]
     p_eye = result.x[3:6]

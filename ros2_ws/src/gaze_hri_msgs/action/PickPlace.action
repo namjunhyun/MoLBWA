@@ -1,0 +1,16 @@
+# Goal
+geometry_msgs/Point pick        # 집을 지점
+geometry_msgs/Point place       # 놓을 지점
+string frame_id                 # pick/place 가 표현된 좌표계.
+                                # 비워두면 arm_server 의 world_frame 으로 간주한다(하위호환).
+                                # target_resolver 를 거친 목표는 "base_link" 가 들어온다.
+float32 approach_pitch          # 그리퍼 접근 각도 [rad], 0=수평, -1.57=수직(top-down)
+bool dry_run                    # true면 이 목표에 한해 서보로 명령을 보내지 않는다(좌표/IK만 검증)
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string phase                    # "APPROACH_PICK", "DESCEND", "GRASP", ...
+float32 progress                # 0.0 ~ 1.0

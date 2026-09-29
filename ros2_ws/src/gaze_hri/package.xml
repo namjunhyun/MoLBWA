@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gaze_hri</name>
+  <version>0.1.0</version>
+  <description>시선 기반 인간-로봇 상호작용 (MoLBWA 창종설)</description>
+  <maintainer email="team@molbwa.local">MoLBWA</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>gaze_hri_msgs</depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- 통합 GUI 의 한글 표시에 쓴다. 없으면 영문으로 자동 폴백하므로 필수는 아니다.
+       한글로 보려면 폰트도 필요: fonts-noto-cjk 또는 fonts-nanum -->
+  <exec_depend>python3-pil</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

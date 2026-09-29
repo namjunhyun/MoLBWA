@@ -1,0 +1,62 @@
+# ORB-SLAM3 map_id 퍼블리시 패치 (2026-09-24, MoLBWA)
+# 레포 밖 파일 수정분만 (orbslam3_ros2 의 기존 미커밋 버퍼 수정과 섞이지 않게 백업 대비 diff).
+# 적용 후: colcon build --packages-select orbslam3  (libORB_SLAM3 재빌드 불필요)
+--- a/ORB_SLAM3/include/System.h	2026-09-26 17:14:51.896143360 +0900
++++ b/ORB_SLAM3/include/System.h	2026-09-26 17:15:18.390944481 +0900
+@@ -130,6 +130,11 @@
+     // since last call to this function
+     bool MapChanged();
+ 
++    // MoLBWA 2026-09-24: ROS 래퍼가 현재 Atlas 맵 id 를 /orbslam3/map_id 로 내보내려고 추가.
++    // 추적을 잃으면 Atlas 가 새 맵을 만들어 world 원점이 바뀐다 — 소비자가 latch 를 버려야 한다.
++    // 헤더 인라인이라 libORB_SLAM3 재빌드 불필요 (멤버 배치 불변).
++    Atlas* GetAtlasForRos() { return mpAtlas; }
++
+     // Reset the system (clear Atlas or the active map)
+     void Reset();
+     void ResetActiveMap();
+--- a/orbslam3_ros2/src/stereo-inertial/stereo-inertial-node.cpp	2026-09-26 17:14:51.897303168 +0900
++++ b/orbslam3_ros2/src/stereo-inertial/stereo-inertial-node.cpp	2026-09-26 17:15:18.391267842 +0900
+@@ -62,6 +62,7 @@
+     subImgRight_ = this->create_subscription<ImageMsg>("camera/right", 100, std::bind(&StereoInertialNode::GrabImageRight, this, _1));
+ 
+     posePub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("orbslam3/pose", 10);
++    mapIdPub_ = this->create_publisher<std_msgs::msg::Int32>("orbslam3/map_id", 10);
+     tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+ 
+     syncThread_ = new std::thread(&StereoInertialNode::SyncWithImu, this);
+@@ -235,6 +236,14 @@
+                 PublishPose(Tcw, stamp);
+             }
+ 
++            // 맵 id 는 추적 상태와 무관하게 매 프레임 낸다 — 새 맵이 생긴 걸 소비자가 바로 알아야 한다.
++            if (ORB_SLAM3::Map *curMap = SLAM_->GetAtlasForRos()->GetCurrentMap())
++            {
++                std_msgs::msg::Int32 idMsg;
++                idMsg.data = static_cast<int>(curMap->GetId());
++                mapIdPub_->publish(idMsg);
++            }
++
+             std::chrono::milliseconds tSleep(1);
+             std::this_thread::sleep_for(tSleep);
+         }
+--- a/orbslam3_ros2/src/stereo-inertial/stereo-inertial-node.hpp	2026-09-26 17:14:51.897347243 +0900
++++ b/orbslam3_ros2/src/stereo-inertial/stereo-inertial-node.hpp	2026-09-26 17:15:18.391120657 +0900
+@@ -5,6 +5,7 @@
+ #include "sensor_msgs/msg/image.hpp"
+ #include "sensor_msgs/msg/imu.hpp"
+ #include "geometry_msgs/msg/pose_stamped.hpp"
++#include "std_msgs/msg/int32.hpp"
+ #include "geometry_msgs/msg/transform_stamped.hpp"
+ #include "tf2_ros/transform_broadcaster.h"
+ 
+@@ -38,6 +39,8 @@
+     rclcpp::Subscription<ImageMsg>::SharedPtr subImgRight_;
+ 
+     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr posePub_;
++    // 현재 Atlas 맵 id. 바뀌면 world 원점이 바뀐 것 (MoLBWA arm/anchor.py 가 latch 폐기)
++    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr mapIdPub_;
+     std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
+     void PublishPose(const Sophus::SE3f &Tcw, const rclcpp::Time &stamp);
+ 
+(CMakeLists/package.xml 에 std_msgs 의존성도 추가: find_package(std_msgs), ament_target_dependencies(stereo-inertial ... std_msgs ...), <depend>std_msgs</depend>)
