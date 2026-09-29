@@ -12,6 +12,7 @@
 # 패턴은 이 스크립트를 부른 셸 자신과 매칭돼 죽는 일이 있었다).
 set -u
 CAM=0; SLAM=""; BACKEND=dry_run
+SCENE="${CAM_PREFIX-/pc}/camera/left/compressed"   # CAM_PREFIX= 로 두면 Pi 직접 구독(중계 없이)
 while [ $# -gt 0 ]; do
   case "$1" in
     --cam) CAM="$2"; shift 2 ;;
@@ -39,8 +40,8 @@ if [ "$BACKEND" = feetech ]; then
   [ "$ans" = "움직여" ] || { echo "취소"; exit 1; }
 fi
 
-if ! timeout 4 ros2 topic list 2>/dev/null | grep -q '^/camera/left/compressed$'; then
-  echo "[경고] 씬 카메라 토픽이 없다 — Pi 에서 ~/ocams.sh 를 띄웠는지 확인 (태그 브리지가 대기만 한다)"
+if ! timeout 4 ros2 topic list 2>/dev/null | grep -qx "$SCENE"; then
+  echo "[경고] 씬 카메라 토픽($SCENE)이 없다 — Pi ~/ocams.sh 와 ./run_cam_relay.sh 를 띄웠는지 확인 (태그 브리지가 대기만 한다)"
 fi
 HF="$HOME/.ros/topdown_homography.yaml"
 if [ ! -f "$HF" ]; then
@@ -60,7 +61,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-setsid python3 -u "$ROOT/arm/gaze_tag_bridge.py" $SLAM > "$LOG/bridge.log" 2>&1 &
+setsid python3 -u "$ROOT/arm/gaze_tag_bridge.py" --scene-topic "$SCENE" $SLAM > "$LOG/bridge.log" 2>&1 &
 PIDS+=($!)
 setsid ros2 launch gaze_hri gaze_hri.launch.py source:=udp gaze_frame:=base_link \
   use_topdown:=true camera_index:="$CAM" backend:="$BACKEND" > "$LOG/gaze_hri.log" 2>&1 &

@@ -6,4 +6,6 @@ cd ~/MoLBWA-gaze-hri/src
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 unset PYTHONPATH CONDA_PREFIX CONDA_DEFAULT_ENV
 source /opt/ros/jazzy/setup.bash
-exec python3 -u gaze_on_scene.py --no-rerun --source ros --flip --send-gaze-px --mirror-y --restore-eye-model
+# 씬 영상은 ./run_cam_relay.sh 중계(/pc/...)를 받는다. 중계 없이 Pi 직접: CAM_PREFIX= ./run_gaze_on_scene_ray.sh
+exec python3 -u gaze_on_scene.py --no-rerun --source ros --flip --send-gaze-px --mirror-y --restore-eye-model \
+  --left-topic "${CAM_PREFIX-/pc}/camera/left/compressed" --right-topic "${CAM_PREFIX-/pc}/camera/right/compressed"
