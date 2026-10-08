@@ -169,7 +169,7 @@
 - `capture_frames.py`: `--scene-topic /pc/camera/left/compressed --out DIR --every 10` — rclpy 로 CompressedImage 를 받아 N 프레임마다 jpg 저장, 종료 시 저장 수 출력. 테스트 없음(얇은 I/O).
 - README: 구조도(스펙 그림), 파일 표, 빠른 시작(fake 경로).
 - RUNBOOK 절차(명령 그대로):
-  1. 촬영 가이드(스펙 A 표·조건, 클립마다 앞뒤 1 초 차렷).
+  1. 촬영 가이드(스펙 A 표·조건, 클립마다 앞뒤 1 초 기본자세(편하게 선 자세)).
   2. GVHMR → GMR → csv (`~/para_pipeline/run_all.sh` 의 명령 인용, 경로는 변수로).
   3. `build_motion_library.py` → `csv_to_npz.py --input_fps 30 --output_name molbwa_library` → `~/para_pipeline/check_motion.py motions/molbwa_library.npz` exit 0 확인 (csv_to_npz 는 저장 후 안 끝남 → npz 생성 확인 후 kill).
   4. 학습(스펙 B 명령), export_policy_npz.
