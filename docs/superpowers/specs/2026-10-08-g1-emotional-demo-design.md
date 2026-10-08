@@ -75,7 +75,7 @@
 - 각 세그먼트 앞뒤를 공통 대기 자세(`idle` 첫 프레임)로 0.5 초 블렌드(관절 선형, root 회전 slerp).
 - 다음 세그먼트의 root yaw·xy 를 앞 세그먼트 끝 자세에 합성해 **이음새에서 root 가 끊기지 않게** 한다.
 - 출력: `library.csv`(36열, 이후 `csv_to_npz.py` 1회) + `library_meta.json`
-  `{fps, segments: {name: [start_frame, end_frame)}, turn_bins: {name: deg}}`.
+  `{fps_csv: 30, fps_npz: 50, blend_frames_csv, segments: {name: [start, end)} (npz 50fps 인덱스), segments_csv, turn_bins: {name: deg}}`.
 - 이음새 검사: 관절 점프 최대값, root 위치 점프, yaw 점프를 출력하고 임계 초과 시 실패.
 - npz 가 아니라 **csv 단계에서 잇는 이유**: `csv_to_npz.py` 가 Isaac FK 로 body 위치를 만들기 때문에,
   이어 붙인 뒤 FK 를 한 번 돌려야 body 궤적이 일관된다.
