@@ -926,6 +926,10 @@ for t in itertools.count():
     if late and slack > 0:
         late = 0
 
+if sim is not None:
+    sim.push_idle = False   # 밀기 시험은 재생 루프의 idle 에서만 — 유지·카운트다운에서 밀면 측정이 오염된다
+    sim.drift_end = getattr(sim, "max_drift", 0.0)
+    sim.n_loop_log = len(log)
 # ---------------------------------------------------------------- 4) 복귀
 if stop["hard"]:
     send_damp()
@@ -990,8 +994,10 @@ def print_summary():
             print(f"  골반 높이 최소 {min(hs):.3f} m → 판정: "
                   f"{'서 있음' if min(hs) > 0.4 else '넘어짐'}")
         if args.sim_push > 0 and hasattr(sim, "xy0"):
-            print(f"  밀기 {sim.n_push}회 ({args.sim_push:.0f} N × {args.sim_push_dur:.1f}s, idle 중) → "
-                  f"자리 이탈 최대 {sim.max_drift*100:.1f} cm (회전 세그먼트의 디딤도 포함)")
+            hl = [r[3] for r in log[:getattr(sim, "n_loop_log", len(log))] if len(r) > 3]
+            print(f"  밀기 {sim.n_push}회 ({args.sim_push:.0f} N × {args.sim_push_dur:.1f}s, 재생 루프 idle 중만) → "
+                  f"재생 루프 골반 최소 {min(hl):.3f} m ({'서 있음' if min(hl) > 0.4 else '넘어짐'}), "
+                  f"자리 이탈 최대 {getattr(sim, 'drift_end', sim.max_drift)*100:.1f} cm")
         if sim.renderer is not None and args.sim_video:
             try:
                 sim.vw.close()
