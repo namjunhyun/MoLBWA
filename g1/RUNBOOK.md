@@ -23,6 +23,26 @@ mkdir -p "$RAW" "$ART/gmr_out"
 **GPU 작업(2·3·4·6장의 GVHMR·Isaac·학습·YOLO 학습)은 다른 GPU 작업(VLA 학습 등)이 돌고 있으면 시작하지 않는다.**
 시작 전 `nvidia-smi` 로 확인한다. 같이 돌리면 둘 다 느려지고 RAM 16GB 가 먼저 바닥난다.
 
+### 0-1) 장비 배치 — 데스크탑 2대 (2026-10-08)
+
+| | 데스크탑 A (데모 1) | 데스크탑 B (데모 2, 이 문서) |
+|---|---|---|
+| 글래스 | A (oCamS) | B (컴팩트 스테레오, 엣지 = Pi 5 또는 Arduino UNO Q) |
+| 프로세스 | gaze_hri 로봇팔 스택 | `g1_gaze_bridge.py` + YOLO 워커 + `g1_interaction` |
+| 로봇 | SO-ARM101 2대 | Jetson `g1_motion_server.py` (명령은 B 에서만) |
+| `ROS_DOMAIN_ID` | 예: 11 | 예: 22 |
+
+**두 데스크탑이 같은 네트워크에 있으면 `ROS_DOMAIN_ID` 를 반드시 다르게 둔다.** 같으면 두 데모의
+`/gaze/*` 토픽이 섞여 데모 1 시선이 데모 2 에 들어온다. 각 데스크탑 `~/.bashrc` 에 `export ROS_DOMAIN_ID=22` 처럼 고정하고,
+글래스 엣지(Pi/UNO Q)도 짝 데스크탑과 같은 값으로 맞춘다. UDP 포트(55056/55057/55070/55071)는 데스크탑 B 안에서만 쓰이므로 겹치지 않는다.
+
+**글래스 B 엣지가 Arduino UNO Q 인 경우:** 데스크탑 B 코드는 엣지 기종을 모른다 — 시선 픽셀 UDP 55056 과
+씬 영상 `CompressedImage` 토픽만 오면 된다. 확인이 필요한 건 카메라 쪽이다.
+UNO Q(Qualcomm QRB2210, Debian)는 공식 문서상 **4-lane MIPI-CSI-2 + ISP 2개**가 있다. USB(UVC) 카메라 동작은 확인된 자료가 없다.
+- Arducam OV9281 동기화 스테레오 키트는 라즈베리파이 CSI 용이라 UNO Q 에 그대로 붙는다는 보장이 없다.
+- OAK-FFC-4P 는 USB3 + 보드 자체 하드웨어 동기화라 엣지 의존이 적지만, UNO Q 에서 depthai(USB) 가 도는지 실측이 먼저다.
+- 실측 순서: UNO Q 에 카메라 1대 연결 → 30 fps 캡처 확인 → ROS 2 로 `CompressedImage` 발행 → 데스크탑 B 에서 수신 지연 측정.
+
 ---
 
 ## 1. 촬영
