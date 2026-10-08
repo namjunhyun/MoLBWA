@@ -225,7 +225,7 @@ topdown_click:
 g1_interaction:
   ros__parameters:
     jetson_host: "192.168.50.119"   # Jetson wlan1 (G1_ROBOT_GUIDE.md). sim2sim 은 127.0.0.1
-    dwell_time: 1.0                 # 같은 부위 라벨을 이만큼 봐야 확정
+    dwell_time: 3.0                 # 같은 부위 라벨을 이만큼 봐야 확정 (2026-10-08 사용자 결정 1.0 -> 3.0)
     min_ratio: 0.7                  # 창 안 같은 라벨 비율 (깜빡임 허용)
     cooldown: 2.0                   # 확정 후 재확정 금지 시간. 같은 부위는 시선이 떠나야(비율<0.3) 다시
     g1_dir: ""                      # 비면 저장소 g1/ 자동 탐색

@@ -14,7 +14,7 @@ from collections import deque
 
 
 class LabelDwell:
-    def __init__(self, dwell_time=1.0, min_ratio=0.7, cooldown=2.0,
+    def __init__(self, dwell_time=3.0, min_ratio=0.7, cooldown=2.0,
                  release_ratio=0.3, max_gap=0.5):
         self.dwell_time = float(dwell_time)
         self.min_ratio = float(min_ratio)

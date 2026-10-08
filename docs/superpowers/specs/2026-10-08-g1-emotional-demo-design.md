@@ -4,7 +4,7 @@
 
 ## 목표
 
-사용자가 G1 의 **얼굴 / 손(팔뚝 끝) / 몸통** 중 한 곳을 1초 응시하면, G1 이 **서 있는 상태로**
+사용자가 G1 의 **얼굴 / 손(팔뚝 끝) / 몸통** 중 한 곳을 3초 응시하면, G1 이 **서 있는 상태로**
 사용자 쪽으로 제자리 회전한 뒤 부위에 맞는 동작(인사 / 악수 자세 / 팔 벌리기)을 하고 대기로 돌아온다.
 사용자가 로봇 옆에 있어도 동작해야 한다. 데모 1(로봇팔)과 같은 시선 인터페이스를 쓴다.
 
@@ -37,7 +37,7 @@
            └ yolo_worker(g1_face/g1_hand/g1_torso) → 시선 픽셀이 속한 부위 label
            ─UDP 55057 JSON {t, label, bearing_deg, valid}─▶
           gaze_hri/g1_interaction_node (ROS 2)
-           ├ dwell: 같은 label 1.0 초 유지(유효 70%) → 확정
+           ├ dwell: 같은 label 3.0 초 유지(유효 70%) → 확정
            ├ bearing → turn_bin (0, ±45, ±90, ±135, ±180)
            ├ 상태: IDLE → BUSY(Jetson 보고 기준) → IDLE, BUSY 중 이벤트 무시
            ├ 발행 /g1/event, /g1/state (std_msgs/String, JSON) — rosbag 으로 정서 지표 기록
@@ -113,7 +113,7 @@
     세그멘테이션은 박스로 판정 실패율이 높을 때 추가.
   - 출력 UDP 55057 JSON `{t, label|null, bearing_deg|null, valid}`.
 - `g1_interaction_node.py` (ROS 2, `setup.py` entry point `g1_interaction`):
-  - dwell 판정은 3D 점이 아니라 **라벨 유지** 기반(같은 label 비율 ≥ 70% 가 `dwell_time`=1.0 초). 확정 후 `cooldown` 동안 재확정 없음.
+  - dwell 판정은 3D 점이 아니라 **라벨 유지** 기반(같은 label 비율 ≥ 70% 가 `dwell_time`=3.0 초 — 2026-10-08 1.0 에서 변경). 확정 후 `cooldown` 동안 재확정 없음.
   - `turn_bin = 가장 가까운 {0, ±45, ±90, ±135, 180}`(+ 는 왼쪽, ±180 은 180 하나).
   - Jetson 상태(55071) 가 BUSY 거나 1 초 이상 미수신이면 확정 이벤트를 보내지 않는다.
   - `/g1/dwell_progress`(Float32) 를 내서 기존 HUD 패턴으로 피드백.

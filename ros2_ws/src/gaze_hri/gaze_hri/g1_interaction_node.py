@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-[데모 2] g1_interaction  —  "G1 의 어느 부위를 1초 봤는가?" -> Jetson 에 동작 명령.
+[데모 2] g1_interaction  —  "G1 의 어느 부위를 3초 봤는가?" -> Jetson 에 동작 명령.
 
     g1_gaze_bridge ─UDP 55057─> 이 노드 ─UDP 55070─> g1_motion_server (Jetson)
                                        <─UDP 55071─ {state, seq}
@@ -65,7 +65,7 @@ class G1Interaction(Node):
     def __init__(self):
         super().__init__("g1_interaction")
         self.declare_parameter("jetson_host", "192.168.50.119")
-        self.declare_parameter("dwell_time", 1.0)
+        self.declare_parameter("dwell_time", 3.0)
         self.declare_parameter("min_ratio", 0.7)
         self.declare_parameter("cooldown", 2.0)
         self.declare_parameter("g1_dir", "")         # 비면 저장소 g1/ 을 자동으로 찾는다

@@ -123,10 +123,10 @@
 
 **Interfaces:**
 - Consumes: `g1_protocol` (노드는 `sys.path` 에 저장소 `g1/` 를 넣어 import — 런치에 `g1_dir` 인자, 기본은 패키지 기준 상대경로 `../../../../g1`).
-- Produces: `class LabelDwell(dwell_time=1.0, min_ratio=0.7, cooldown=2.0)` (순수, `g1_dwell.py`)
+- Produces: `class LabelDwell(dwell_time=3.0, min_ratio=0.7, cooldown=2.0)` (순수, `g1_dwell.py`)
   - `update(t: float, label: str | None) -> str | None` — 최근 `dwell_time` 창에서 같은 label 비율 ≥ min_ratio 이고 창이 꽉 찼으면 확정 label 반환(1회). 확정 후 cooldown 동안 None, 그리고 그 label 이 창에서 사라질 때까지(비율 < 0.3) 같은 label 재확정 없음.
   - `progress(t) -> float` 0~1.
-- 노드: 55057 수신 → `LabelDwell` → 확정 시 Jetson state 가 idle 이고 1 초 내 수신했을 때만 `{"seq": n, "cmd": "act", "part", "turn_bin": nearest_bin(bearing) 또는 0}` 를 55070 으로 송신, 1 Hz ping. 발행: `/g1/event`(String JSON: t, part, bearing_deg, turn_bin, seq), `/g1/state`(String: idle|turning|acting|offline), `/g1/dwell_progress`(Float32). 파라미터 `jetson_host`, `dwell_time 1.0`, `min_ratio 0.7`, `cooldown 2.0`.
+- 노드: 55057 수신 → `LabelDwell` → 확정 시 Jetson state 가 idle 이고 1 초 내 수신했을 때만 `{"seq": n, "cmd": "act", "part", "turn_bin": nearest_bin(bearing) 또는 0}` 를 55070 으로 송신, 1 Hz ping. 발행: `/g1/event`(String JSON: t, part, bearing_deg, turn_bin, seq), `/g1/state`(String: idle|turning|acting|offline), `/g1/dwell_progress`(Float32). 파라미터 `jetson_host`, `dwell_time 3.0`, `min_ratio 0.7`, `cooldown 2.0`.
   - `nearest_bin` 은 Task 4 의 `g1_gaze_bridge` 가 아니라 `g1_protocol` 에 두어야 노드가 cv2/apriltag 없이 import 된다 → **Task 1 에 `nearest_bin` 포함**, Task 4 는 재사용.
 
 - [ ] 테스트 `test_confirms_after_dwell`(30 Hz, 1.0 s 동안 g1_face → 1.0 s 근처 1회 확정), `test_blink_tolerated`(20% None 섞여도 확정), `test_switch_resets`(0.6 s face 후 hand → face 확정 없음), `test_no_retrigger_while_staring`(3 s 계속 face → 1회만), `test_retrigger_after_leave`(face 확정 → 0.5 s None → face 1 s → 2회째 확정, cooldown 지난 경우).

@@ -1,6 +1,6 @@
 # g1 — 데모 2: 시선으로 G1 휴머노이드와 교감하기
 
-사용자가 G1 의 **얼굴 / 손 / 몸통** 중 한 곳을 1초 응시하면, G1 이 **서 있는 채로** 사용자 쪽으로
+사용자가 G1 의 **얼굴 / 손 / 몸통** 중 한 곳을 3초 응시하면, G1 이 **서 있는 채로** 사용자 쪽으로
 제자리 회전한 뒤 인사(`bow`) / 악수 자세(`handshake`) / 팔 벌리기(`open_arms`)를 하고 대기로 돌아온다.
 데모 1(로봇팔)과 같은 시선 인터페이스(글래스 → UDP 55056)를 쓴다.
 
@@ -20,7 +20,7 @@
            └ yolo_worker(g1_face/g1_hand/g1_torso) → 시선 픽셀이 속한 부위 label
            ─UDP 55057 JSON {t, label, bearing_deg, valid}─▶
           gaze_hri/g1_interaction_node (ROS 2)
-           ├ dwell: 같은 label 1.0 초 유지(유효 70%) → 확정
+           ├ dwell: 같은 label 3.0 초 유지(유효 70%) → 확정
            ├ bearing → turn_bin (0, ±45, ±90, ±135, 180)
            ├ 상태: IDLE → BUSY(Jetson 보고 기준) → IDLE, BUSY 중 이벤트 무시
            ├ 발행 /g1/event, /g1/state, /g1/dwell_progress — rosbag 으로 기록
