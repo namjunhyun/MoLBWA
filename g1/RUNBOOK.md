@@ -489,3 +489,14 @@ ros2 bag record /g1/event /g1/state /g1/dwell_progress -o "$ART/bag_$(date +%m%d
 - [ ] `/g1/state` 가 idle 로 오는지(offline 이면 Jetson→데스크탑 55071 경로 확인)
 - [ ] rosbag 기록 시작
 - [ ] 끝: 정상 종료 → 카운트다운 동안 받치기 → 전원
+
+---
+
+## 부록) 촬영 전 임시 대기 정책 (2026-10-08)
+
+촬영 클립 없이 "편하게 선 자세 + 밀어도 버티기" 를 먼저 학습한다. 촬영 라이브러리가 생기면 이 런에서 `agent.resume=true` 로 이어 학습한다.
+```bash
+python3 "$REPO/g1/motion/make_idle_csv.py" --out "$ART/idle_synth.csv" --seconds 10     # G1 기본자세, 이름으로 관절 매핑
+"$ART/run_csv_to_npz.sh" "$ART/idle_synth.csv" molbwa_idle                               # npz 크기 안정되면 PID 만 종료
+"$ART/train_idle.sh" > "$ART/train_idle.log" 2>&1                                        # 512 env · 2000 iter · push ±1.0 m/s
+```
