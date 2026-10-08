@@ -79,6 +79,12 @@ for i, k in enumerate((0, 2, 4, 6)):
     d[f"b{i}"] = sd[f"mlp.{k}.bias"].numpy().astype(np.float32)
 d["obs_mean"] = sd["obs_normalizer._mean"].numpy().reshape(-1).astype(np.float32)
 d["obs_std"] = sd["obs_normalizer._std"].numpy().reshape(-1).astype(np.float32)
+# 학습은 (x - mean) / (std + eps) 로 정규화한다(rsl_rl EmpiricalNormalization, eps 기본 1e-2).
+# 2026-10-08 전까지 이 eps 를 빼고 내보냈다 — 정지 자세처럼 std 가 0 인 차원이 있으면 배포에서 0 으로 나눠 NaN.
+from rsl_rl.modules.normalization import EmpiricalNormalization
+_norm = EmpiricalNormalization(d["obs_mean"].shape[0])
+_norm._mean.copy_(sd["obs_normalizer._mean"].reshape(1, -1)); _norm._std.copy_(sd["obs_normalizer._std"].reshape(1, -1))
+d["obs_eps"] = np.float32(_norm.eps)
 out = Path(args.out).resolve()
 np.savez(out, **d)
 
@@ -89,13 +95,12 @@ W = [d[f"w{i}"] for i in range(4)]; B = [d[f"b{i}"] for i in range(4)]
 rng = np.random.default_rng(0); worst = 0.0
 for _ in range(200):
     o = rng.standard_normal(d["obs_mean"].shape[0]).astype(np.float32)
-    x = (o - d["obs_mean"]) / d["obs_std"]
+    x = (o - d["obs_mean"]) / (d["obs_std"] + d["obs_eps"])
     for k in range(3):
         x = elu(W[k] @ x + B[k])
     a_np = W[3] @ x + B[3]
     with torch.no_grad():
-        t = ((torch.from_numpy(o) - sd["obs_normalizer._mean"].reshape(-1))
-             / sd["obs_normalizer._std"].reshape(-1))
+        t = _norm.eval()(torch.from_numpy(o).reshape(1, -1)).reshape(-1)   # 라이브러리 공식 그대로 (자기참조 대조 금지)
         for k in (0, 2, 4):
             t = torch.nn.functional.elu(sd[f"mlp.{k}.weight"] @ t + sd[f"mlp.{k}.bias"])
         a_t = (sd["mlp.6.weight"] @ t + sd["mlp.6.bias"]).numpy()

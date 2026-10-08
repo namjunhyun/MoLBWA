@@ -194,6 +194,8 @@ else:
     B = [sd[f"mlp.{i}.bias"].numpy().astype(np.float64) for i in (0, 2, 4, 6)]
     OM = sd["obs_normalizer._mean"].numpy().reshape(-1).astype(np.float64)
     OS = sd["obs_normalizer._std"].numpy().reshape(-1).astype(np.float64)
+# 학습 정규화는 (x - mean) / (std + eps), eps = rsl_rl 기본 1e-2. 예전 npz 에는 eps 가 없다.
+OBS_EPS = float(_z["obs_eps"]) if args.policy.endswith(".npz") and "obs_eps" in _z else 1e-2
 OBS_DIM = OM.shape[0]
 if OBS_DIM != 154:
     sys.exit(f"관측 {OBS_DIM}차원 — 이 스크립트는 154차원(Wo-State-Estimation) 전용이다.\n"
@@ -201,7 +203,7 @@ if OBS_DIM != 154:
 
 def elu(x): return np.where(x > 0, x, np.expm1(np.minimum(x, 0)))
 def policy(o):
-    x = (o - OM) / OS
+    x = (o - OM) / (OS + OBS_EPS)
     for k in range(3):
         x = elu(W[k] @ x + B[k])
     return W[3] @ x + B[3]
