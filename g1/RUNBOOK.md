@@ -199,6 +199,22 @@ grep -oE "Mean reward:[[:space:]]*[-0-9.]+" "$ART/train.log" | tail -1
 
 ## 5. sim2sim (MuJoCo, 로봇 없음)
 
+### 5-0) 학습 전 서버 스모크 (정책 없이도 가능)
+
+기존 제로투 정책 + 서 있기만 하는 정지 라이브러리로 서버 경로(세그먼트 전환·yaw 재정렬·UDP·이벤트 표·종료)를 먼저 확인한다.
+
+```bash
+python3 "$REPO/g1/tools/make_static_library.py" --out /tmp/g1_static
+cd "$REPO/g1/deploy"
+env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_motion_server.py \
+    --policy ~/g1_dance_deploy/policy_final.npz --motion /tmp/g1_static/static_library.npz \
+    --library_meta /tmp/g1_static/static_library_meta.json --backend mujoco --fake_events 4 --hold_sec 2
+```
+합격: exit 0, "판정: 서 있음", 이벤트 표의 heading 오차 ≈ −bin (회전 클립이 없으니 안 도는 게 정상).
+2026-10-08 실측: 34.9 s 완주, 골반 최소 0.753 m, 오차 −45→+42.8° · +90→−91.2° · 0→0.0°.
+
+### 5-1) 학습한 정책으로
+
 ```bash
 cd "$REPO/g1/deploy"
 env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_motion_server.py \
