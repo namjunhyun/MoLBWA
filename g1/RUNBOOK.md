@@ -193,7 +193,9 @@ nvidia-smi        # 다른 GPU 작업이 없을 때만
 ( cd ~/whole_body_tracking && ~/bin/isaaclab_run.sh -p scripts/rsl_rl/train.py \
     --task=Tracking-Flat-G1-Wo-State-Estimation-Delay-v0 \
     --motion_file motions/molbwa_library.npz --num_envs 1024 --max_iterations 6000 --headless \
-    env.rewards.action_rate_l2.weight=-0.1 env.actions.joint_pos.max_delay_steps=3 ) \
+    env.rewards.action_rate_l2.weight=-0.1 env.actions.joint_pos.max_delay_steps=3 \
+    "env.events.push_robot.params.velocity_range.x=[-1.0,1.0]" \
+    "env.events.push_robot.params.velocity_range.y=[-1.0,1.0]" ) \
     > "$ART/train.log" 2>&1
 
 RUN=$(ls -dt ~/whole_body_tracking/logs/rsl_rl/g1_flat/*/ | head -1)
@@ -201,6 +203,7 @@ CKPT=$(ls -t "$RUN"model_*.pt | head -1); echo "$CKPT"
 # 설정이 실제로 먹었는지 (run_smooth.sh 와 같은 확인)
 grep -A3 'action_rate_l2:' "$RUN"params/env.yaml | grep weight | head -1
 grep max_delay_steps "$RUN"params/env.yaml | head -1
+grep -A8 "push_robot:" "$RUN"params/env.yaml | grep -A2 "x:"   # [-1.0, 1.0] 이어야 한다 (기본 ±0.5)
 grep -oE "Mean reward:[[:space:]]*[-0-9.]+" "$ART/train.log" | tail -1
 ```
 
@@ -260,6 +263,29 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
 - 권장: 시드 하나로 끝내지 말고 `--fake_seed 1`, `--fake_seed 2` 로도 돌려 본다(이벤트 순서가 바뀐다).
 - sim2sim 의 첫 반응 시간은 **서버 내부 지연만**이다. 실기에서는 dwell 확정 → UDP(와이파이) 지연이 더해진다.
 - 넘어지면 실기도 넘어진다. 이 단계를 건너뛰고 8장으로 가지 않는다.
+
+### 5-2) 밀어도 버티는가 (2026-10-08 요구: 사람이 밀어도 그 자리에서 선 자세 유지)
+
+```bash
+for N in 100 150 200 250; do
+  env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_motion_server.py \
+      --policy "$ART/policy_molbwa.npz" --motion "$NPZ" --library_meta "$ART/library_meta.json" \
+      --backend mujoco --run_sec 30 --hold_sec 1 --sim_push $N --sim_push_every 4 \
+      --log_csv "$ART/push_$N.csv" | tee "$ART/push_$N.log" | grep -E "판정|밀기|중단"
+done
+```
+idle 중에만 4초마다 골반을 0.2초 민다(앞→왼→뒤→오른). 요약에 `자리 이탈 최대 (cm)` 가 나온다.
+
+| 지표 | 기준 |
+|---|---|
+| 넘어지지 않는 최대 힘 | 기록. 최소 150 N 은 서 있어야 한다(사람이 툭 미는 정도) |
+| 자리 이탈 | 기록. 위치 관측이 없는 정책이라 밀리면 원위치로 돌아오지 못한다 — 작을수록 좋다 |
+
+**⚠ 토크 가드와 충돌한다.** 기존 가드(1초 평균 토크 > 50% → 관절 풀기)는 "하네스를 너무 조여 발버둥" 을 잡으려고
+만든 것인데, 사람이 밀어 버틸 때도 토크가 올라 **가드가 로봇을 주저앉힌다.** 2026-10-08 실측: 춤 정책 + 정지 자세에
+150 N 을 미니 51% 로 가드 발동 → 골반 0.086 m. 학습한 정책으로 위 시험을 돌린 뒤, 버틴 경우들의 `push_*.csv` 에서
+1초창 평균 토크 최대를 재고 **그보다 위로 `--hot_frac` 를 정한다**(그래도 하네스 과조임 시험 64~84% 와 겹치는지 확인).
+기존 춤 정책 결과는 기준이 아니다 — 정지 자세를 학습한 적이 없는 정책이라 150 N 에서도 넘어졌다.
 
 ---
 

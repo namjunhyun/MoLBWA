@@ -118,6 +118,11 @@ AP.add_argument("--harness", type=float, default=0.0,
                 help="하네스가 골반을 위로 당기는 힘의 비율(0~1, 로봇 무게 대비). **지속적으로** "
                      "가한다 — --start_lift 는 들어서 시작만 하고 곧 착지하므로 '하네스를 조인' "
                      "상태를 재현하지 못한다. 1.0 이면 발이 완전히 뜬다.")
+AP.add_argument("--sim_push", type=float, default=0.0,
+                help="mujoco 전용 '밀어도 버티는가' 시험: idle 중에만 --sim_push_every 초마다 골반을 이 힘(N)으로 "
+                     "--sim_push_dur 초 민다. 방향은 앞→왼→뒤→오른 순환. 요약에 자리 이탈 최대(m)를 낸다")
+AP.add_argument("--sim_push_every", type=float, default=4.0)
+AP.add_argument("--sim_push_dur", type=float, default=0.2)
 AP.add_argument("--start_lift", type=float, default=0.0,
                 help="mujoco 백엔드에서 골반을 이만큼(m) 들어올려 시작한다 — 하네스에 매달려 "
                      "발이 땅에서 뜬 상태를 재현한다")
@@ -159,6 +164,8 @@ args = AP.parse_args()
 
 if args.fake_events and args.backend != "mujoco":
     sys.exit("--fake_events 는 mujoco 백엔드 전용이다 — 실기에 가짜 명령을 넣지 않는다")
+if args.sim_push and args.backend != "mujoco":
+    sys.exit("--sim_push 는 mujoco 백엔드 전용이다")
 
 # ---------------------------------------------------------------- 메타 / 정책 / 모션
 
@@ -551,6 +558,8 @@ class MujocoBackend:
         q_target_isaac = self.q_hist[max(0, len(self.q_hist) - 1 - args.sim_delay)]
         self.q_hist = self.q_hist[-(args.sim_delay + 1):]
         for _ in range(DEC):
+            if args.sim_push > 0:
+                self._push_step()
             # 실기 모터의 토크 한계를 그대로 건다 — 없으면 실기보다 관대한 조건이 된다
             tau = np.clip(args.sim_kp * KP * (q_target_isaac - self.d.qpos[self.qadr]), -ELIM_A, ELIM_A)
             self.tau_last = tau
@@ -572,6 +581,23 @@ class MujocoBackend:
 
     def height(self):
         return float(self.d.qpos[2])
+
+    push_idle = False      # 메인 루프가 매 스텝 갱신 — idle 일 때만 민다
+    _DIRS = ((1, 0), (0, 1), (-1, 0), (0, -1))
+
+    def _push_step(self):
+        """--sim_push: 골반에 수평 외력. 자리 이탈 = 첫 위치에서 골반 xy 최대 거리."""
+        xy = self.d.qpos[:2].copy()
+        if not hasattr(self, "xy0"):
+            self.xy0, self.max_drift, self.n_push, self._was = xy, 0.0, 0, False
+        self.max_drift = max(self.max_drift, float(np.linalg.norm(xy - self.xy0)))
+        t = self.d.time
+        on = self.push_idle and t > args.sim_push_every and (t % args.sim_push_every) < args.sim_push_dur
+        if on and not self._was:
+            self.n_push += 1
+        self._was = on
+        dx, dy = self._DIRS[int(t // args.sim_push_every) % 4]
+        self.d.xfrc_applied[self.b_pel, :3] = (args.sim_push * dx, args.sim_push * dy, 0.0) if on else (0.0, 0.0, 0.0)
 
 # 명령 수신(비차단) / 상태 송신. DDS·MuJoCo 를 열기 전에 만든다 — 포트가 막혔으면 로봇을 건드리기 전에 끝낸다.
 cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -828,6 +854,8 @@ for t in itertools.count():
             print(f"  [act] seq {m['seq']} {m['part']} bin {m['turn_bin']:+d}")
 
     k, first = player.step()
+    if sim is not None:
+        sim.push_idle = player.state == "idle"
     # 참조 모션의 world 프레임과 로봇 yaw 를 **세그먼트 첫 프레임마다** 다시 정렬한다
     # (원본은 시작 시 1회). 회전 클립이 끝난 뒤의 heading 잔차를 다음 세그먼트로 끌고 가지 않는다.
     # IMU 는 pelvis 자세인데 anchor 는 torso 다 — 두 링크의 yaw 는 waist_yaw 만큼 다르므로
@@ -959,6 +987,9 @@ def print_summary():
         if hs:
             print(f"  골반 높이 최소 {min(hs):.3f} m → 판정: "
                   f"{'서 있음' if min(hs) > 0.4 else '넘어짐'}")
+        if args.sim_push > 0 and hasattr(sim, "xy0"):
+            print(f"  밀기 {sim.n_push}회 ({args.sim_push:.0f} N × {args.sim_push_dur:.1f}s, idle 중) → "
+                  f"자리 이탈 최대 {sim.max_drift*100:.1f} cm (회전 세그먼트의 디딤도 포함)")
         if sim.renderer is not None and args.sim_video:
             try:
                 sim.vw.close()

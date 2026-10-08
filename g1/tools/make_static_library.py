@@ -14,6 +14,7 @@ import numpy as np
 ap = argparse.ArgumentParser()
 ap.add_argument("--motion", default=os.path.expanduser("~/g1_dance_deploy/motion_final.npz"))
 ap.add_argument("--out", default="/tmp/g1_static")
+ap.add_argument("--frame", type=int, default=0, help="정지 자세로 쓸 참조 프레임. 춤 첫 프레임은 편하게 선 자세가 아닐 수 있다")
 args = ap.parse_args()
 os.makedirs(args.out, exist_ok=True)
 
@@ -26,7 +27,7 @@ out = {}
 for k, v in M.items():
     v = np.asarray(v)
     if v.ndim >= 1 and v.shape[0] == L0:
-        out[k] = np.zeros((N,) + v.shape[1:], v.dtype) if "vel" in k else np.repeat(v[:1], N, axis=0)
+        out[k] = np.zeros((N,) + v.shape[1:], v.dtype) if "vel" in k else np.repeat(v[args.frame:args.frame + 1], N, axis=0)
     else:
         out[k] = v
 np.savez(os.path.join(args.out, "static_library.npz"), **out)
