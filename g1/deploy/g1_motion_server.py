@@ -146,12 +146,18 @@ AP.add_argument("--probe", type=float, default=0.0,
 AP.add_argument("--max_cycles_late", type=int, default=5, help="주기를 이만큼 연속 놓치면 중단")
 AP.add_argument("--hot_window", type=int, default=50,
                 help="토크 이동창 길이(스텝). 50 = 1초.")
-AP.add_argument("--hot_frac", type=float, default=0.50,
+AP.add_argument("--hot_frac", type=float, default=0.60,
                 help="이동창 평균 토크가 한계의 이 비율을 넘으면 중단하고 관절을 푼다. "
+                     "2026-10-09 0.50→0.60 (데모2 대기 정책 실측: 서기 16%%, 100 N 반복 밀기 버팀 54%%, "
+                     "150 N 반복 넘어짐 84%% — 0.50 은 밀려서 버티는 로봇을 주저앉혔다). 이하 원래 근거: "
                      "문턱은 분포를 재서 정했다 — 1초창 평균 최대가 정상(하네스 지지 0~50%%)에서 "
                      "31~41%%, 넘어지는 90%% 에서 58%%, 완전 매달림에서 74%% 였다. "
                      "0.50 은 정상에서 오탐 0 이고 위험 두 조건을 잡는다(여유 9%%p). "
                      "하네스 지지 70%%(창 47%%)는 통과하는데, 그 조건은 실제로 완주한다.")
+AP.add_argument("--fall_tilt_deg", type=float, default=50.0,
+                help="몸통이 수직에서 이 각도 넘게 --fall_sec 동안 기울면 넘어진 것으로 보고 관절을 푼다 "
+                     "(하네스 없이 쓰러진 채 정책이 버둥거리지 않게). 0 이면 끈다")
+AP.add_argument("--fall_sec", type=float, default=0.3)
 AP.add_argument("--hot_grace", type=float, default=1.5,
                 help="시작 후 이 시간(초)까지는 토크 가드를 적용하지 않는다 — 첫 1초는 원래 급격하다.")
 AP.add_argument("--max_hot_steps", type=int, default=25,
@@ -794,6 +800,7 @@ last_action = np.zeros(NJ)
 yaw_off = None
 late = 0
 hot = 0              # 토크가 한계 근처에 연속으로 붙어 있는 스텝 수
+fall_steps = 0       # 몸통 기울기가 --fall_tilt_deg 를 넘은 연속 스텝 수
 csvf = None
 if args.log_csv:
     csvf = open(args.log_csv, "w", buffering=1)
@@ -872,6 +879,12 @@ for t in itertools.count():
     imu_aligned = quat_mul(quat_from_yaw(yaw_off), imu)
 
     R_rob = torso_rot_world(imu_aligned, q)
+    tilt_deg = float(np.degrees(np.arccos(np.clip(R_rob[2, 2], -1.0, 1.0))))
+    fall_steps = fall_steps + 1 if (args.fall_tilt_deg > 0 and tilt_deg > args.fall_tilt_deg) else 0
+    if fall_steps * CTRL_DT >= args.fall_sec:
+        print(f"[중단] 몸통이 {tilt_deg:.0f}° 기울어 {args.fall_sec:.1f}초 지속 — 넘어졌다. 관절을 푼다.")
+        stop["hard"] = True
+        break
     ori_b = (R_rob.T @ quat_to_mat(REF_BQ[k, B_ANCHOR]))[:, :2].reshape(-1)
 
     obs = np.concatenate([REF_Q[k], REF_QD[k], ori_b, gyro, q - QDEF, dq, last_action])
