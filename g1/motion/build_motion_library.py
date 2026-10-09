@@ -182,6 +182,9 @@ def main(argv=None) -> int:
     ap.add_argument("--segments", required=True)
     ap.add_argument("--out_csv", required=True)
     ap.add_argument("--out_meta", required=True)
+    ap.add_argument("--seam_joint", type=float, default=SEAM_MAX["joint"],
+                    help="이음새 관절 임계 rad/프레임. 보행 회전 클립은 걸음 자체가 ~0.18 이라 블렌드 창에 잡힌다 — "
+                         "그때만 올리고, 원 클립 내부 최대 변화와 같은지 먼저 확인할 것")
     a = ap.parse_args(argv)
 
     with open(a.segments) as f:
@@ -196,7 +199,8 @@ def main(argv=None) -> int:
     rep = seam_report(lib, meta)
     print(json.dumps({"frames_csv": len(lib), "segments": meta["segments"], "seam": rep}, indent=1))
 
-    bad = [k for k in SEAM_MAX if rep[k] > SEAM_MAX[k]]
+    lim = dict(SEAM_MAX, joint=a.seam_joint)
+    bad = [k for k in lim if rep[k] > lim[k]]
     if bad:
         print(f"이음새 임계 초과: {bad} (세그먼트 {rep['worst_seam']}) — 출력 안 함", file=sys.stderr)
         return 1

@@ -6,7 +6,7 @@ bridge : {"t", "label": g1_face|g1_hand|g1_torso|None, "bearing_deg": float|None
 cmd    : {"seq", "cmd": "act"|"ping", "part", "bearing_deg": int|None}
 state  : {"state": "idle"|"turning"|"acting", "seq"}
 
-bearing_deg 는 G1 torso 기준 사용자 방위(+ = 왼쪽, 도). 허리 yaw 변형도 + = 왼쪽.
+bearing_deg 는 G1 torso 기준 사용자 방위(+ = 왼쪽, 도). 회전 클립 turn_l*/turn_r* 도 l = 왼쪽(+).
 Jetson 에도 올라가므로 Python 3.8 호환.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ PORT_CMD = 55070
 PORT_STATE = 55071
 
 PART_TO_SEGMENT = {"g1_face": "wave", "g1_hand": "handshake", "g1_torso": "open_arms"}
-WAIST_LIMIT_DEG = 75        # |bearing| 이하면 허리 yaw 변형만, 넘으면 turn_l180 + 잔차를 허리로
+TURN_BINS = (0, 45, 90, 135, 180, -45, -90, -135)   # 제자리 회전 클립 각도(+ = 왼쪽). 잔차 최대 ±22.5°
 
 
 def _wrap(deg: float) -> float:
@@ -27,22 +27,20 @@ def _wrap(deg: float) -> float:
     return 180.0 if d == -180.0 else d
 
 
-def _waist(deg: float) -> int:
-    return max(-60, min(60, 30 * int(round(deg / 30.0))))
-
-
 def plan(part: str, bearing_deg: float | None) -> list:
-    """부위 + 사용자 방위 -> 재생할 세그먼트 목록. 예: ("g1_face", 150) -> ["turn_l180", "wave_y-30"].
-    |b| <= 75 는 허리 yaw 변형 하나(잔차 최대 ±15°), 그 밖은 turn_l180 뒤 잔차를 허리로(±60° 로 잘림)."""
+    """부위 + 사용자 방위(+ = 왼쪽) -> 재생할 세그먼트 목록. 예: ("g1_face", 150) -> ["turn_l135", "wave"].
+    방위를 원형 거리로 가장 가까운 TURN_BINS 로 양자화해 전신 제자리 회전 클립을 먼저 틀고,
+    사용자를 마주본 채 동작을 허리 변형 없이 재생한다. 0 bin 이거나 방위가 없으면 동작만."""
     g = PART_TO_SEGMENT.get(part)
     if g is None:
         raise ValueError(f"모르는 부위 {part!r}")
     if bearing_deg is None:
-        return [f"{g}_y0"]
+        return [g]
     b = _wrap(bearing_deg)
-    if abs(b) <= WAIST_LIMIT_DEG:
-        return [f"{g}_y{_waist(b)}"]
-    return ["turn_l180", f"{g}_y{_waist(_wrap(b - 180.0))}"]
+    tb = min(TURN_BINS, key=lambda x: abs(_wrap(b - x)))   # 동률이면 TURN_BINS 앞쪽(작은 |각|, 왼쪽)
+    if tb == 0:
+        return [g]
+    return [f"turn_l{tb}" if tb > 0 else f"turn_r{-tb}", g]
 
 
 def encode(msg: dict) -> bytes:

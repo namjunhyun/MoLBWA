@@ -7,8 +7,8 @@
 
   * LabelDwell 로 부위 라벨 확정 (같은 라벨 dwell_time 동안 min_ratio 이상).
   * 확정 시 Jetson state 가 idle 이고 1초 안에 받은 것일 때만 act 를 보낸다.
-    bearing_deg = int(round(최근 dwell_time 안의 마지막 유효 bearing)), 없으면 null(허리 정면 y0 동작만).
-    어떤 세그먼트를 재생할지는 Jetson 이 g1_protocol.plan() 으로 정한다(허리 ±60°, 넘으면 turn_l180).
+    bearing_deg = int(round(최근 dwell_time 안의 마지막 유효 bearing)), 없으면 null(회전 없이 동작만).
+    어떤 세그먼트를 재생할지는 Jetson 이 g1_protocol.plan() 으로 정한다(45° bin 제자리 회전 클립 -> 마주보고 동작).
   * seq 는 밀리초 시각 기반 int(next_seq), 직전·Jetson 보고값보다 항상 큼 — 노드를 재시작해도 거부되지 않는다.
   * 1 Hz ping.
 

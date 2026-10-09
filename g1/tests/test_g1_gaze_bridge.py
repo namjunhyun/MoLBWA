@@ -69,11 +69,11 @@ def test_bearing_deg(p, expect):
 
 
 def test_bearing_behind_wobble_same_plan():
-    # Review Focus #1: 뒤에서 179/-179 로 흔들려도 둘 다 turn_l180 + y0.
+    # Review Focus #1: 뒤에서 179/-179 로 흔들려도 둘 다 turn_l180 + wave.
     for d in (179.0, -179.0):
         ang = math.radians(d)
         deg = bearing_deg(_T_hc_torso((2 * math.cos(ang), 2 * math.sin(ang), 0.5)))
-        assert plan("g1_face", deg) == ["turn_l180", "wave_y0"]
+        assert plan("g1_face", deg) == ["turn_l180", "wave"]
 
 
 def test_config_loads_four_tag_bundle():

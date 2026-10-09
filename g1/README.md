@@ -1,7 +1,8 @@
 # g1 — 데모 2: 시선으로 G1 휴머노이드와 교감하기
 
 사용자가 G1 의 **얼굴 / 손 / 몸통** 중 한 곳을 3초 응시하면, G1 이 **서 있는 채로** 사용자 쪽으로
-허리를 돌려(필요하면 먼저 제자리 180° 회전) 손 흔들기(`wave`) / 악수 자세(`handshake`) / 팔 벌리기(`open_arms`)를 하고
+전신 제자리 회전(45° 단위)으로 돌아 마주본 뒤 손 흔들기(`wave`)를 하고
+(악수 자세 `handshake` / 팔 벌리기 `open_arms` 는 보류 — 클립이 생기면 그 이름 그대로 추가)
 대기로 돌아온다.
 데모 1(로봇팔)과 같은 시선 인터페이스(글래스 → UDP 55056)를 쓴다.
 
@@ -28,7 +29,7 @@
            └─UDP 55070 {seq, cmd:"act", part, bearing_deg} / {cmd:"ping"} ─▶
 [Jetson]  g1/deploy/g1_motion_server.py (50 Hz 온보드, numpy only)
            ├ 정책 1개 + 모션 라이브러리 npz(세그먼트 경계 library_meta.json)
-           ├ idle 반복 → 명령 수신 시 plan(part, bearing) = [turn_l180?] + 동작_y<허리> → idle
+           ├ idle 반복 → 명령 수신 시 plan(part, bearing) = [turn_l*/turn_r*?] + 동작 → idle
            ├ 세그먼트 시작마다 yaw_off 재정렬
            └─UDP 55071 {state, seq} ─▶ 데스크탑
 ```
@@ -43,8 +44,8 @@
 |---|---|
 | UDP 포트 | 브리지→노드 **55057**, 노드→Jetson **55070**, Jetson→노드 **55071** (기존 55055/55056/55059 는 안 건드림) |
 | 부위 → 동작 | `g1_face`→`wave`, `g1_hand`→`handshake`, `g1_torso`→`open_arms`. 겹치면 hand > face > torso |
-| 방향 맞추기 `plan()` | bearing b(도, **+ 가 왼쪽**, (−180,180] 로 감음). \|b\| ≤ 75° → 동작 허리 변형 `_y{v}` 하나, v = 30°단위 반올림·±60° 클립(잔차 최대 ±15°). \|b\| > 75° → `turn_l180` 뒤 잔차 r = b−180 을 허리로(±60° 로 잘려 75~120° 구간은 잔차가 15° 넘게 남는다). bearing null → `_y0`. 허리 yaw 도 + 가 왼쪽 |
-| 세그먼트 | `idle`, `wave_y{-60,-30,0,30,60}`, `handshake_y{…}`, `open_arms_y{…}`(각 5개), `turn_l180` — 17개. 90° 회전 클립은 나중에 촬영 예정 |
+| 방향 맞추기 `plan()` | bearing b(도, **+ 가 왼쪽**, (−180,180] 로 감음)를 원형 거리로 가장 가까운 bin {0, ±45, ±90, ±135, 180} 로 양자화(±180 부근은 180, 잔차 ≤ ±22.5°). bin ≠ 0 → 전신 제자리 회전 `turn_l{b}`/`turn_r{−b}` 뒤 동작, 0 이나 null → 동작만. 동작은 사용자를 마주본 채 **허리 변형 없이** 재생 |
+| 세그먼트 | `idle`, `turn_l45/90/135/180`, `turn_r45/90/135`, `wave` — 9개. 회전 = Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`)을 MuJoCo 에서 돌려 녹화(`~/molbwa_g1/record_loco_turn.py`: yaw P 제어, wz ≤ 0.6 rad/s, 두 발 지지 위상에서 끝, 앞뒤 1.5 s 정지 패딩). wave = AMASS_Retargeted_for_G1 BMLmovi 48_F_2(**연구용 라이선스**). 라이브러리는 blend 1.5 s + `--seam_joint 0.2`(보행 자체가 ~0.18 rad/프레임 — 원본 클립 최대값과 같음 확인) |
 | 모션 csv | 36열 = root pos 3 + root quat **xyzw** 4 + 관절 29, 30 fps (`csv_to_npz.py` 가 wxyz·50 fps 로 바꾼다) |
 | 정책 관측 | **154차원**(Wo-State-Estimation)만. 160차원 정책은 실행 거부 |
 | 메시지 | bridge `{t, label, bearing_deg, valid}` · cmd `{seq, cmd: act\|ping, part, bearing_deg: int\|null}` · state `{state: idle\|turning\|acting, seq}` |
@@ -54,7 +55,7 @@
 | 파일 | 역할 | 어디서 도나 |
 |---|---|---|
 | `g1_protocol.py` | 포트·라벨·`plan()`(방위 → 세그먼트 목록)·JSON encode/decode | 전부 (Jetson 은 3.8) |
-| `motion/build_motion_library.py` | 촬영 클립 csv 17개 → 블렌드·yaw/xy 합성 → `library.csv` + `library_meta.json`. 이음새 임계 초과 시 exit 1 | 데스크탑 |
+| `motion/build_motion_library.py` | 클립 csv(segments.yaml, 지금 9개) → 블렌드·yaw/xy 합성 → `library.csv` + `library_meta.json`. 이음새 임계 초과 시 exit 1 | 데스크탑 |
 | `motion/segments.yaml` | 세그먼트 이름 → csv 경로, 순서 | 데스크탑 |
 | `deploy/segment_player.py` | 세그먼트 커서 상태머신 (idle 반복 / act → plan() 세그먼트 → idle, seq·BUSY·bearing 타입 거부) | Jetson |
 | `deploy/g1_motion_server.py` | 50 Hz 정책 실행부 (`deploy_g1_tracking.py` 확장). probe·dry-run 기본·`--arm`·토크 가드·`--backend mujoco --fake_events N` | Jetson / 데스크탑(sim2sim) |
@@ -94,7 +95,7 @@ ros2 topic echo /g1/state          # 다른 터미널: offline
 
 `--fake_events` 는 mujoco 백엔드 전용이다. 6초 간격으로 무작위 part/bearing(−180~180 정수, 10% null) `act` 를 내부 주입하고(`--fake_seed` 로 고정),
 마지막 동작이 idle 로 돌아오면 스스로 끝난다.
-끝나면 이벤트별 (part, bearing, 세그먼트, 목표 heading = 수락 시 yaw + bearing, heading 오차 = 동작 첫 프레임 torso yaw + 계획 허리각 − 목표, act 수신→세그먼트 첫 프레임 지연 ms) 표를 찍는다.
+끝나면 이벤트별 (part, bearing, 세그먼트, 목표 heading = 수락 시 yaw + 계획 회전 bin, heading 오차 = 동작 첫 프레임 torso yaw − 목표(= 회전 정확도), act 수신→세그먼트 첫 프레임 지연 ms) 표를 찍는다.
 합격 기준은 `RUNBOOK.md` 5장.
 
 정책·라이브러리 npz 가 아직 없으면 3) 은 못 돈다 — 촬영부터 학습까지 `RUNBOOK.md` 1~4장.

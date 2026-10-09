@@ -14,7 +14,7 @@
 ```bash
 REPO=~/창종설                    # 이 저장소 (worktree 에서 작업 중이면 그 경로)
 ART=~/molbwa_g1                  # 산출물 — 저장소 밖. 영상·pkl·csv·npz 는 커밋하지 않는다
-RAW=$ART/raw                     # 촬영 원본 mp4 (세그먼트 이름 그대로: idle.mp4, wave_y-30.mp4, turn_l180.mp4, ...)
+RAW=$ART/raw                     # (구) 촬영 원본 mp4 — 2026-10-09 부터 클립은 1장 출처를 쓴다
 mkdir -p "$RAW" "$ART/gmr_out"
 ```
 
@@ -45,69 +45,34 @@ UNO Q(Qualcomm QRB2210, Debian)는 공식 문서상 **4-lane MIPI-CSI-2 + ISP 2�
 
 ---
 
-## 1. 촬영
+## 1. 클립 (2026-10-09 결정: 회전은 보행정책 녹화, 동작은 wave 하나)
 
-클립 **17개**, 전부 **같은 기본자세(편하게 선 자세 — 팔은 자연스럽게 내리고 무릎은 펴되 잠그지 않음)로 시작하고 끝난다. 클립마다 앞뒤 1초는 그 자세로 정지.**
-라이브러리 빌더가 클립 앞뒤를 `idle` 첫 프레임 자세로 0.5초 블렌드하는데, 클립 끝이 대기 자세에서
-멀수록 블렌드 구간의 관절이 빨리 움직여 이음새 검사(관절 0.05 rad/프레임)에 걸린다.
+사용자 쪽으로는 **전신 제자리 회전 클립**으로 돌아 마주본 뒤, 동작을 **허리 변형 없이** 재생한다(허리 yaw 변형 설계는 폐기).
+`g1_protocol.plan()` 이 방위 b(+ = 왼쪽)를 원형 거리로 가장 가까운 45° bin {0, ±45, ±90, ±135, 180} 에 넣는다
+(±180 부근은 `turn_l180`). 0 bin 이거나 bearing null 이면 회전 없이 동작만. **양자화 잔차 ≤ ±22.5°.**
 
-| 세그먼트 (= 파일 이름) | 내용 |
+| 세그먼트 (= 파일 이름) | 출처 |
 |---|---|
-| `idle` | 편하게 선 기본자세로 4초 대기 (호흡 정도의 미세 움직임만) |
-| `wave_y{v}` | 손 흔들어 인사 (얼굴 응시) |
-| `handshake_y{v}` | 오른팔을 앞으로 내밀어 악수 자세, 2초 유지 후 복귀 (손 응시). 뻗는 거리는 짧게 |
-| `open_arms_y{v}` | 팔 벌려 안아주는 자세, 2초 유지 후 복귀. 감싸지 않는다 (몸통 응시) |
-| `turn_l180` | 제자리 **왼쪽** 180° 회전. 발을 작게 여러 번 디딤 |
+| `idle` | `make_idle_csv.py` 합성 대기 자세 (부록) |
+| `turn_l45/90/135/180`, `turn_r45/90/135` | Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`, 다리 12관절)으로 MuJoCo 에서 녹화 — `~/molbwa_g1/record_loco_turn.py`. yaw P 제어, wz ≤ 0.6 rad/s, SDK 보행처럼 발을 디디며 돌고 두 발 지지 위상에서 끝난다. 허리·팔은 트래킹 대기 자세 |
+| `wave` | AMASS_Retargeted_for_G1 의 BMLmovi `Subject_48_F_2` → `amass_g1_to_csv.py`. **원본 AMASS 는 비상업·연구용 라이선스** |
 
-v ∈ {−60, −30, 0, 30, 60} (예: `wave_y-30`). 발은 제자리, **허리(상체)를 v° 돌린 채로** 동작하고 정면으로 돌아와 끝난다.
-**+ 가 왼쪽**(사람 기준 자기 왼쪽으로 상체를 돌림). 사용자 방위 b 에 대해 `g1_protocol.plan()` 이 고른다:
-|b| ≤ 75° 면 허리 변형 하나(30° 단위라 잔차 최대 ±15°), 그 밖이면 `turn_l180` 뒤 잔차 b−180 을 허리로
-(±60° 로 잘리므로 |b| 75~120° 구간은 잔차가 15° 넘게 남는다). 90° 회전 클립은 나중에 촬영해 이 구간을 메울 예정.
-
-촬영 조건:
-- **고정 카메라**(삼각대) — GVHMR 을 `-s`(static cam)로 돌린다
-- 전신이 처음부터 끝까지 프레임 안, 정면 기준 3~4 m
-- 30 fps 이상 (더 높으면 `batch_gmr_pkl_to_csv.py` 가 30 fps 로 솎는다)
-- 단색 배경 권장, 헐렁한 옷 피하기
-- 각도를 **정확히** — 바닥에 테이프로 0/±30/±60/180° 표시. 허리 변형은 상체가 그 선을 향하게, `turn_l180` 은 몸 전체가 정확히 뒤로. 이 각도가 곧 로봇의 회전량이다
-- 회전 중 발을 끌지 않는다(디뎌서 돈다). GVHMR 단안 추정은 제자리 회전에서 발이 미끄러지기 쉽다
+`handshake`/`open_arms` 는 아직 없다(보류). 라이브러리에 없으면 서버가 경고하고 그 명령은 거부한다. 나중에 추가할 때는 접미사 없이 그 이름 그대로 클립을 넣는다.
 
 ---
 
-## 2. GVHMR → GMR → csv
-
-`~/para_pipeline/run_all.sh` 1~2단계와 같은 명령을 클립마다 돌린다.
+## 2. 클립 만들기
 
 ```bash
-SEGS="idle $(for g in wave handshake open_arms; do for v in -60 -30 0 30 60; do printf "%s_y%s " $g $v; done; done)turn_l180"
-
-# 2-1) GVHMR — 영상 → SMPL (outputs/demo/<이름>/hmr4d_results.pt)
-for s in $SEGS; do
-  ( cd ~/GVHMR && env -u PYTHONPATH ~/miniconda3/envs/gvhmr/bin/python tools/demo/demo.py \
-      --video="$RAW/$s.mp4" -s ) > "$ART/gvhmr_$s.log" 2>&1 || echo "실패: $s ($ART/gvhmr_$s.log)"
-done
-
-# 2-2) GMR 리타게팅 — SMPL → G1 pkl
-for s in $SEGS; do
-  ( cd ~/GMR && env -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
-      ~/miniconda3/envs/gmr/bin/python scripts/gvhmr_to_robot.py \
-      --gvhmr_pred_file ~/GVHMR/outputs/demo/$s/hmr4d_results.pt \
-      --robot unitree_g1 --save_path "$ART/gmr_out/$s.pkl" ) > "$ART/gmr_$s.log" 2>&1
-  [ -f "$ART/gmr_out/$s.pkl" ] || echo "실패: $s ($ART/gmr_$s.log)"
-done
-
-# 2-3) pkl → csv (폴더 안 pkl 전부 → $ART/gmr_out/csv/<이름>.csv)
-( cd ~/GMR && env -u PYTHONPATH ~/miniconda3/envs/gmr/bin/python \
-    scripts/batch_gmr_pkl_to_csv.py --folder "$ART/gmr_out" )
-
-# 2-4) 17개 다 있고 전부 36열인지
-for s in $SEGS; do
-  f="$ART/gmr_out/csv/$s.csv"
-  [ -f "$f" ] && echo "$s $(head -1 "$f" | awk -F, '{print NF}')열 $(wc -l < "$f")행" || echo "없음: $s"
-done
+mkdir -p "$ART/lib2/clips"
+cp "$ART/idle_synth.csv" "$ART/lib2/clips/idle.csv"                       # 부록의 make_idle_csv.py 출력
+( cd ~/molbwa_g1 && PYTHONPATH=~/unitree_rl_gym python record_loco_turn.py "$ART/loco_turns" )   # MuJoCo (GPU 불필요)
+cp "$ART"/loco_turns/turn_*.csv "$ART/lib2/clips/"
+/usr/bin/python3 -I "$ART/pad_turns.py"                                     # 회전 csv 앞뒤 1.5 s 정지 패딩
+# wave.csv: amass_g1_to_csv.py 로 BMLmovi 48_F_2 를 변환해 clips/wave.csv 로 둔다 (허리 변형 없음)
 ```
 
-빠진 클립이 있으면 여기서 멈춘다. 라이브러리 빌더는 없는 파일을 건너뛰지 않고 예외로 죽는다.
+패딩은 보행 위상 때문에 계속 디디는 끝부분을 블렌드 구간 밖으로 밀어내려는 것이다.
 
 ---
 
@@ -116,22 +81,23 @@ done
 ### 3-1) 라이브러리 빌드
 
 `g1/motion/segments.yaml` 은 csv 를 **yaml 파일 기준 `clips/<이름>.csv`** 로 찾는다. `$ART` 로 복사하고
-`clips` 를 2장 출력 폴더에 링크하면 고칠 것이 없다. 형식은 `segments:` 아래 `{name, csv}` 목록 + 최상위 `fps`(30)·`blend_s`(0.5),
-이어 붙이는 순서는 yaml 순서 그대로다.
+`$ART/lib2` 로 복사하면 2장 `clips/` 를 그대로 찾는다. 형식은 `segments:` 아래 `{name, csv}` 목록 + 최상위 `fps`(30)·`blend_s`,
+이어 붙이는 순서는 yaml 순서 그대로다. **보행 회전 라이브러리는 `blend_s: 1.5` + `--seam_joint 0.2` 로 빌드한다**
+(저장소 yaml 기본값은 0.5 — 복사본에서 바꾼다). 보행 자체가 프레임당 ~0.18 rad 를 움직이므로(원본 클립 최대값과 같음을 확인)
+기본 0.05 rad 임계로는 회전 클립이 항상 걸린다.
 
 ```bash
-cp "$REPO/g1/motion/segments.yaml" "$ART/segments.yaml"
-ln -sfn "$ART/gmr_out/csv" "$ART/clips"
+sed 's/^blend_s: .*/blend_s: 1.5/' "$REPO/g1/motion/segments.yaml" > "$ART/lib2/segments.yaml"
 /usr/bin/python3 "$REPO/g1/motion/build_motion_library.py" \
-    --segments "$ART/segments.yaml" \
-    --out_csv ~/whole_body_tracking/motions_csv/molbwa_library.csv \
-    --out_meta "$ART/library_meta.json"
+    --segments "$ART/lib2/segments.yaml" \
+    --out_csv "$ART/lib2/molbwa_library2.csv" \
+    --out_meta "$ART/lib2/library_meta.json" --seam_joint 0.2
 echo "exit $?"
 ```
 
 - 이음새 리포트(관절 rad/프레임, root m, yaw rad)와 세그먼트 경계를 찍는다.
 - **exit 1 = 이음새 임계 초과**(관절 0.05 rad/프레임, root 0.02 m, yaw 0.05 rad). 출력 파일을 쓰지 않는다.
-  리포트의 `worst_seam` 세그먼트를 재촬영하거나(끝 자세가 대기와 멀다), yaml 의 `blend_s` 를 늘린다.
+  리포트의 `worst_seam` 세그먼트 클립을 다시 만들거나(끝 자세가 대기와 멀다), yaml 의 `blend_s` 를 늘린다.
 - `library_meta.json` 의 `segments` 는 **npz(50 fps) 프레임 인덱스** `[start, end)` 다. 모션 서버가 이걸 읽는다.
 
 ### 3-2) csv → npz (Isaac FK)
@@ -237,8 +203,8 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
     --policy ~/g1_dance_deploy/policy_final.npz --motion /tmp/g1_static/static_library.npz \
     --library_meta /tmp/g1_static/static_library_meta.json --backend mujoco --fake_events 4 --hold_sec 2
 ```
-합격: exit 0, "판정: 서 있음", 이벤트 표의 heading 오차 ≈ 계획 허리각 − bearing (정지 라이브러리라 안 도는 게 정상.
-예: bearing 150 → turn_l180+wave_y-30 → −30−150 = −180).
+합격: exit 0, "판정: 서 있음", 이벤트 표의 heading 오차 ≈ −(계획 회전 bin) (정지 라이브러리라 안 도는 게 정상.
+예: bearing 150 → turn_l135+wave → −135). 정지 라이브러리엔 handshake/open_arms 가 없으므로 가짜 이벤트는 g1_face 만 고른다.
 2026-10-08 실측(구 turn_bin 규약, heading 오차 ≈ −bin 시절): 34.9 s 완주, 골반 최소 0.753 m, 오차 −45→+42.8° · +90→−91.2° · 0→0.0°.
 
 ### 5-1) 학습한 정책으로
@@ -263,7 +229,7 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
 |---|---|---|
 | 시나리오 완주 | **10/10 서 있음**, 골반 최소 > 0.6 m | 요약 `골반 높이 최소` |
 | 첫 반응 시간 | **≤ 1.5 s** | 이벤트 표의 act 수신 → 세그먼트 첫 프레임 지연 |
-| heading 오차 (동작 첫 프레임 torso yaw + 계획 허리각 − 목표) | 기록 (\|b\|≤75° 는 ±15° 안 기대, 75~120° 는 허리 클립 때문에 더 큼). 허리 추종 오차는 이 값에 안 들어간다 — `--viewer`/영상으로 확인 | 이벤트 표 |
+| heading 오차 (동작 첫 프레임 torso yaw − (수락 시 yaw + 계획 회전 bin)) = 회전 클립 정확도 | 기록. 방위 양자화 잔차(≤ ±22.5°)는 이 값에 안 들어간다 | 이벤트 표 |
 
 - 권장: 시드 하나로 끝내지 말고 `--fake_seed 1`, `--fake_seed 2` 로도 돌려 본다(이벤트 순서가 바뀐다).
 - sim2sim 의 첫 반응 시간은 **서버 내부 지연만**이다. 실기에서는 dwell 확정 → UDP(와이파이) 지연이 더해진다.
@@ -385,7 +351,7 @@ import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('12
 while True: print(s.recv(4096).decode())"
 ```
 
-태그가 한 장만 보여도 bearing 이 나온다(`min_tags_for_latch: 1`). 전부 안 보이면 `bearing_deg: null` → 허리 정면(`_y0`) 동작만.
+태그가 한 장만 보여도 bearing 이 나온다(`min_tags_for_latch: 1`). 전부 안 보이면 `bearing_deg: null` → 회전 없이 동작만.
 
 ---
 

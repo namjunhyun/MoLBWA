@@ -5,8 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "deploy"))
 
 from segment_player import SegmentPlayer  # noqa: E402
 
-SEGS = {"idle": (0, 10), "turn_l180": (10, 15), "wave_y0": (15, 18), "wave_y-30": (25, 28),
-        "handshake_y30": (18, 22), "open_arms_y0": (22, 25)}
+SEGS = {"idle": (0, 10), "turn_l135": (10, 15), "wave": (25, 28),
+        "handshake": (18, 22), "open_arms": (22, 25)}
 
 
 def act(seq, part="g1_face", bearing_deg=150):
@@ -28,7 +28,7 @@ def test_idle_loops():
 def test_act_turn_then_gesture_then_idle():
     p = SegmentPlayer(SEGS)
     run(p, 3)                                   # idle 중간
-    assert p.command(act(1))                    # 150° -> turn_l180 + wave_y-30
+    assert p.command(act(1))                    # 150° -> turn_l135 + wave
     states = []
     out = []
     for _ in range(5 + 3 + 1):
@@ -36,22 +36,22 @@ def test_act_turn_then_gesture_then_idle():
         states.append(p.state)
     assert out[0] == (10, True)                 # 다음 step 에서 즉시 turn 시작
     assert [k for k, _ in out[:5]] == list(range(10, 15))
-    assert out[5] == (25, True)                 # wave_y-30 시작
+    assert out[5] == (25, True)                 # wave 시작
     assert [k for k, _ in out[5:8]] == [25, 26, 27]
     assert out[8] == (0, True)                  # idle 복귀
     assert states == ["turning"] * 5 + ["acting"] * 3 + ["idle"]
     assert sum(f for _, f in out) == 3
 
 
-def test_waist_only_skips_turn():
+def test_small_bearing_skips_turn():
     p = SegmentPlayer(SEGS)
     p.step()
-    assert p.command(act(1, "g1_hand", 30))
+    assert p.command(act(1, "g1_hand", 20))
     assert p.step() == (18, True)
     assert p.state == "acting"
 
 
-def test_no_bearing_is_y0():
+def test_no_bearing_gesture_only():
     p = SegmentPlayer(SEGS)
     p.step()
     assert p.command(act(1, "g1_torso", None))
@@ -73,7 +73,7 @@ def test_seq_duplicate_and_old_ignored():
     p = SegmentPlayer(SEGS)
     p.step()
     assert p.command(act(5, bearing_deg=0))
-    run(p, 3 + 1)                               # wave_y0 3 + idle 복귀
+    run(p, 3 + 1)                               # wave 3 + idle 복귀
     assert p.state == "idle"
     assert not p.command(act(5, bearing_deg=0))
     assert not p.command(act(3, bearing_deg=0))
@@ -99,8 +99,9 @@ def test_unknown_part_rejected():
 def test_garbage_rejected():
     p = SegmentPlayer(SEGS)
     assert not p.command(None)                  # decode 실패
-    assert not p.command(act(1, bearing_deg=60))    # wave_y60 이 라이브러리에 없음
-    assert not p.command(act(1, bearing_deg=-150))  # turn 은 있어도 wave_y30 이 없으면 통째로 거부
+    assert not p.command(act(1, bearing_deg=60))    # turn_l45 가 라이브러리에 없음 -> 통째로 거부
+    p2 = SegmentPlayer({"idle": (0, 10), "turn_l135": (10, 15)})
+    assert not p2.command(act(1))                   # turn 은 있어도 wave 가 없으면 통째로 거부
     assert not p.command(act("7"))
     assert not p.command(act(True))
     assert not p.command(act(1, bearing_deg=0.0))   # float 거부 (규약은 int|null)

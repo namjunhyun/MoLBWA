@@ -1,4 +1,4 @@
-"""모션 라이브러리 재생 커서: idle 반복 -> act 명령 -> plan() 세그먼트들(turn_l180?, 동작_y<허리>) -> idle.
+"""모션 라이브러리 재생 커서: idle 반복 -> act 명령 -> plan() 세그먼트들(turn_l*/turn_r*?, 동작) -> idle.
 
 라이브러리 npz 는 50 fps = 제어 50 Hz 라서 step 1회 = 1프레임. 세그먼트 경계는
 library_meta.json 의 npz 프레임 인덱스 [start, end). Jetson(Python 3.8)에도 올라간다.
