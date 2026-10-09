@@ -54,7 +54,7 @@ UNO Q(Qualcomm QRB2210, Debian)는 공식 문서상 **4-lane MIPI-CSI-2 + ISP 2�
 | 세그먼트 (= 파일 이름) | 출처 |
 |---|---|
 | `idle` | `make_idle_csv.py` 합성 대기 자세 (부록) |
-| `turn_l45/90/135/180`, `turn_r45/90/135` | Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`, 다리 12관절)으로 MuJoCo 에서 녹화 — `~/molbwa_g1/record_loco_turn.py`. yaw P 제어, wz ≤ 0.6 rad/s, SDK 보행처럼 발을 디디며 돌고 두 발 지지 위상에서 끝난다. 허리·팔은 트래킹 대기 자세 |
+| `turn_l45/90/135/180`, `turn_r45/90/135` | Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`, 다리 12관절)으로 MuJoCo 에서 녹화 — `g1/motion/record_loco_turn.py`(`PYTHONPATH=~/unitree_rl_gym`, isaaclab conda). yaw P 제어, wz ≤ 0.6 rad/s, SDK 보행처럼 발을 디디며 돌고 두 발 지지 위상에서 끝난다. 허리·팔은 트래킹 대기 자세 |
 | `wave` | AMASS_Retargeted_for_G1 의 BMLmovi `Subject_48_F_2` → `amass_g1_to_csv.py`. **원본 AMASS 는 비상업·연구용 라이선스** |
 
 `handshake`/`open_arms` 는 아직 없다(보류). 라이브러리에 없으면 서버가 경고하고 그 명령은 거부한다. 나중에 추가할 때는 접미사 없이 그 이름 그대로 클립을 넣는다.

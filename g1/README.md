@@ -45,7 +45,7 @@
 | UDP 포트 | 브리지→노드 **55057**, 노드→Jetson **55070**, Jetson→노드 **55071** (기존 55055/55056/55059 는 안 건드림) |
 | 부위 → 동작 | `g1_face`→`wave`, `g1_hand`→`handshake`, `g1_torso`→`open_arms`. 겹치면 hand > face > torso |
 | 방향 맞추기 `plan()` | bearing b(도, **+ 가 왼쪽**, (−180,180] 로 감음)를 원형 거리로 가장 가까운 bin {0, ±45, ±90, ±135, 180} 로 양자화(±180 부근은 180, 잔차 ≤ ±22.5°). bin ≠ 0 → 전신 제자리 회전 `turn_l{b}`/`turn_r{−b}` 뒤 동작, 0 이나 null → 동작만. 동작은 사용자를 마주본 채 **허리 변형 없이** 재생 |
-| 세그먼트 | `idle`, `turn_l45/90/135/180`, `turn_r45/90/135`, `wave` — 9개. 회전 = Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`)을 MuJoCo 에서 돌려 녹화(`~/molbwa_g1/record_loco_turn.py`: yaw P 제어, wz ≤ 0.6 rad/s, 두 발 지지 위상에서 끝, 앞뒤 1.5 s 정지 패딩). wave = AMASS_Retargeted_for_G1 BMLmovi 48_F_2(**연구용 라이선스**). 라이브러리는 blend 1.5 s + `--seam_joint 0.2`(보행 자체가 ~0.18 rad/프레임 — 원본 클립 최대값과 같음 확인) |
+| 세그먼트 | `idle`, `turn_l45/90/135/180`, `turn_r45/90/135`, `wave` — 9개. 회전 = Unitree 사전학습 보행 정책(unitree_rl_gym `motion.pt`)을 MuJoCo 에서 돌려 녹화(`g1/motion/record_loco_turn.py`(`PYTHONPATH=~/unitree_rl_gym`, isaaclab conda): yaw P 제어, wz ≤ 0.6 rad/s, 두 발 지지 위상에서 끝, 앞뒤 1.5 s 정지 패딩). wave = AMASS_Retargeted_for_G1 BMLmovi 48_F_2(**연구용 라이선스**). 라이브러리는 blend 1.5 s + `--seam_joint 0.2`(보행 자체가 ~0.18 rad/프레임 — 원본 클립 최대값과 같음 확인) |
 | 모션 csv | 36열 = root pos 3 + root quat **xyzw** 4 + 관절 29, 30 fps (`csv_to_npz.py` 가 wxyz·50 fps 로 바꾼다) |
 | 정책 관측 | **154차원**(Wo-State-Estimation)만. 160차원 정책은 실행 거부 |
 | 메시지 | bridge `{t, label, bearing_deg, valid}` · cmd `{seq, cmd: act\|ping, part, bearing_deg: int\|null}` · state `{state: idle\|turning\|acting, seq}` |
