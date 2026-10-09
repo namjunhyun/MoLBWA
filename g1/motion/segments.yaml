@@ -1,16 +1,32 @@
 # 모션 라이브러리 세그먼트 (이 순서대로 이어 붙임). csv 경로는 이 파일 기준 상대경로.
 # 첫 세그먼트는 idle (첫 프레임 = 공통 대기 자세).
-# 사용자 쪽은 전신 제자리 회전 클립(turn_l*/turn_r*, + = 왼쪽, 45° 간격)으로 돌아 마주본 뒤 동작을 허리 변형 없이 재생.
+# 사용자 쪽은 전신 제자리 회전 클립(turn_l*/turn_r*, + = 왼쪽, 15° 간격, g1_protocol.TURN_BINS)으로 돌아 마주본 뒤 동작을 허리 변형 없이 재생.
 # 동작은 지금 wave 만 있다. handshake/open_arms 는 나중에 이름 그대로 추가.
 fps: 30
 blend_s: 0.5
 segments:
   - {name: idle, csv: clips/idle.csv}
+  - {name: turn_l15, csv: clips/turn_l15.csv}
+  - {name: turn_l30, csv: clips/turn_l30.csv}
   - {name: turn_l45, csv: clips/turn_l45.csv}
+  - {name: turn_l60, csv: clips/turn_l60.csv}
+  - {name: turn_l75, csv: clips/turn_l75.csv}
   - {name: turn_l90, csv: clips/turn_l90.csv}
+  - {name: turn_l105, csv: clips/turn_l105.csv}
+  - {name: turn_l120, csv: clips/turn_l120.csv}
   - {name: turn_l135, csv: clips/turn_l135.csv}
+  - {name: turn_l150, csv: clips/turn_l150.csv}
+  - {name: turn_l165, csv: clips/turn_l165.csv}
   - {name: turn_l180, csv: clips/turn_l180.csv}
+  - {name: turn_r15, csv: clips/turn_r15.csv}
+  - {name: turn_r30, csv: clips/turn_r30.csv}
   - {name: turn_r45, csv: clips/turn_r45.csv}
+  - {name: turn_r60, csv: clips/turn_r60.csv}
+  - {name: turn_r75, csv: clips/turn_r75.csv}
   - {name: turn_r90, csv: clips/turn_r90.csv}
+  - {name: turn_r105, csv: clips/turn_r105.csv}
+  - {name: turn_r120, csv: clips/turn_r120.csv}
   - {name: turn_r135, csv: clips/turn_r135.csv}
+  - {name: turn_r150, csv: clips/turn_r150.csv}
+  - {name: turn_r165, csv: clips/turn_r165.csv}
   - {name: wave, csv: clips/wave.csv}

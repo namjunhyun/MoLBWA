@@ -124,8 +124,9 @@ def _attach(clip, yaw_end, xy_end):
     return out
 
 
-def build_library(clips: dict, fps: int = 30, blend_s: float = 0.5):
-    """clips 는 순서대로 이어 붙인다(dict 삽입 순서). 첫 클립은 idle 이어야 한다. -> (library (N,36), meta)."""
+def build_library(clips: dict, fps: int = 30, blend_s: float = 0.5, blend_by_seg: dict | None = None):
+    """clips 는 순서대로 이어 붙인다(dict 삽입 순서). 첫 클립은 idle 이어야 한다. -> (library (N,36), meta).
+    blend_by_seg: 세그먼트별 블렌드 초(없으면 blend_s). 모캡 동작처럼 대기자세와 많이 다른 클립만 길게 준다."""
     if not clips or next(iter(clips)) != "idle":
         raise ValueError("첫 세그먼트는 idle 이어야 함 (대기 자세 기준)")
     nb = int(round(blend_s * fps))
@@ -135,11 +136,13 @@ def build_library(clips: dict, fps: int = 30, blend_s: float = 0.5):
     stand_tilt = quat_mul(yaw_quat(-quat_yaw(q0)), q0)  # roll·pitch 만 남김
     stand_z = idle0[2]
 
-    parts, seg_csv, n = [], {}, 0
+    parts, seg_csv, n, nb_seg = [], {}, 0, {}
     for name, clip in clips.items():
         clip = np.array(clip, dtype=float)
         clip[:, 3:7] /= np.linalg.norm(clip[:, 3:7], axis=1, keepdims=True)
-        clip = _blend_to_standby(clip, stand_joints, stand_tilt, stand_z, nb)
+        nb_i = int(round((blend_by_seg or {}).get(name, blend_s) * fps))
+        nb_seg[name] = nb_i
+        clip = _blend_to_standby(clip, stand_joints, stand_tilt, stand_z, nb_i)
         if parts:
             clip = _attach(clip, quat_yaw(parts[-1][-1, 3:7]), parts[-1][-1, :2])
         parts.append(clip)
@@ -153,6 +156,7 @@ def build_library(clips: dict, fps: int = 30, blend_s: float = 0.5):
         "fps_csv": fps,
         "fps_npz": FPS_NPZ,
         "blend_frames_csv": nb,
+        "blend_frames_csv_by_seg": nb_seg,
         "segments": segs,
         "segments_csv": seg_csv,
         "turn_bins": {k: turn_bin_of(k) for k in clips if turn_bin_of(k) is not None},
@@ -162,10 +166,13 @@ def build_library(clips: dict, fps: int = 30, blend_s: float = 0.5):
 
 def seam_report(lib, meta) -> dict:
     """이음새(세그먼트 경계 ± 블렌드 구간) 안의 프레임 간 최대 점프. 클립 본체의 빠른 동작은 세지 않는다."""
-    nb = meta["blend_frames_csv"]
+    by = meta.get("blend_frames_csv_by_seg", {})
     rep = {"joint": 0.0, "root": 0.0, "yaw": 0.0, "worst_seam": None}
-    for name, (b, _) in list(meta["segments_csv"].items())[1:]:
-        w = lib[max(b - nb - 1, 0):min(b + nb + 2, len(lib))]
+    names = list(meta["segments_csv"])
+    for i, (name, (b, _)) in enumerate(list(meta["segments_csv"].items())[1:], start=1):
+        nb_l = by.get(names[i - 1], meta["blend_frames_csv"])   # 앞 세그먼트 끝 블렌드
+        nb_r = by.get(name, meta["blend_frames_csv"])           # 이 세그먼트 시작 블렌드
+        w = lib[max(b - nb_l - 1, 0):min(b + nb_r + 2, len(lib))]
         j = float(np.max(np.abs(np.diff(w[:, 7:], axis=0))))
         r = float(np.max(np.linalg.norm(np.diff(w[:, :3], axis=0), axis=1)))
         y = float(np.max(np.abs(wrap(np.diff(quat_yaw(w[:, 3:7]))))))
@@ -195,7 +202,8 @@ def main(argv=None) -> int:
         if s["name"] in clips:
             raise ValueError(f"세그먼트 중복: {s['name']}")
         clips[s["name"]] = load_csv(os.path.join(base, s["csv"]))  # 없는 파일은 그대로 예외 (조용히 건너뛰지 않음)
-    lib, meta = build_library(clips, fps=int(cfg.get("fps", 30)), blend_s=float(cfg.get("blend_s", 0.5)))
+    by = {s["name"]: float(s["blend_s"]) for s in cfg["segments"] if "blend_s" in s}
+    lib, meta = build_library(clips, fps=int(cfg.get("fps", 30)), blend_s=float(cfg.get("blend_s", 0.5)), blend_by_seg=by)
     rep = seam_report(lib, meta)
     print(json.dumps({"frames_csv": len(lib), "segments": meta["segments"], "seam": rep}, indent=1))
 

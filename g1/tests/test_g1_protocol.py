@@ -9,11 +9,11 @@ from g1_protocol import decode, encode, plan  # noqa: E402
 
 
 @pytest.mark.parametrize("b,expect", [
-    (0, ["wave"]), (22, ["wave"]), (-22, ["wave"]), (23, ["turn_l45", "wave"]),
-    (-100, ["turn_r90", "wave"]), (90, ["turn_l90", "wave"]), (-45, ["turn_r45", "wave"]),
+    (0, ["wave"]), (7, ["wave"]), (-7, ["wave"]), (8, ["turn_l15", "wave"]),
+    (-100, ["turn_r105", "wave"]), (90, ["turn_l90", "wave"]), (-45, ["turn_r45", "wave"]),
     (179, ["turn_l180", "wave"]), (-179, ["turn_l180", "wave"]), (180, ["turn_l180", "wave"]),
-    (-180, ["turn_l180", "wave"]), (-158, ["turn_l180", "wave"]), (-157, ["turn_r135", "wave"]),
-    (150, ["turn_l135", "wave"]), (360 + 50, ["turn_l45", "wave"]), (None, ["wave"]),
+    (-180, ["turn_l180", "wave"]), (-173, ["turn_l180", "wave"]), (-172, ["turn_r165", "wave"]),
+    (152, ["turn_l150", "wave"]), (360 + 50, ["turn_l45", "wave"]), (None, ["wave"]),
 ])
 def test_plan(b, expect):
     assert plan("g1_face", b) == expect
@@ -21,6 +21,8 @@ def test_plan(b, expect):
 
 def test_plan_parts_and_bad_part():
     assert plan("g1_hand", 90) == ["turn_l90", "handshake"]
+    from g1_protocol import TURN_BINS
+    assert len(TURN_BINS) == 24 and len(set(TURN_BINS)) == 24
     assert plan("g1_torso", None) == ["open_arms"]
     with pytest.raises(ValueError):
         plan("g1_foot", 0)

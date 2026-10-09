@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "deploy"))
 
 from segment_player import SegmentPlayer  # noqa: E402
 
-SEGS = {"idle": (0, 10), "turn_l135": (10, 15), "wave": (25, 28),
+SEGS = {"idle": (0, 10), "turn_l150": (10, 15), "wave": (25, 28),
         "handshake": (18, 22), "open_arms": (22, 25)}
 
 
@@ -28,7 +28,7 @@ def test_idle_loops():
 def test_act_turn_then_gesture_then_idle():
     p = SegmentPlayer(SEGS)
     run(p, 3)                                   # idle 중간
-    assert p.command(act(1))                    # 150° -> turn_l135 + wave
+    assert p.command(act(1))                    # 150° -> turn_l150 + wave
     states = []
     out = []
     for _ in range(5 + 3 + 1):
@@ -46,7 +46,7 @@ def test_act_turn_then_gesture_then_idle():
 def test_small_bearing_skips_turn():
     p = SegmentPlayer(SEGS)
     p.step()
-    assert p.command(act(1, "g1_hand", 20))
+    assert p.command(act(1, "g1_hand", 5))
     assert p.step() == (18, True)
     assert p.state == "acting"
 
@@ -100,7 +100,7 @@ def test_garbage_rejected():
     p = SegmentPlayer(SEGS)
     assert not p.command(None)                  # decode 실패
     assert not p.command(act(1, bearing_deg=60))    # turn_l45 가 라이브러리에 없음 -> 통째로 거부
-    p2 = SegmentPlayer({"idle": (0, 10), "turn_l135": (10, 15)})
+    p2 = SegmentPlayer({"idle": (0, 10), "turn_l150": (10, 15)})
     assert not p2.command(act(1))                   # turn 은 있어도 wave 가 없으면 통째로 거부
     assert not p.command(act("7"))
     assert not p.command(act(True))

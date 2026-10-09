@@ -18,7 +18,8 @@ PORT_CMD = 55070
 PORT_STATE = 55071
 
 PART_TO_SEGMENT = {"g1_face": "wave", "g1_hand": "handshake", "g1_torso": "open_arms"}
-TURN_BINS = (0, 45, 90, 135, 180, -45, -90, -135)   # 제자리 회전 클립 각도(+ = 왼쪽). 잔차 최대 ±22.5°
+TURN_STEP = 15   # 2026-10-09: 45 → 15 (사용자 좌표에 따라 여러 각도로). 잔차 최대 ±7.5°
+TURN_BINS = tuple(range(0, 181, TURN_STEP)) + tuple(-a for a in range(TURN_STEP, 180, TURN_STEP))   # + = 왼쪽, 180 은 왼쪽 하나
 
 
 def _wrap(deg: float) -> float:
@@ -28,7 +29,7 @@ def _wrap(deg: float) -> float:
 
 
 def plan(part: str, bearing_deg: float | None) -> list:
-    """부위 + 사용자 방위(+ = 왼쪽) -> 재생할 세그먼트 목록. 예: ("g1_face", 150) -> ["turn_l135", "wave"].
+    """부위 + 사용자 방위(+ = 왼쪽) -> 재생할 세그먼트 목록. 예: ("g1_face", 152) -> ["turn_l150", "wave"].
     방위를 원형 거리로 가장 가까운 TURN_BINS 로 양자화해 전신 제자리 회전 클립을 먼저 틀고,
     사용자를 마주본 채 동작을 허리 변형 없이 재생한다. 0 bin 이거나 방위가 없으면 동작만."""
     g = PART_TO_SEGMENT.get(part)

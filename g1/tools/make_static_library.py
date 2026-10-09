@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -21,8 +22,10 @@ os.makedirs(args.out, exist_ok=True)
 
 M = dict(np.load(args.motion))
 L0 = M["joint_pos"].shape[0]
-segs = ([("idle", 150)] + [(f"turn_{d}{a}", 100) for d in "lr" for a in (45, 90, 135)]
-        + [("turn_l180", 100), ("wave", 120)])
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from g1_protocol import TURN_BINS  # noqa: E402
+segs = ([("idle", 150)] + [(f"turn_l{b}" if b > 0 else f"turn_r{-b}", 100) for b in TURN_BINS if b != 0]
+        + [("wave", 120)])
 N = sum(n for _, n in segs)
 out = {}
 for k, v in M.items():

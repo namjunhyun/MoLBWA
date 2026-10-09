@@ -19,6 +19,13 @@ da = np.array(cfg["default_angles"], np.float32); cs = np.array(cfg["cmd_scale"]
 na, no, sdt, dec = cfg["num_actions"], cfg["num_obs"], cfg["simulation_dt"], cfg["control_decimation"]
 meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")))
 STANDBY = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
+# 보행정책 기본자세(무릎 0.3)는 트래킹 대기자세(무릎 0.669)보다 펴져 있어, 그대로 쓰면 회전 앞뒤로 키가 출렁인다.
+# 다리 관절에 두 기본자세 차이를 더해 같은 높이로 웅크린 채 돌게 하고, 발이 바닥에 닿도록 골반을 낮춘다
+# (MuJoCo FK: 대기자세에서 발목이 골반 기준 2.75 cm 높다).
+RLGYM_DEFAULT = {"hip_pitch": -0.1, "knee": 0.3, "ankle_pitch": -0.2}
+LEG_OFFSET = {f"{s}_{j}_joint": STANDBY[f"{s}_{j}_joint"] - v for s in ("left", "right") for j, v in RLGYM_DEFAULT.items()}
+PELVIS_DROP = 0.0275
+PRE_STAND_S, POST_STAND_S = 0.3, 0.4    # 회전 전후 대기(예전 1.0/1.5 s 는 '멈췄다 홱 도는' 인상)
 
 
 def gvec(q):
@@ -45,8 +52,8 @@ def record(target_deg, kp=1.5, wmax=0.6):
         t = i * sdt
         yaw = yaw_of(d.qpos[3:7])
         err = (tgt_yaw - yaw + np.pi) % (2 * np.pi) - np.pi
-        cmd[2] = 0.0 if t < 1.0 else np.clip(kp * err, -wmax, wmax)
-        if t_done is None and t > 1.0 and abs(err) < np.radians(3):
+        cmd[2] = 0.0 if t < PRE_STAND_S else np.clip(kp * err, -wmax, wmax)
+        if t_done is None and t > PRE_STAND_S and abs(err) < np.radians(3):
             t_done = t
         qj = (d.qpos[7:] - da) * cfg["dof_pos_scale"]; dqj = d.qvel[6:] * cfg["dof_vel_scale"]
         ph = (t % 0.8) / 0.8
@@ -59,7 +66,7 @@ def record(target_deg, kp=1.5, wmax=0.6):
         if d.qpos[2] < 0.4:
             raise RuntimeError(f"turn {target_deg}: 넘어짐 t={t:.1f}")
         # 도착 후 1.5 s 서 있고, 보행 위상이 두 발 지지(위상 0 근처)일 때 끝낸다
-        if t_done is not None and t > t_done + 1.5 and ph < 0.03:
+        if t_done is not None and t > t_done + POST_STAND_S and ph < 0.03:
             break
     ts = np.array([r[0] for r in rec]); pos = np.array([r[1] for r in rec]); quat = np.array([r[2] for r in rec]); leg = np.array([r[3] for r in rec])
     t30 = np.arange(0, ts[-1] - ts[0] + 1e-9, 1 / 30) + ts[0]
@@ -72,14 +79,17 @@ def record(target_deg, kp=1.5, wmax=0.6):
     qi = np.stack([np.interp(t30, ts, quat[:, c]) for c in range(4)], 1); qi /= np.linalg.norm(qi, axis=1, keepdims=True)
     rows[:, 3:7] = qi[:, [1, 2, 3, 0]]
     for j, n in enumerate(CSV_JOINTS):
-        rows[:, 7 + j] = np.interp(t30, ts, leg[:, names.index(n)]) if n in names else STANDBY[n]
+        rows[:, 7 + j] = (np.interp(t30, ts, leg[:, names.index(n)]) + LEG_OFFSET.get(n, 0.0)) if n in names else STANDBY[n]
+    rows[:, 2] -= PELVIS_DROP
     fin = np.degrees(yaw_of(quat[-1]))
     drift = np.linalg.norm(pos[:, :2] - pos[0, :2], axis=1).max()
     return rows, fin, drift, ts[-1], t_done
 
 
-for name, deg in [("turn_l45", 45), ("turn_l90", 90), ("turn_l135", 135), ("turn_l180", 180),
-                  ("turn_r45", -45), ("turn_r90", -90), ("turn_r135", -135)]:
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from g1_protocol import TURN_BINS  # noqa: E402
+for deg in [b for b in TURN_BINS if b != 0]:
+    name = f"turn_l{deg}" if deg > 0 else f"turn_r{-deg}"
     rows, fin, drift, T, td = record(deg)
     np.savetxt(f"{OUT}/{name}.csv", rows, delimiter=",", fmt="%.9f")
     print(f"{name}: 목표 {deg:+4d}° 최종 {fin:+7.1f}° · 도착 {td:.1f}s · 길이 {T:.1f}s · 이동 최대 {drift*100:.1f} cm")

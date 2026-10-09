@@ -109,3 +109,13 @@ def test_cli_exit1_on_bad_seam(tmp_path):
     assert run(0.5).returncode == 0
     bad = run(0)
     assert bad.returncode == 1, bad.stdout + bad.stderr
+
+
+
+def test_per_segment_blend():
+    """세그먼트별 blend_s: 지정한 세그먼트만 블렌드가 길어지고 meta 에 기록되며, 이음새는 여전히 연속."""
+    c = clips()
+    lib, meta = build_library(c, fps=30, blend_s=0.5, blend_by_seg={"bow": 1.0})
+    by = meta["blend_frames_csv_by_seg"]
+    assert by["bow"] == 30 and by["idle"] == 15 and by["turn_l90"] == 15
+    assert seam_report(lib, meta)["joint"] <= 0.05
