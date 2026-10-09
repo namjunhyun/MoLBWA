@@ -1,0 +1,22 @@
+# 데모 2(G1 교감) 브리지 설정. anchor 블록은 arm/config.yaml 과 같은 형식(arm/anchor.py 가 읽는다).
+anchor:
+  tag_family: tag36h11
+  tag_size_m: 0.10                  # MEASURE: 검은 테두리 바깥 한 변
+  # G1 몸통 4면, torso_link 기준 [m] (+x 정면, +y 왼쪽, +z 위). MEASURE: 실측 전 자리값.
+  # right/up = 그 태그를 정면에서 보는 사람 기준 오른쪽/위. 법선(right x up)이 몸 바깥을 향한다.
+  bundle:
+    - {id: 10, pos: [ 0.10,  0.00, 0.20], right: [ 0,  1, 0], up: [0, 0, 1]}   # 앞
+    - {id: 11, pos: [ 0.00,  0.11, 0.20], right: [-1,  0, 0], up: [0, 0, 1]}   # 왼
+    - {id: 12, pos: [ 0.00, -0.11, 0.20], right: [ 1,  0, 0], up: [0, 0, 1]}   # 오른
+    - {id: 13, pos: [-0.10,  0.00, 0.20], right: [ 0, -1, 0], up: [0, 0, 1]}   # 뒤
+  ambiguity_max_m: 0.02
+  min_tags_for_latch: 1             # 정면 응시에선 한 장만 보인다 (Review Focus #4)
+  # ponytail: 단일 태그 flip 허용 — bin 이 45° 라 정면 flip 오차는 작다. 판정 실패율 높으면 면당 2장+비동일평면으로
+  require_noncoplanar: false
+  max_reproj_px: 3.0
+
+yolo:
+  python: "~/yolo-env/bin/python"
+  model: "~/yolo-env/g1_parts.pt"
+  conf: 0.25
+  classes: [g1_face, g1_hand, g1_torso]

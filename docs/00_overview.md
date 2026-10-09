@@ -48,3 +48,11 @@
 2. **IR 밴드패스 필터 낀 동공 검출 안정성**(docs/01).
 
 이 둘만 0~1단계에서 확인되면 나머지는 엔지니어링.
+
+## 데모 2: G1 휴머노이드 정서 교감
+같은 시선 파이프라인(시선 픽셀 UDP 55056 + 씬 영상)을 로봇팔 대신 Unitree G1 에 잇는다. 사용자가 G1 의
+얼굴 / 손 / 몸통을 3초 응시하면, 데스크탑 브리지가 YOLO 로 응시 부위를, 몸통 4면 AprilTag 번들로 사용자 방위를 구하고,
+ROS 2 노드가 라벨 dwell 로 확정해 Jetson 에 명령(UDP 55070)을 보낸다. Jetson 온보드 50 Hz 모션 서버가 BeyondMimic
+트래킹 정책 1개로 idle → 제자리 회전 → 인사 / 악수 자세 / 팔 벌리기 → idle 을 재생한다(정책→모터는 와이파이를 지나지 않는다).
+구조·파일은 [`g1/README.md`](../g1/README.md), 촬영→학습→sim2sim→실기 절차는 [`g1/RUNBOOK.md`](../g1/RUNBOOK.md),
+설계는 [`superpowers/specs/2026-10-08-g1-emotional-demo-design.md`](superpowers/specs/2026-10-08-g1-emotional-demo-design.md).

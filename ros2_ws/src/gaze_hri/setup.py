@@ -31,6 +31,7 @@ setup(
             "control_panel = gaze_hri.control_panel_node:main",
             "calibrate_world_to_base = gaze_hri.calibrate_world_to_base:main",
             "calib_tf_publisher = gaze_hri.calib_tf_publisher:main",
+            "g1_interaction = gaze_hri.g1_interaction_node:main",
         ],
     },
 )
