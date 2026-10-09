@@ -30,13 +30,13 @@ def test_plan_parts_and_bad_part():
         plan(None, 0)
 
 
-def test_segments_yaml_covers_face_plan():
-    """segments.yaml 이 g1_face(wave) 의 plan() 출력 + idle 과 정확히 같아야 촬영 목록이 빠지지 않는다.
-    handshake/open_arms 는 아직 라이브러리에 없다(보류) — 추가하면 그 부위도 여기 넣는다."""
+def test_segments_yaml_covers_face_and_hand_plan():
+    """segments.yaml 이 g1_face(wave)·g1_hand(handshake) 의 plan() 출력 + idle 과 정확히 같아야 한다.
+    open_arms(g1_torso) 는 보류 — 추가하면 그 부위도 여기 넣는다."""
     import yaml
     path = os.path.join(os.path.dirname(__file__), "..", "motion", "segments.yaml")
     names = {s["name"] for s in yaml.safe_load(open(path))["segments"]}
-    need = {n for b in [None] + list(range(-180, 181)) for n in plan("g1_face", b)}
+    need = {n for part in ("g1_face", "g1_hand") for b in [None] + list(range(-180, 181)) for n in plan(part, b)}
     assert names == need | {"idle"}
 
 

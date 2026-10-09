@@ -15,8 +15,9 @@ S="env -u PYTHONPATH -u LD_LIBRARY_PATH nice $HOME/miniconda3/envs/g1deploy/bin/
 O="$ART/${TAG}_$IT"
 $S --fake_events 1 --fake_bearing 37 --sim_cam_az 217 --sim_video ${O}_demo37.mp4 --log_csv ${O}_demo37.csv > ${O}_demo37.log 2>&1
 $S --fake_events 1 --fake_bearing -110 --sim_cam_az 70 --sim_video ${O}_demo-110.mp4 --log_csv ${O}_demo-110.csv > ${O}_demo-110.log 2>&1
+$S --fake_events 1 --fake_part g1_hand --fake_bearing -60 --sim_cam_az 120 --sim_video ${O}_shake-60.mp4 --log_csv ${O}_shake-60.csv > ${O}_shake-60.log 2>&1
 $S --fake_events 6 --fake_seed 1 > ${O}_rand.log 2>&1
 $S --run_sec 25 --sim_push 100 --sim_push_every 4 > ${O}_push100.log 2>&1
-for k in demo37 demo-110 rand push100; do
+for k in demo37 demo-110 shake-60 rand push100; do
   echo "== $TAG $IT $k"; grep -E "판정|중단|\[act\]|heading 오차\||밀기 [0-9]|토크 사용률" ${O}_$k.log | head -10
 done

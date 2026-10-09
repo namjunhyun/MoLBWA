@@ -25,7 +25,7 @@ L0 = M["joint_pos"].shape[0]
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from g1_protocol import TURN_BINS  # noqa: E402
 segs = ([("idle", 150)] + [(f"turn_l{b}" if b > 0 else f"turn_r{-b}", 100) for b in TURN_BINS if b != 0]
-        + [("wave", 120)])
+        + [("wave", 120), ("handshake", 120)])
 N = sum(n for _, n in segs)
 out = {}
 for k, v in M.items():

@@ -71,6 +71,8 @@ AP.add_argument("--fake_events", type=int, default=0,
 AP.add_argument("--fake_seed", type=int, default=0, help="--fake_events 의 난수 씨앗")
 AP.add_argument("--fake_bearing", type=int, default=None,
                 help="mujoco 전용: 가짜 이벤트의 착용자 방위를 이 값(도, + = 왼쪽)으로 고정 — 시연 영상용")
+AP.add_argument("--fake_part", default=None, choices=["g1_face", "g1_hand", "g1_torso"],
+                help="mujoco 전용: 가짜 이벤트의 응시 부위 고정 — 시연 영상용")
 AP.add_argument("--sim_cam_az", type=float, default=135.0,
                 help="--sim_video 카메라 방위각(도). 착용자 자리에서 보려면 180 + 착용자 방위")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -863,7 +865,7 @@ for t in itertools.count():
         except OSError:              # BlockingIOError = 비었다. 그 밖의 소켓 오류도 제어를 멈추지 않는다
             break
     if args.fake_events and len(events) < args.fake_events and t >= fake_next and player.state == "idle":
-        msgs.append({"seq": player.last_seq + 1, "cmd": "act", "part": str(fake_rng.choice(fake_parts)),
+        msgs.append({"seq": player.last_seq + 1, "cmd": "act", "part": args.fake_part or str(fake_rng.choice(fake_parts)),
                      "bearing_deg": args.fake_bearing if args.fake_bearing is not None
                      else (None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181)))})
         fake_next = t + int(6.0 / CTRL_DT)
