@@ -1,4 +1,4 @@
-"""모션 라이브러리 재생 커서: idle 반복 -> act 명령 -> turn_<bin> -> 동작 -> idle.
+"""모션 라이브러리 재생 커서: idle 반복 -> act 명령 -> plan() 세그먼트들(turn_l180?, 동작_y<허리>) -> idle.
 
 라이브러리 npz 는 50 fps = 제어 50 Hz 라서 step 1회 = 1프레임. 세그먼트 경계는
 library_meta.json 의 npz 프레임 인덱스 [start, end). Jetson(Python 3.8)에도 올라간다.
@@ -9,10 +9,10 @@ import os
 import sys
 
 try:                                    # Jetson: 같은 폴더에 scp 됨
-    from g1_protocol import PART_TO_SEGMENT, turn_segment
+    from g1_protocol import plan
 except ImportError:                     # 저장소: g1/deploy/ 의 부모가 g1/
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from g1_protocol import PART_TO_SEGMENT, turn_segment
+    from g1_protocol import plan
 
 
 class SegmentPlayer:
@@ -56,16 +56,14 @@ class SegmentPlayer:
             return False
         if self.segment != "idle" or self._queue:
             return False
-        gesture = PART_TO_SEGMENT.get(msg.get("part"))
-        turn_bin = msg.get("turn_bin")
-        if type(turn_bin) is not int:           # 0.0·False 가 0 으로 통과하지 않게
+        bearing = msg.get("bearing_deg")
+        if bearing is not None and type(bearing) is not int:   # float·bool 거부 (bool 은 int 의 하위형)
             return False
         try:
-            turn = turn_segment(turn_bin)
-        except ValueError:
+            queue = plan(msg.get("part"), bearing)
+        except (ValueError, TypeError):
             return False
-        queue = [n for n in (turn, gesture) if n is not None]
-        if gesture is None or any(n not in self.segments for n in queue):
+        if any(n not in self.segments for n in queue):
             return False
         self._queue = queue
         self._jump = True

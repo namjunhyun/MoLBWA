@@ -2,7 +2,7 @@
 """G1 모션 서버 — 모션 라이브러리 + 트래킹 정책 1개 (Wo-State-Estimation, 관측 154차원).
 
 ~/g1_dance_deploy/deploy_g1_tracking.py(실기 검증본)를 복사해 확장했다. 바뀐 것:
-  * 고정 모션 1회 재생 대신 SegmentPlayer 커서로 idle 반복 -> act 명령 -> turn_<bin> -> 동작 -> idle.
+  * 고정 모션 1회 재생 대신 SegmentPlayer 커서로 idle 반복 -> act 명령 -> plan() 세그먼트(turn_l180?, 동작_y<허리>) -> idle.
   * 세그먼트 첫 프레임마다 yaw_off 를 재정렬한다(원본은 시작 시 1회).
   * UDP 명령 수신(--cmd_port, 비차단) / 5 Hz 상태 송신(--state_host:--state_port).
     명령 채널이 끊기면 idle 을 계속 재생한다 — 댐핑하지 않는다(정책을 끄면 넘어진다).
@@ -31,7 +31,7 @@ import numpy as np
 
 # segment_player 가 g1_protocol 을 같은 폴더(Jetson) 또는 부모 폴더(저장소)에서 찾는다.
 from segment_player import SegmentPlayer
-from g1_protocol import PART_TO_SEGMENT, PORT_CMD, PORT_STATE, TURN_BINS, decode, encode, turn_segment
+from g1_protocol import PART_TO_SEGMENT, PORT_CMD, PORT_STATE, decode, encode, plan
 
 
 class _SafeOut:
@@ -66,7 +66,7 @@ AP.add_argument("--state_port", type=int, default=PORT_STATE)
 AP.add_argument("--run_sec", type=float, default=0.0,
                 help="세그먼트 재생 시간. 0 이면 정지 신호까지 무한. 끝나면 유지(--hold_sec) 단계로 간다")
 AP.add_argument("--fake_events", type=int, default=0,
-                help="mujoco 백엔드 전용: 6 초 간격으로 무작위 part/bin act 를 N 번 내부 주입하고, "
+                help="mujoco 백엔드 전용: 6 초 간격으로 무작위 part/bearing act 를 N 번 내부 주입하고, "
                      "마지막 동작이 끝나 idle 로 돌아오면 재생을 끝낸다. 요약에 이벤트별 heading 오차·지연 표")
 AP.add_argument("--fake_seed", type=int, default=0, help="--fake_events 의 난수 씨앗")
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -231,10 +231,10 @@ SEGS = {n: tuple(v) for n, v in LIB["segments"].items()}
 _bad = [n for n, (s0, e0) in SEGS.items() if not 0 <= s0 < e0 <= T_ALL]
 if _bad:
     sys.exit(f"세그먼트 {_bad} 가 라이브러리 npz({T_ALL} 프레임) 밖이거나 비었다 — meta 와 npz 짝 확인")
-_missing = [n for n in ["idle"] + [turn_segment(b) for b in TURN_BINS if b]
-            + sorted(PART_TO_SEGMENT.values()) if n not in SEGS]
-if "idle" in _missing:
+if "idle" not in SEGS:
     sys.exit("library_meta 에 idle 세그먼트가 없다")
+_missing = [n for n in ["turn_l180"] + [f"{g}_y{v}" for g in sorted(PART_TO_SEGMENT.values())
+                                        for v in (-60, -30, 0, 30, 60)] if n not in SEGS]
 if _missing:
     print(f"[경고] 라이브러리에 없는 세그먼트 {_missing} — 그 명령은 거부한다")
 player = SegmentPlayer(SEGS)
@@ -853,14 +853,17 @@ for t in itertools.count():
         except OSError:              # BlockingIOError = 비었다. 그 밖의 소켓 오류도 제어를 멈추지 않는다
             break
     if args.fake_events and len(events) < args.fake_events and t >= fake_next and player.state == "idle":
-        msgs.append({"seq": player.last_seq + 1, "cmd": "act",
-                     "part": str(fake_rng.choice(fake_parts)), "turn_bin": int(fake_rng.choice(TURN_BINS))})
+        msgs.append({"seq": player.last_seq + 1, "cmd": "act", "part": str(fake_rng.choice(fake_parts)),
+                     "bearing_deg": None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181))})
         fake_next = t + int(6.0 / CTRL_DT)
     for m in msgs:
         if player.command(m):
-            events.append({"part": m["part"], "bin": m["turn_bin"], "t_acc": t,
-                           "target": wrap_deg(yaw_now + m["turn_bin"]), "lat_ms": None, "err": None})
-            print(f"  [act] seq {m['seq']} {m['part']} bin {m['turn_bin']:+d}")
+            segs = plan(m["part"], m["bearing_deg"])
+            b = m["bearing_deg"]
+            events.append({"part": m["part"], "bearing": b, "segs": segs, "t_acc": t,
+                           "waist": int(segs[-1].rsplit("_y", 1)[1]),
+                           "target": wrap_deg(yaw_now + (b or 0)), "lat_ms": None, "err": None})
+            print(f"  [act] seq {m['seq']} {m['part']} bearing {b} -> {' + '.join(segs)}")
 
     k, first = player.step()
     if sim is not None:
@@ -874,8 +877,10 @@ for t in itertools.count():
         ev = events[-1] if events else None
         if ev is not None and ev["lat_ms"] is None and player.segment != "idle":
             ev["lat_ms"] = (t - ev["t_acc"]) * CTRL_DT * 1000.0
-        if ev is not None and ev["err"] is None and player.segment == PART_TO_SEGMENT[ev["part"]]:
-            ev["err"] = wrap_deg(yaw_now - ev["target"])     # 회전이 끝나고 동작을 시작하는 순간
+        if ev is not None and ev["err"] is None and player.segment == ev["segs"][-1]:
+            # 회전이 끝나고 동작을 시작하는 순간. 허리는 아직 idle(≈0°)이고 동작 중에 v° 로 돌아가므로
+            # 계획한 허리각을 더한다 = 회전 잔차 + 허리 양자화 잔차. 허리 추종 오차는 여기 안 들어간다.
+            ev["err"] = wrap_deg(yaw_now + ev["waist"] - ev["target"])
     imu_aligned = quat_mul(quat_from_yaw(yaw_off), imu)
 
     R_rob = torso_rot_world(imu_aligned, q)
@@ -984,13 +989,14 @@ def print_summary():
         print(f"  주기 1.5배 초과 {over}회 / {len(cycles)}  "
               f"({'여유 있음' if p99 < 60 else '⚠ 지연 여유 60ms 초과'})")
     if events:
-        print(f"\n이벤트 {len(events)}개 (heading 오차 = 동작 첫 프레임의 torso yaw - (수락 시 yaw + bin), "
-              f"지연 = 수락 -> 세그먼트 첫 프레임, 패킷이 소켓에서 기다린 최대 1주기는 빠짐)")
-        print(f"  {'#':>2} {'part':9s} {'bin':>5} {'목표°':>7} {'오차°':>7} {'지연ms':>7}")
+        print(f"\n이벤트 {len(events)}개 (heading 오차 = 동작 첫 프레임의 torso yaw + 계획 허리각 - (수락 시 yaw + bearing), "
+              f"bearing null 은 0, 지연 = 수락 -> 세그먼트 첫 프레임, 패킷이 소켓에서 기다린 최대 1주기는 빠짐)")
+        print(f"  {'#':>2} {'part':9s} {'bear°':>5} {'세그먼트':24s} {'목표°':>7} {'오차°':>7} {'지연ms':>7}")
         for i_, ev in enumerate(events):
             err = "-" if ev["err"] is None else f"{ev['err']:+.1f}"
             lat = "-" if ev["lat_ms"] is None else f"{ev['lat_ms']:.0f}"
-            print(f"  {i_:2d} {ev['part']:9s} {ev['bin']:+5d} {ev['target']:+7.1f} {err:>7} {lat:>7}")
+            bear = "null" if ev["bearing"] is None else f"{ev['bearing']:+d}"
+            print(f"  {i_:2d} {ev['part']:9s} {bear:>5} {'+'.join(ev['segs']):24s} {ev['target']:+7.1f} {err:>7} {lat:>7}")
         errs = [abs(ev["err"]) for ev in events if ev["err"] is not None]
         if errs:
             print(f"  |heading 오차| 중앙 {np.median(errs):.1f}°  최대 {max(errs):.1f}°  ({len(errs)}/{len(events)}개 측정)")

@@ -1,4 +1,4 @@
-"""g1_gaze_bridge 순수 함수: 부위 판정, 방위각, bin, config. 카메라·YOLO·태그 검출기 없이 돈다."""
+"""g1_gaze_bridge 순수 함수: 부위 판정, 방위각, plan, config. 카메라·YOLO·태그 검출기 없이 돈다."""
 import math
 import os
 import sys
@@ -12,7 +12,8 @@ G1 = os.path.dirname(HERE)
 sys.path.insert(0, G1)
 sys.path.insert(0, os.path.join(os.path.dirname(G1), "arm"))
 
-from g1_gaze_bridge import bearing_deg, nearest_bin, pick_part  # noqa: E402
+from g1_gaze_bridge import bearing_deg, pick_part  # noqa: E402
+from g1_protocol import plan  # noqa: E402
 
 TORSO = ["g1_torso", 0.9, 100, 100, 300, 400]
 HAND = ["g1_hand", 0.5, 250, 300, 290, 340]       # 몸통 박스 안
@@ -67,22 +68,12 @@ def test_bearing_deg(p, expect):
     assert bearing_deg(_T_hc_torso(p)) == pytest.approx(expect, abs=1e-6)
 
 
-def test_bearing_behind_wobble_both_bin_180():
-    # Review Focus #1: 뒤에서 179/-179 로 흔들려도 둘 다 180.
-    a = math.radians(179.0)
-    b = math.radians(-179.0)
-    for ang in (a, b):
+def test_bearing_behind_wobble_same_plan():
+    # Review Focus #1: 뒤에서 179/-179 로 흔들려도 둘 다 turn_l180 + y0.
+    for d in (179.0, -179.0):
+        ang = math.radians(d)
         deg = bearing_deg(_T_hc_torso((2 * math.cos(ang), 2 * math.sin(ang), 0.5)))
-        assert nearest_bin(deg) == 180
-
-
-@pytest.mark.parametrize("deg,b", [
-    (22.4, 0), (22.6, 45), (-22.4, 0), (-22.6, -45),
-    (179, 180), (-179, 180), (180, 180), (-180, 180),
-    (-158, 180), (-157, -135), (158, 180), (157, 135),
-])
-def test_nearest_bin(deg, b):
-    assert nearest_bin(deg) == b
+        assert plan("g1_face", deg) == ["turn_l180", "wave_y0"]
 
 
 def test_config_loads_four_tag_bundle():
@@ -124,4 +115,4 @@ def test_single_tag_pnp_gives_bearing(tag_id, bear):
     T_est[:3, :3], T_est[:3, 3] = R, tvec.ravel()
     got = bearing_deg(T_est)
     assert abs((got - bear + 180) % 360 - 180) < 2.0
-    assert nearest_bin(got) == nearest_bin(bear)
+    assert plan("g1_face", got) == plan("g1_face", bear)

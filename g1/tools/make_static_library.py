@@ -1,7 +1,8 @@
 """학습 전 서버 스모크용 정지 라이브러리: 참조 0번 프레임(서 있는 자세)을 반복하고 속도 0.
 
 로봇은 계속 서 있기만 한다. 세그먼트 전환·yaw 재정렬·UDP·이벤트 표 경로를 정책 학습 전에
-확인하는 용도다. 회전이 없으므로 이벤트 표의 heading 오차는 -bin 이 나와야 정상이다 (RUNBOOK 5-0).
+확인하는 용도다. 회전·허리가 없으므로 이벤트 표의 heading 오차는 (계획 허리각 - bearing) 이 나와야 정상이다
+(예: bearing 150 -> turn_l180+y-30 -> -30-150 = -180, RUNBOOK 5-0).
 
     python3 make_static_library.py --motion ~/g1_dance_deploy/motion_final.npz --out /tmp/g1_static
 """
@@ -20,8 +21,8 @@ os.makedirs(args.out, exist_ok=True)
 
 M = dict(np.load(args.motion))
 L0 = M["joint_pos"].shape[0]
-segs = [("idle", 150)] + [(f"turn_l{d}", 100) for d in (45, 90, 135, 180)] \
-    + [(f"turn_r{d}", 100) for d in (45, 90, 135)] + [("bow", 120), ("handshake", 120), ("open_arms", 120)]
+segs = [("idle", 150)] + [(f"{g}_y{v}", 120) for g in ("wave", "handshake", "open_arms")
+                          for v in (-60, -30, 0, 30, 60)] + [("turn_l180", 100)]
 N = sum(n for _, n in segs)
 out = {}
 for k, v in M.items():

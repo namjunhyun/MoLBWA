@@ -14,7 +14,7 @@
 ```bash
 REPO=~/창종설                    # 이 저장소 (worktree 에서 작업 중이면 그 경로)
 ART=~/molbwa_g1                  # 산출물 — 저장소 밖. 영상·pkl·csv·npz 는 커밋하지 않는다
-RAW=$ART/raw                     # 촬영 원본 mp4 (세그먼트 이름 그대로: idle.mp4, turn_l45.mp4, ...)
+RAW=$ART/raw                     # 촬영 원본 mp4 (세그먼트 이름 그대로: idle.mp4, wave_y-30.mp4, turn_l180.mp4, ...)
 mkdir -p "$RAW" "$ART/gmr_out"
 ```
 
@@ -47,25 +47,29 @@ UNO Q(Qualcomm QRB2210, Debian)는 공식 문서상 **4-lane MIPI-CSI-2 + ISP 2�
 
 ## 1. 촬영
 
-클립 **11개**, 전부 **같은 기본자세(편하게 선 자세 — 팔은 자연스럽게 내리고 무릎은 펴되 잠그지 않음)로 시작하고 끝난다. 클립마다 앞뒤 1초는 그 자세로 정지.**
+클립 **17개**, 전부 **같은 기본자세(편하게 선 자세 — 팔은 자연스럽게 내리고 무릎은 펴되 잠그지 않음)로 시작하고 끝난다. 클립마다 앞뒤 1초는 그 자세로 정지.**
 라이브러리 빌더가 클립 앞뒤를 `idle` 첫 프레임 자세로 0.5초 블렌드하는데, 클립 끝이 대기 자세에서
 멀수록 블렌드 구간의 관절이 빨리 움직여 이음새 검사(관절 0.05 rad/프레임)에 걸린다.
 
 | 세그먼트 (= 파일 이름) | 내용 |
 |---|---|
 | `idle` | 편하게 선 기본자세로 4초 대기 (호흡 정도의 미세 움직임만) |
-| `turn_l45`, `turn_l90`, `turn_l135`, `turn_l180` | 제자리 **왼쪽** 회전. 발을 작게 여러 번 디딤 |
-| `turn_r45`, `turn_r90`, `turn_r135` | 제자리 **오른쪽** 회전 (180° 는 왼쪽 하나만 쓴다) |
-| `bow` | 고개+상체 숙여 인사 (얼굴 응시) |
-| `handshake` | 오른팔을 앞으로 내밀어 악수 자세, 2초 유지 후 복귀 (손 응시). 뻗는 거리는 짧게 |
-| `open_arms` | 팔 벌려 안아주는 자세, 2초 유지 후 복귀. 감싸지 않는다 (몸통 응시) |
+| `wave_y{v}` | 손 흔들어 인사 (얼굴 응시) |
+| `handshake_y{v}` | 오른팔을 앞으로 내밀어 악수 자세, 2초 유지 후 복귀 (손 응시). 뻗는 거리는 짧게 |
+| `open_arms_y{v}` | 팔 벌려 안아주는 자세, 2초 유지 후 복귀. 감싸지 않는다 (몸통 응시) |
+| `turn_l180` | 제자리 **왼쪽** 180° 회전. 발을 작게 여러 번 디딤 |
+
+v ∈ {−60, −30, 0, 30, 60} (예: `wave_y-30`). 발은 제자리, **허리(상체)를 v° 돌린 채로** 동작하고 정면으로 돌아와 끝난다.
+**+ 가 왼쪽**(사람 기준 자기 왼쪽으로 상체를 돌림). 사용자 방위 b 에 대해 `g1_protocol.plan()` 이 고른다:
+|b| ≤ 75° 면 허리 변형 하나(30° 단위라 잔차 최대 ±15°), 그 밖이면 `turn_l180` 뒤 잔차 b−180 을 허리로
+(±60° 로 잘리므로 |b| 75~120° 구간은 잔차가 15° 넘게 남는다). 90° 회전 클립은 나중에 촬영해 이 구간을 메울 예정.
 
 촬영 조건:
 - **고정 카메라**(삼각대) — GVHMR 을 `-s`(static cam)로 돌린다
 - 전신이 처음부터 끝까지 프레임 안, 정면 기준 3~4 m
 - 30 fps 이상 (더 높으면 `batch_gmr_pkl_to_csv.py` 가 30 fps 로 솎는다)
 - 단색 배경 권장, 헐렁한 옷 피하기
-- 회전 클립은 **각도를 정확히** — 바닥에 테이프로 0/45/90/135/180° 표시. 이 각도가 곧 로봇의 회전량이다
+- 각도를 **정확히** — 바닥에 테이프로 0/±30/±60/180° 표시. 허리 변형은 상체가 그 선을 향하게, `turn_l180` 은 몸 전체가 정확히 뒤로. 이 각도가 곧 로봇의 회전량이다
 - 회전 중 발을 끌지 않는다(디뎌서 돈다). GVHMR 단안 추정은 제자리 회전에서 발이 미끄러지기 쉽다
 
 ---
@@ -75,7 +79,7 @@ UNO Q(Qualcomm QRB2210, Debian)는 공식 문서상 **4-lane MIPI-CSI-2 + ISP 2�
 `~/para_pipeline/run_all.sh` 1~2단계와 같은 명령을 클립마다 돌린다.
 
 ```bash
-SEGS="idle turn_l45 turn_l90 turn_l135 turn_l180 turn_r45 turn_r90 turn_r135 bow handshake open_arms"
+SEGS="idle $(for g in wave handshake open_arms; do for v in -60 -30 0 30 60; do printf "%s_y%s " $g $v; done; done)turn_l180"
 
 # 2-1) GVHMR — 영상 → SMPL (outputs/demo/<이름>/hmr4d_results.pt)
 for s in $SEGS; do
@@ -96,7 +100,7 @@ done
 ( cd ~/GMR && env -u PYTHONPATH ~/miniconda3/envs/gmr/bin/python \
     scripts/batch_gmr_pkl_to_csv.py --folder "$ART/gmr_out" )
 
-# 2-4) 11개 다 있고 전부 36열인지
+# 2-4) 17개 다 있고 전부 36열인지
 for s in $SEGS; do
   f="$ART/gmr_out/csv/$s.csv"
   [ -f "$f" ] && echo "$s $(head -1 "$f" | awk -F, '{print NF}')열 $(wc -l < "$f")행" || echo "없음: $s"
@@ -233,8 +237,9 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
     --policy ~/g1_dance_deploy/policy_final.npz --motion /tmp/g1_static/static_library.npz \
     --library_meta /tmp/g1_static/static_library_meta.json --backend mujoco --fake_events 4 --hold_sec 2
 ```
-합격: exit 0, "판정: 서 있음", 이벤트 표의 heading 오차 ≈ −bin (회전 클립이 없으니 안 도는 게 정상).
-2026-10-08 실측: 34.9 s 완주, 골반 최소 0.753 m, 오차 −45→+42.8° · +90→−91.2° · 0→0.0°.
+합격: exit 0, "판정: 서 있음", 이벤트 표의 heading 오차 ≈ 계획 허리각 − bearing (정지 라이브러리라 안 도는 게 정상.
+예: bearing 150 → turn_l180+wave_y-30 → −30−150 = −180).
+2026-10-08 실측(구 turn_bin 규약, heading 오차 ≈ −bin 시절): 34.9 s 완주, 골반 최소 0.753 m, 오차 −45→+42.8° · +90→−91.2° · 0→0.0°.
 
 ### 5-1) 학습한 정책으로
 
@@ -246,7 +251,7 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
     --log_csv "$ART/sim2sim_events10.csv" | tee "$ART/sim2sim_events10.log"
 ```
 
-- 6초 간격으로 무작위 part/bin `act` 10회를 내부 주입하고, 마지막 동작이 idle 로 돌아오면 끝난다(`--fake_seed` 로 고정).
+- 6초 간격으로 무작위 part/bearing(−180~180 정수, 10% null) `act` 10회를 내부 주입하고, 마지막 동작이 idle 로 돌아오면 끝난다(`--fake_seed` 로 고정).
   **mujoco 전용** — `--backend dds` 에 주면 서버가 거부한다(실기에 가짜 명령을 넣지 않는다).
 - `--hold_sec 5` 를 빼면 이벤트가 끝난 뒤 유지 단계 300초를 그대로 기다린다.
 - `--xml` 은 기본값(`G1_MUJOCO_XML` 환경변수)을 쓴다. `g1_29dof.xml` 을 주면 스크립트가 바닥 있는 `scene_29dof.xml` 로 바꿔 연다.
@@ -258,7 +263,7 @@ env -u PYTHONPATH -u LD_LIBRARY_PATH ~/miniconda3/envs/g1deploy/bin/python g1_mo
 |---|---|---|
 | 시나리오 완주 | **10/10 서 있음**, 골반 최소 > 0.6 m | 요약 `골반 높이 최소` |
 | 첫 반응 시간 | **≤ 1.5 s** | 이벤트 표의 act 수신 → 세그먼트 첫 프레임 지연 |
-| 회전 후 heading 오차 | 기록 (bin 양자화로 ±22.5° 안 기대) | 이벤트 표 |
+| heading 오차 (동작 첫 프레임 torso yaw + 계획 허리각 − 목표) | 기록 (\|b\|≤75° 는 ±15° 안 기대, 75~120° 는 허리 클립 때문에 더 큼). 허리 추종 오차는 이 값에 안 들어간다 — `--viewer`/영상으로 확인 | 이벤트 표 |
 
 - 권장: 시드 하나로 끝내지 말고 `--fake_seed 1`, `--fake_seed 2` 로도 돌려 본다(이벤트 순서가 바뀐다).
 - sim2sim 의 첫 반응 시간은 **서버 내부 지연만**이다. 실기에서는 dwell 확정 → UDP(와이파이) 지연이 더해진다.
@@ -380,7 +385,7 @@ import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('12
 while True: print(s.recv(4096).decode())"
 ```
 
-태그가 한 장만 보여도 bearing 이 나온다(`min_tags_for_latch: 1`). 전부 안 보이면 `bearing_deg: null` → 회전 없이 동작만.
+태그가 한 장만 보여도 bearing 이 나온다(`min_tags_for_latch: 1`). 전부 안 보이면 `bearing_deg: null` → 허리 정면(`_y0`) 동작만.
 
 ---
 

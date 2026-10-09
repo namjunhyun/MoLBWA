@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 
-from g1_protocol import PORT_BRIDGE, encode, nearest_bin  # noqa: F401  (nearest_bin 재노출)
+from g1_protocol import PORT_BRIDGE, encode
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)

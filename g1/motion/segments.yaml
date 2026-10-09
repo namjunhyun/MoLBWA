@@ -1,16 +1,23 @@
 # 모션 라이브러리 세그먼트 (이 순서대로 이어 붙임). csv 경로는 이 파일 기준 상대경로.
 # 첫 세그먼트는 idle (첫 프레임 = 공통 대기 자세).
+# 동작은 허리 yaw 변형 5개(_y-60.._y60, + = 왼쪽)로 사용자 쪽을 본다. |방위| > 75° 면 turn_l180 먼저.
 fps: 30
 blend_s: 0.5
 segments:
   - {name: idle, csv: clips/idle.csv}
-  - {name: turn_l45, csv: clips/turn_l45.csv}
-  - {name: turn_l90, csv: clips/turn_l90.csv}
-  - {name: turn_l135, csv: clips/turn_l135.csv}
+  - {name: wave_y-60, csv: clips/wave_y-60.csv}
+  - {name: wave_y-30, csv: clips/wave_y-30.csv}
+  - {name: wave_y0, csv: clips/wave_y0.csv}
+  - {name: wave_y30, csv: clips/wave_y30.csv}
+  - {name: wave_y60, csv: clips/wave_y60.csv}
+  - {name: handshake_y-60, csv: clips/handshake_y-60.csv}
+  - {name: handshake_y-30, csv: clips/handshake_y-30.csv}
+  - {name: handshake_y0, csv: clips/handshake_y0.csv}
+  - {name: handshake_y30, csv: clips/handshake_y30.csv}
+  - {name: handshake_y60, csv: clips/handshake_y60.csv}
+  - {name: open_arms_y-60, csv: clips/open_arms_y-60.csv}
+  - {name: open_arms_y-30, csv: clips/open_arms_y-30.csv}
+  - {name: open_arms_y0, csv: clips/open_arms_y0.csv}
+  - {name: open_arms_y30, csv: clips/open_arms_y30.csv}
+  - {name: open_arms_y60, csv: clips/open_arms_y60.csv}
   - {name: turn_l180, csv: clips/turn_l180.csv}
-  - {name: turn_r45, csv: clips/turn_r45.csv}
-  - {name: turn_r90, csv: clips/turn_r90.csv}
-  - {name: turn_r135, csv: clips/turn_r135.csv}
-  - {name: bow, csv: clips/bow.csv}
-  - {name: handshake, csv: clips/handshake.csv}
-  - {name: open_arms, csv: clips/open_arms.csv}

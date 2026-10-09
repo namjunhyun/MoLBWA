@@ -1,7 +1,8 @@
 # g1 — 데모 2: 시선으로 G1 휴머노이드와 교감하기
 
 사용자가 G1 의 **얼굴 / 손 / 몸통** 중 한 곳을 3초 응시하면, G1 이 **서 있는 채로** 사용자 쪽으로
-제자리 회전한 뒤 인사(`bow`) / 악수 자세(`handshake`) / 팔 벌리기(`open_arms`)를 하고 대기로 돌아온다.
+허리를 돌려(필요하면 먼저 제자리 180° 회전) 손 흔들기(`wave`) / 악수 자세(`handshake`) / 팔 벌리기(`open_arms`)를 하고
+대기로 돌아온다.
 데모 1(로봇팔)과 같은 시선 인터페이스(글래스 → UDP 55056)를 쓴다.
 
 설계: `docs/superpowers/specs/2026-10-08-g1-emotional-demo-design.md` ·
@@ -21,13 +22,13 @@
            ─UDP 55057 JSON {t, label, bearing_deg, valid}─▶
           gaze_hri/g1_interaction_node (ROS 2)
            ├ dwell: 같은 label 3.0 초 유지(유효 70%) → 확정
-           ├ bearing → turn_bin (0, ±45, ±90, ±135, 180)
+           ├ bearing_deg = int(round(dwell 창 안 마지막 유효 bearing)) 또는 null
            ├ 상태: IDLE → BUSY(Jetson 보고 기준) → IDLE, BUSY 중 이벤트 무시
            ├ 발행 /g1/event, /g1/state, /g1/dwell_progress — rosbag 으로 기록
-           └─UDP 55070 {seq, cmd:"act", part, turn_bin} / {cmd:"ping"} ─▶
+           └─UDP 55070 {seq, cmd:"act", part, bearing_deg} / {cmd:"ping"} ─▶
 [Jetson]  g1/deploy/g1_motion_server.py (50 Hz 온보드, numpy only)
            ├ 정책 1개 + 모션 라이브러리 npz(세그먼트 경계 library_meta.json)
-           ├ idle 반복 → 명령 수신 시 turn 세그먼트 → 동작 세그먼트 → idle
+           ├ idle 반복 → 명령 수신 시 plan(part, bearing) = [turn_l180?] + 동작_y<허리> → idle
            ├ 세그먼트 시작마다 yaw_off 재정렬
            └─UDP 55071 {state, seq} ─▶ 데스크탑
 ```
@@ -41,21 +42,21 @@
 | 항목 | 값 |
 |---|---|
 | UDP 포트 | 브리지→노드 **55057**, 노드→Jetson **55070**, Jetson→노드 **55071** (기존 55055/55056/55059 는 안 건드림) |
-| 부위 → 동작 | `g1_face`→`bow`, `g1_hand`→`handshake`, `g1_torso`→`open_arms`. 겹치면 hand > face > torso |
-| turn_bin | 0, 45, 90, 135, 180, −45, −90, −135. **+ 가 왼쪽**, ±180 근방은 전부 180(`turn_l180`) |
-| 세그먼트 | `idle`, `turn_l45`, `turn_l90`, `turn_l135`, `turn_l180`, `turn_r45`, `turn_r90`, `turn_r135`, `bow`, `handshake`, `open_arms` |
+| 부위 → 동작 | `g1_face`→`wave`, `g1_hand`→`handshake`, `g1_torso`→`open_arms`. 겹치면 hand > face > torso |
+| 방향 맞추기 `plan()` | bearing b(도, **+ 가 왼쪽**, (−180,180] 로 감음). \|b\| ≤ 75° → 동작 허리 변형 `_y{v}` 하나, v = 30°단위 반올림·±60° 클립(잔차 최대 ±15°). \|b\| > 75° → `turn_l180` 뒤 잔차 r = b−180 을 허리로(±60° 로 잘려 75~120° 구간은 잔차가 15° 넘게 남는다). bearing null → `_y0`. 허리 yaw 도 + 가 왼쪽 |
+| 세그먼트 | `idle`, `wave_y{-60,-30,0,30,60}`, `handshake_y{…}`, `open_arms_y{…}`(각 5개), `turn_l180` — 17개. 90° 회전 클립은 나중에 촬영 예정 |
 | 모션 csv | 36열 = root pos 3 + root quat **xyzw** 4 + 관절 29, 30 fps (`csv_to_npz.py` 가 wxyz·50 fps 로 바꾼다) |
 | 정책 관측 | **154차원**(Wo-State-Estimation)만. 160차원 정책은 실행 거부 |
-| 메시지 | bridge `{t, label, bearing_deg, valid}` · cmd `{seq, cmd: act\|ping, part, turn_bin}` · state `{state: idle\|turning\|acting, seq}` |
+| 메시지 | bridge `{t, label, bearing_deg, valid}` · cmd `{seq, cmd: act\|ping, part, bearing_deg: int\|null}` · state `{state: idle\|turning\|acting, seq}` |
 
 ## 파일
 
 | 파일 | 역할 | 어디서 도나 |
 |---|---|---|
-| `g1_protocol.py` | 포트·라벨·turn_bin·`nearest_bin`·JSON encode/decode | 전부 (Jetson 은 3.8) |
-| `motion/build_motion_library.py` | 촬영 클립 csv 11개 → 블렌드·yaw/xy 합성 → `library.csv` + `library_meta.json`. 이음새 임계 초과 시 exit 1 | 데스크탑 |
+| `g1_protocol.py` | 포트·라벨·`plan()`(방위 → 세그먼트 목록)·JSON encode/decode | 전부 (Jetson 은 3.8) |
+| `motion/build_motion_library.py` | 촬영 클립 csv 17개 → 블렌드·yaw/xy 합성 → `library.csv` + `library_meta.json`. 이음새 임계 초과 시 exit 1 | 데스크탑 |
 | `motion/segments.yaml` | 세그먼트 이름 → csv 경로, 순서 | 데스크탑 |
-| `deploy/segment_player.py` | 세그먼트 커서 상태머신 (idle 반복 / act → turn → 동작 → idle, seq·BUSY 거부) | Jetson |
+| `deploy/segment_player.py` | 세그먼트 커서 상태머신 (idle 반복 / act → plan() 세그먼트 → idle, seq·BUSY·bearing 타입 거부) | Jetson |
 | `deploy/g1_motion_server.py` | 50 Hz 정책 실행부 (`deploy_g1_tracking.py` 확장). probe·dry-run 기본·`--arm`·토크 가드·`--backend mujoco --fake_events N` | Jetson / 데스크탑(sim2sim) |
 | `deploy/g1_tracking_policy_meta.json` | 관절 순서·게인·스케일 (Isaac 실측 덤프 복사본) | Jetson |
 | `deploy/export_policy_npz.py` | 체크포인트 → numpy 정책 npz (torch 출력과 200표본 대조) | 데스크탑 |
@@ -91,9 +92,9 @@ ros2 run gaze_hri g1_interaction --ros-args -p jetson_host:=127.0.0.1
 ros2 topic echo /g1/state          # 다른 터미널: offline
 ```
 
-`--fake_events` 는 mujoco 백엔드 전용이다. 6초 간격으로 무작위 part/bin `act` 를 내부 주입하고(`--fake_seed` 로 고정),
+`--fake_events` 는 mujoco 백엔드 전용이다. 6초 간격으로 무작위 part/bearing(−180~180 정수, 10% null) `act` 를 내부 주입하고(`--fake_seed` 로 고정),
 마지막 동작이 idle 로 돌아오면 스스로 끝난다.
-끝나면 이벤트별 (part, bin, 목표 heading, 실제 heading 오차, act 수신→세그먼트 첫 프레임 지연 ms) 표를 찍는다.
+끝나면 이벤트별 (part, bearing, 세그먼트, 목표 heading = 수락 시 yaw + bearing, heading 오차 = 동작 첫 프레임 torso yaw + 계획 허리각 − 목표, act 수신→세그먼트 첫 프레임 지연 ms) 표를 찍는다.
 합격 기준은 `RUNBOOK.md` 5장.
 
 정책·라이브러리 npz 가 아직 없으면 3) 은 못 돈다 — 촬영부터 학습까지 `RUNBOOK.md` 1~4장.

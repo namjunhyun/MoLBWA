@@ -7,18 +7,20 @@
 
   * LabelDwell 로 부위 라벨 확정 (같은 라벨 dwell_time 동안 min_ratio 이상).
   * 확정 시 Jetson state 가 idle 이고 1초 안에 받은 것일 때만 act 를 보낸다.
-    turn_bin = nearest_bin(최근 dwell_time 안의 마지막 유효 bearing), 없으면 0(회전 없이 동작만).
+    bearing_deg = int(round(최근 dwell_time 안의 마지막 유효 bearing)), 없으면 null(허리 정면 y0 동작만).
+    어떤 세그먼트를 재생할지는 Jetson 이 g1_protocol.plan() 으로 정한다(허리 ±60°, 넘으면 turn_l180).
   * seq 는 밀리초 시각 기반 int(next_seq), 직전·Jetson 보고값보다 항상 큼 — 노드를 재시작해도 거부되지 않는다.
   * 1 Hz ping.
 
 발행:
-  /g1/event          std_msgs/String  JSON {t, part, bearing_deg, turn_bin, seq}  (보낸 명령만)
+  /g1/event          std_msgs/String  JSON {t, part, bearing_deg, segments, seq}  (보낸 명령만)
   /g1/state          std_msgs/String  idle | turning | acting | offline
   /g1/dwell_progress std_msgs/Float32 0~1
 """
 
 import importlib
 import json
+import math
 import os
 import socket
 import sys
@@ -121,7 +123,8 @@ class G1Interaction(Node):
             if m is None:
                 continue
             self.bridge_t = now
-            if isinstance(m.get("bearing_deg"), (int, float)):
+            b = m.get("bearing_deg")
+            if isinstance(b, (int, float)) and not isinstance(b, bool) and math.isfinite(b):   # NaN 이면 int(round()) 가 죽는다
                 self.bearing, self.bearing_t = float(m["bearing_deg"]), now
             label = m.get("label") if m.get("valid") else None
             part = self.dwell.update(now, label if label in self.proto.PART_TO_SEGMENT else None)
@@ -136,11 +139,11 @@ class G1Interaction(Node):
             return
         # 확정 순간 한 프레임만 태그를 놓쳐도 회전하도록 dwell 창 안의 마지막 유효 bearing 을 쓴다.
         # 평균은 내지 않는다(뒤쪽 ±180 래핑에서 평균이 0 근처로 무너진다).
-        bearing = self.bearing if now - self.bearing_t <= self.dwell_time else None
-        turn_bin = 0 if bearing is None else int(self.proto.nearest_bin(bearing))
+        bearing = int(round(self.bearing)) if now - self.bearing_t <= self.dwell_time else None
         self.seq = next_seq(self.seq, time.time(), self.jetson_seq)
-        self._send({"seq": self.seq, "cmd": "act", "part": part, "turn_bin": turn_bin})
-        ev = {"t": time.time(), "part": part, "bearing_deg": bearing, "turn_bin": turn_bin, "seq": self.seq}
+        self._send({"seq": self.seq, "cmd": "act", "part": part, "bearing_deg": bearing})
+        ev = {"t": time.time(), "part": part, "bearing_deg": bearing,
+              "segments": self.proto.plan(part, bearing), "seq": self.seq}
         self.pub_event.publish(String(data=json.dumps(ev)))
         self.get_logger().info(f"act {ev}")
 
