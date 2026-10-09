@@ -50,12 +50,32 @@ def robust_box(mask: np.ndarray):
 HIDE = {"left_rubber_hand", "right_rubber_hand"}
 
 
+def randomize(img: np.ndarray, robot: np.ndarray, rng) -> np.ndarray:
+    """배경 = 무작위 두 색 그라데이션 + 잡음 + 사각형 몇 개, 로봇 = 밝기·대비 흔들기."""
+    h, w = robot.shape
+    c0, c1 = rng.uniform(0, 255, 3), rng.uniform(0, 255, 3)
+    t = np.linspace(0, 1, h if rng.random() < 0.5 else w)
+    grad = (c0[None] * (1 - t[:, None]) + c1[None] * t[:, None])
+    bg = np.broadcast_to(grad[:, None, :], (h, w, 3)) if len(t) == h else np.broadcast_to(grad[None, :, :], (h, w, 3))
+    bg = bg + rng.normal(0, rng.uniform(2, 25), (h, w, 3))
+    bg = bg.copy()
+    for _ in range(rng.integers(0, 6)):
+        x0, y0 = rng.integers(0, w), rng.integers(0, h)
+        bg[y0:y0 + rng.integers(10, h // 2), x0:x0 + rng.integers(10, w // 2)] = rng.uniform(0, 255, 3)
+    out = img.astype(float)
+    out = (out - 128) * rng.uniform(0.7, 1.3) + 128 + rng.uniform(-40, 40)
+    out[~robot] = bg[~robot]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lib", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=30); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--w", type=int, default=640); ap.add_argument("--h", type=int, default=480)
     ap.add_argument("--preview", default="")
+    ap.add_argument("--bg", choices=["sim", "random"], default="sim",
+                    help="random: 로봇 밖 픽셀을 무작위 그라데이션·잡음·사각형으로, 로봇 밝기·대비도 흔든다(MuJoCo 바닥·하늘 과적합 방지)")
     a = ap.parse_args()
     rng = np.random.default_rng(a.seed)
     os.makedirs(f"{a.out}/images", exist_ok=True); os.makedirs(f"{a.out}/labels", exist_ok=True)
@@ -90,6 +110,8 @@ def main():
         rgb_r.update_scene(d, cam); img = rgb_r.render()
         seg_r.update_scene(d, cam); seg = seg_r.render()
         objid, objtype = seg[..., 0], seg[..., 1]
+        if a.bg == "random":
+            img = randomize(img, (objtype == int(mj.mjtObj.mjOBJ_GEOM)) & (m.geom_bodyid[np.clip(objid, 0, m.ngeom - 1)] > 0), rng)
         lines = []
         isgeom = objtype == int(mj.mjtObj.mjOBJ_GEOM)
         for c in range(3):
