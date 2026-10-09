@@ -25,7 +25,7 @@ STANDBY = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
 RLGYM_DEFAULT = {"hip_pitch": -0.1, "knee": 0.3, "ankle_pitch": -0.2}
 LEG_OFFSET = {f"{s}_{j}_joint": STANDBY[f"{s}_{j}_joint"] - v for s in ("left", "right") for j, v in RLGYM_DEFAULT.items()}
 PELVIS_DROP = 0.0275
-PRE_STAND_S, POST_STAND_S = 0.3, 0.4    # 회전 전후 대기(예전 1.0/1.5 s 는 '멈췄다 홱 도는' 인상)
+PRE_STAND_S, POST_STAND_S = 0.3, 0.1    # 회전 전후 대기(예전 1.0/1.5 → 0.3/0.4 → 0.3/0.1: 돌고 바로 손 흔들기로)
 
 
 def gvec(q):

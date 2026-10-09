@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "motion"))
-from amass_g1_to_csv import convert, pad, rate_limit, retime, smooth_env  # noqa: E402
+from amass_g1_to_csv import convert, pad, pad_ends, rate_limit, retime, smooth_env, upper_only  # noqa: E402
 from make_idle_csv import CSV_JOINTS  # noqa: E402
 
 
@@ -69,3 +69,16 @@ def test_pad_holds_ends():
     r = convert(fake(n=10)); r[:, 0] = np.arange(10)
     o = pad(r, 1.0)
     assert len(o) == 70 and (o[:30, 0] == 0).all() and (o[-30:, 0] == 9).all()
+
+
+def test_upper_only_freezes_legs_and_root():
+    r = convert(fake(n=10)); r[:, 0] = np.arange(10) * 0.1; r[:, 2] = 0.8
+    standby = {n: 0.5 for n in CSV_JOINTS}
+    o = upper_only(r, standby, root_z=0.76)
+    assert np.allclose(o[:, 7:19], 0.5) and np.allclose(o[:, 19:], r[:, 19:])
+    assert np.allclose(o[:, 0], 0) and np.allclose(o[:, 2], 0.76) and np.allclose(o[:, 3:7], [0, 0, 0, 1])
+
+
+def test_pad_ends_asymmetric():
+    r = convert(fake(n=10))
+    assert len(pad_ends(r, 0.0, 0.5)) == 25

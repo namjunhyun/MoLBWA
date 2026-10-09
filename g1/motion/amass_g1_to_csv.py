@@ -80,6 +80,25 @@ def pad(rows: np.ndarray, sec: float, fps: float = 30.0) -> np.ndarray:
     return np.concatenate([np.repeat(rows[:1], k, 0), rows, np.repeat(rows[-1:], k, 0)])
 
 
+def upper_only(rows: np.ndarray, standby: dict, root_z: float = 0.76) -> np.ndarray:
+    """상체 동작 전용: 다리 12관절 = 대기자세, 골반 = 첫 프레임 xy·대기 높이·직립(첫 yaw 유지). 허리·팔만 클립을 따른다.
+    손 흔들기처럼 상체 동작인데 모캡 다리 자세가 대기와 달라(엉덩이 ~0.33 rad) 흔드는 동안 키가 출렁이던 것을 없앤다."""
+    out = rows.copy()
+    for j, n in enumerate(CSV_JOINTS[:12]):
+        out[:, 7 + j] = standby[n]
+    out[:, 0:2] = rows[0, 0:2]
+    out[:, 2] = root_z
+    x, y, z, w = rows[0, 3:7]
+    yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    out[:, 3:7] = [0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)]
+    return out
+
+
+def pad_ends(rows: np.ndarray, start_s: float, end_s: float, fps: float = 30.0) -> np.ndarray:
+    a, b = int(round(start_s * fps)), int(round(end_s * fps))
+    return np.concatenate([np.repeat(rows[:1], a, 0), rows, np.repeat(rows[-1:], b, 0)])
+
+
 def rate_limit(rows: np.ndarray, vmax: float) -> np.ndarray:
     """관절 각 프레임 변화를 ±vmax(rad/프레임)로 자른다 — 리타게팅 튐(관절 한계에 붙었다 떨어짐)을 경사로 바꾼다."""
     out = rows.copy()
@@ -96,11 +115,19 @@ if __name__ == "__main__":
     ap.add_argument("--speed", type=float, default=1.0, help="재생 속도 배율 (0.5 = 두 배 느리게)")
     ap.add_argument("--vmax", type=float, default=0.0, help="관절 변화 상한 rad/프레임 (0 = 끔)")
     ap.add_argument("--pad", type=float, default=0.0, help="앞뒤 정지 초")
+    ap.add_argument("--pad_start", type=float, default=None); ap.add_argument("--pad_end", type=float, default=None)
+    ap.add_argument("--upper_only", action="store_true", help="다리·골반은 대기자세로 고정하고 허리·팔만 클립을 따른다")
     a = ap.parse_args()
     rows = retime(convert(np.load(a.src, allow_pickle=False), a.t0, a.t1, a.waist_yaw, a.ramp), a.speed)
     if a.vmax > 0:
         rows = rate_limit(rows, a.vmax)
-    if a.pad > 0:
-        rows = pad(rows, a.pad)
+    if a.upper_only:
+        import json
+        meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")))
+        rows = upper_only(rows, dict(zip(meta["joint_names"], meta["default_joint_pos"])))
+    ps = a.pad if a.pad_start is None else a.pad_start
+    pe = a.pad if a.pad_end is None else a.pad_end
+    if ps > 0 or pe > 0:
+        rows = pad_ends(rows, ps, pe)
     np.savetxt(a.out, rows, delimiter=",", fmt="%.9f")
     print(f"{a.out}: {len(rows)} 프레임 {len(rows)/30:.2f}s, 허리 yaw +{a.waist_yaw:.0f}°")
