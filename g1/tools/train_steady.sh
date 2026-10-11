@@ -10,6 +10,6 @@ exec nice ~/bin/isaaclab_run.sh -p "$REPO/g1/tools/train_steady.py" \
   --task=Tracking-Flat-G1-Wo-State-Estimation-Delay-Steady-v0 --motion_file "motions/$MOTION" --num_envs "${NENV:-2048}" --headless \
   --max_iterations "${ITERS:-3000}" \
   env.rewards.action_rate_l2.weight=-0.1 env.actions.joint_pos.max_delay_steps=3 \
-  agent.resume=true agent.load_run="$LOAD_RUN" agent.load_checkpoint="$LOAD_CKPT" \
+  agent.save_interval=${SAVE_EVERY:-500} agent.resume=true agent.load_run="$LOAD_RUN" agent.load_checkpoint="$LOAD_CKPT" \
   "env.events.push_robot.params.velocity_range.x=[-${PUSH:-0.8},${PUSH:-0.8}]" \
   "env.events.push_robot.params.velocity_range.y=[-${PUSH:-0.8},${PUSH:-0.8}]"
