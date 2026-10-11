@@ -144,6 +144,8 @@ AP.add_argument("--sim_kp", type=float, default=1.0,
                 help="mujoco 전용 강건성 시험: 모터 P 이득 배율 (실기 모터와의 차이를 흉내)")
 AP.add_argument("--viewer", action="store_true",
                 help="mujoco 백엔드에서 실시간 뷰어 창을 띄운다 (화면으로 보며 확인)")
+AP.add_argument("--sim_realtime", action="store_true",
+                help="mujoco 전용: 뷰어 없이도 실시간 속도로 돈다 (조작 패널로 명령을 보낼 때)")
 AP.add_argument("--arm", action="store_true", help="실제로 DDS 에 발행한다 (없으면 dry-run)")
 AP.add_argument("--probe", type=float, default=0.0,
                 help="DDS 를 열어 lowstate 만 이 시간(초) 받아보고 끝낸다. **발행하지 않는다.** "
@@ -586,6 +588,8 @@ class MujocoBackend:
             self.viewer.cam.lookat[2] = 0.75
             self.viewer.sync()
             time.sleep(0.02)                 # 실시간 속도로 보여준다 (50 Hz)
+        elif args.sim_realtime:
+            time.sleep(0.02)
         if self.renderer is not None:
             self.cam.lookat[:] = self.d.qpos[:3]; self.cam.lookat[2] = 0.75
             self.nrender += 1
