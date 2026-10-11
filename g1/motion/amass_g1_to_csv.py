@@ -80,11 +80,12 @@ def pad(rows: np.ndarray, sec: float, fps: float = 30.0) -> np.ndarray:
     return np.concatenate([np.repeat(rows[:1], k, 0), rows, np.repeat(rows[-1:], k, 0)])
 
 
-def upper_only(rows: np.ndarray, standby: dict, root_z: float = 0.76) -> np.ndarray:
+def upper_only(rows: np.ndarray, standby: dict, root_z: float = 0.76, freeze_waist: bool = False) -> np.ndarray:
     """상체 동작 전용: 다리 12관절 = 대기자세, 골반 = 첫 프레임 xy·대기 높이·직립(첫 yaw 유지). 허리·팔만 클립을 따른다.
     손 흔들기처럼 상체 동작인데 모캡 다리 자세가 대기와 달라(엉덩이 ~0.33 rad) 흔드는 동안 키가 출렁이던 것을 없앤다."""
     out = rows.copy()
-    for j, n in enumerate(CSV_JOINTS[:12]):
+    # freeze_waist (2026-10-11): 모캡 배우의 허리 흔들림(손 흔들기 pitch 0→9.6°, 악수 0→12.4°)도 대기자세로 — 팔만 움직인다
+    for j, n in enumerate(CSV_JOINTS[:15] if freeze_waist else CSV_JOINTS[:12]):
         out[:, 7 + j] = standby[n]
     out[:, 0:2] = rows[0, 0:2]
     out[:, 2] = root_z
@@ -117,6 +118,7 @@ if __name__ == "__main__":
     ap.add_argument("--pad", type=float, default=0.0, help="앞뒤 정지 초")
     ap.add_argument("--pad_start", type=float, default=None); ap.add_argument("--pad_end", type=float, default=None)
     ap.add_argument("--upper_only", action="store_true", help="다리·골반은 대기자세로 고정하고 허리·팔만 클립을 따른다")
+    ap.add_argument("--freeze_waist", action="store_true", help="--upper_only 와 함께: 허리 3관절도 대기자세로 (팔만 움직임)")
     a = ap.parse_args()
     rows = retime(convert(np.load(a.src, allow_pickle=False), a.t0, a.t1, a.waist_yaw, a.ramp), a.speed)
     if a.vmax > 0:
@@ -124,7 +126,7 @@ if __name__ == "__main__":
     if a.upper_only:
         import json
         meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")))
-        rows = upper_only(rows, dict(zip(meta["joint_names"], meta["default_joint_pos"])))
+        rows = upper_only(rows, dict(zip(meta["joint_names"], meta["default_joint_pos"])), freeze_waist=a.freeze_waist)
     ps = a.pad if a.pad_start is None else a.pad_start
     pe = a.pad if a.pad_end is None else a.pad_end
     if ps > 0 or pe > 0:

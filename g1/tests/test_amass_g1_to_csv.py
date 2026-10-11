@@ -82,3 +82,9 @@ def test_upper_only_freezes_legs_and_root():
 def test_pad_ends_asymmetric():
     r = convert(fake(n=10))
     assert len(pad_ends(r, 0.0, 0.5)) == 25
+
+
+def test_upper_only_freeze_waist_keeps_arms():
+    r = convert(fake(n=10))
+    o = upper_only(r, {n: 0.5 for n in CSV_JOINTS}, freeze_waist=True)
+    assert np.allclose(o[:, 7:22], 0.5) and np.allclose(o[:, 22:], r[:, 22:])
