@@ -144,6 +144,8 @@ AP.add_argument("--sim_kp", type=float, default=1.0,
                 help="mujoco 전용 강건성 시험: 모터 P 이득 배율 (실기 모터와의 차이를 흉내)")
 AP.add_argument("--viewer", action="store_true",
                 help="mujoco 백엔드에서 실시간 뷰어 창을 띄운다 (화면으로 보며 확인)")
+AP.add_argument("--sim_pose_log", default="",
+                help="mujoco 전용: 스텝별 세그먼트·머리(몸통 위 0.45 m)·골반·양발 world 위치를 npz 로 (눈에 보이는 흔들림 측정)")
 AP.add_argument("--sim_realtime", action="store_true",
                 help="mujoco 전용: 뷰어 없이도 실시간 속도로 돈다 (조작 패널로 명령을 보낼 때)")
 AP.add_argument("--arm", action="store_true", help="실제로 DDS 에 발행한다 (없으면 dry-run)")
@@ -597,6 +599,13 @@ class MujocoBackend:
                 self.renderer.update_scene(self.d, self.cam)
                 self.vw.append_data(self.renderer.render())
 
+    def pose_points(self):
+        """머리(torso_link 원점에서 위로 0.45 m)·골반·왼발·오른발 world 위치 (4, 3)."""
+        b = [mj.mj_name2id(self.m, mj.mjtObj.mjOBJ_BODY, n)
+             for n in ("torso_link", "pelvis", "left_ankle_roll_link", "right_ankle_roll_link")]
+        head = self.d.xpos[b[0]] + self.d.xmat[b[0]].reshape(3, 3) @ np.array([0.0, 0.0, 0.45])
+        return np.stack([head] + [self.d.xpos[i].copy() for i in b[1:]])
+
     def height(self):
         return float(self.d.qpos[2])
 
@@ -832,6 +841,7 @@ log = []
 tq_log = []          # 스텝별 최대 토크 사용률 (전류 한계 대비)
 tq_hold = []         # 유지·쪼그림 구간만
 ff_log = []          # 발 수직 접촉력 [N] — 0 이면 떠 있다
+pose_log = []        # --sim_pose_log: (세그먼트, (4,3) 머리·골반·발 위치)
 cycles = []          # 실제 제어 주기 (ms) — 지연 여유 60ms 안에 드는지 확인용
 t_prev = None
 t_next = time.perf_counter()
@@ -945,6 +955,8 @@ for t in itertools.count():
 
     if sim is not None:
         log[-1] = log[-1] + (sim.height(),)
+        if args.sim_pose_log:
+            pose_log.append((player.segment, sim.pose_points()))
         ff_log.append(sim.foot_force())
         continue
     t_next += CTRL_DT
@@ -972,6 +984,8 @@ if stop["hard"]:
 
 def print_summary():
     """어느 종료 경로(유지·복귀·비상)에서도 같은 요약을 찍는다."""
+    if args.sim_pose_log and pose_log:
+        np.savez(args.sim_pose_log, segment=np.array([p[0] for p in pose_log]), pos=np.stack([p[1] for p in pose_log]))
     if motor_health():
         print("  끝 " + motor_health())
     # dry-run 은 물리가 없다. read_state 가 직전 명령을 그대로 돌려주므로
