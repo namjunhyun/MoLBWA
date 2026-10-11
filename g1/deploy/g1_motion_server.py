@@ -69,6 +69,8 @@ AP.add_argument("--fake_events", type=int, default=0,
                 help="mujoco 백엔드 전용: 6 초 간격으로 무작위 part/bearing act 를 N 번 내부 주입하고, "
                      "마지막 동작이 끝나 idle 로 돌아오면 재생을 끝낸다. 요약에 이벤트별 heading 오차·지연 표")
 AP.add_argument("--fake_seed", type=int, default=0, help="--fake_events 의 난수 씨앗")
+AP.add_argument("--fake_tail_sec", type=float, default=0.0,
+                help="--fake_events: 마지막 동작이 끝나 idle 로 돌아온 뒤 이만큼 더 idle 을 재생하고 끝낸다 (동작 후 흔들림 측정)")
 AP.add_argument("--fake_bearing", type=int, default=None,
                 help="mujoco 전용: 가짜 이벤트의 착용자 방위를 이 값(도, + = 왼쪽)으로 고정 — 시연 영상용")
 AP.add_argument("--fake_part", default=None, choices=["g1_face", "g1_hand", "g1_torso"],
@@ -852,6 +854,7 @@ fake_parts = [p for p in sorted(PART_TO_SEGMENT) if PART_TO_SEGMENT[p] in SEGS] 
 if args.fake_events and not fake_parts:
     sys.exit("--fake_events: 라이브러리에 동작 세그먼트가 하나도 없다")
 fake_next = int(6.0 / CTRL_DT)       # 다음 가짜 이벤트를 넣을 수 있는 가장 이른 스텝
+fake_idle_since = None               # 마지막 가짜 이벤트 뒤 idle 로 돌아온 스텝
 k = 0
 def wrap_deg(a):
     return (a + 180.0) % 360.0 - 180.0
@@ -862,7 +865,9 @@ def turn_deg(segs):
 for t in itertools.count():
     if stop["v"] or (n_run is not None and t >= n_run):
         break
-    if args.fake_events and len(events) >= args.fake_events and player.state == "idle":
+    if args.fake_events and len(events) >= args.fake_events and player.state == "idle" and fake_idle_since is None:
+        fake_idle_since = t
+    if fake_idle_since is not None and (t - fake_idle_since) * CTRL_DT >= args.fake_tail_sec:
         print(f"가짜 이벤트 {len(events)}개 완료 — 재생을 끝낸다")
         break
     r = read_state()
