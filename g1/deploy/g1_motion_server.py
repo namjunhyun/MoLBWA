@@ -27,6 +27,11 @@ import argparse
 import itertools
 import socket
 import subprocess, json, os, signal, sys, time
+# numpy(OpenBLAS) 가 코어 수만큼 스레드를 띄우면 작은 행렬곱마다 스레드끼리 다퉈 제어주기가 튄다.
+# 2026-10-12 젯슨 dry-run 60초: 기본 최대 36.4 ms·부하 5.7 → 1스레드 최대 20.4 ms·부하 2.3.
+# 실기에서는 이 튐이 5회 연속 겹쳐 정책이 두 번 멈췄다. numpy import 전에 정해야 먹는다.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 import numpy as np
 
 # segment_player 가 g1_protocol 을 같은 폴더(Jetson) 또는 부모 폴더(저장소)에서 찾는다.
