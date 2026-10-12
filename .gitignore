@@ -46,3 +46,9 @@ ros2_ws/src/orbslam3_ros2/
 # 설정 수동 백업 / 잘못 찍힌 캘리브 백업 (로컬 보관용)
 *.bak_*
 calibration/gaze_scene_extrinsic_*.json
+
+# 2026-10-12: 실기 구동 로그/기록 (재생성 가능, 용량 큼)
+notes/traj/
+notes/gui_*.log
+notes/move_log_*.csv
+ros2_ws/src/gaze_hri/config/*_bak_*.yaml

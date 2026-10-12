@@ -83,6 +83,10 @@ class ControlPanel(Node):
         self.declare_parameter("homography_file",
                                os.path.expanduser("~/.ros/topdown_homography.yaml"))
         self.declare_parameter("detect_objects", True)
+        # 2026-10-12: 검출 박스 아래 변(카메라 쪽 바닥 가장자리) -> 물체 중심 보정 [m]
+        self.declare_parameter("object_radius", 0.0)
+        self.declare_parameter("mouse_click_only", True)
+        self.declare_parameter("reach_band", [0.0])     # [r_min, r_max] m, 2개가 아니면 안 그림   # 마우스 모드: 클릭만 응시로 친다
         self.declare_parameter("hsv_lower", [0, 120, 80])
         self.declare_parameter("hsv_upper", [12, 255, 255])
         self.declare_parameter("min_area", 400)
@@ -136,7 +140,8 @@ class ControlPanel(Node):
                 self.get_parameter("yolo_conf").value,
                 self.get_parameter("yolo_classes").value,
                 self.get_parameter("min_area").value,
-                logger=self.get_logger())
+                logger=self.get_logger(),
+                anchor_radius=self.get_parameter("object_radius").value)
             self.get_logger().info("물체 검출: YOLO")
         else:
             self.detector = ObjectDetector(
@@ -453,6 +458,11 @@ class ControlPanel(Node):
 
     def publish_mouse_point(self, now):
         holding = now < self.held_until and self.held_px is not None
+        # 2026-10-12: 클릭만 선택으로 친다. 커서를 화면 위에 올려 둔 것만으로 2초 응시가
+        # 확정돼 엉뚱한 집기가 두 번 실행됐다 (팔 뒤/옆 좌표 -> 거부 -> home 복귀).
+        if not holding and bool(self.get_parameter("mouse_click_only").value):
+            self.pub_valid.publish(Bool(data=False))
+            return
         px = self.held_px if holding else self.cursor
         if px is None or not self.homography.ready:
             return
@@ -496,6 +506,8 @@ class ControlPanel(Node):
             place_target=self.place_target,
             target_info=self.target_info,
             tcp=self.tcp if self.show_tip else None,
+            reach_band=(tuple(self.get_parameter("reach_band").value)
+                        if len(self.get_parameter("reach_band").value) == 2 else None),
             arm_phase=self.arm_phase,
             has_fixation=self.has_fixation,
             detect_on=self.detect_on,

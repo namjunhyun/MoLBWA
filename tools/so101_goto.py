@@ -2,7 +2,7 @@
 """SO-101 팔로워를 home / 휴식 자세 / 지정 TCP 로 천천히 옮긴다 (ROS 없이, 실측 맵 사용).
 
     python3 tools/so101_goto.py save-rest            # 지금 자세를 휴식 자세로 저장 (움직이지 않음)
-    python3 tools/so101_goto.py home                 # home: TCP (0.22, 0, 0.16) -45°
+    python3 tools/so101_goto.py home                 # home: TCP (0.30, 0, 0.19) 수평 (gaze_hri.yaml 과 같게)
     python3 tools/so101_goto.py rest                 # 저장한 휴식 자세로
     python3 tools/so101_goto.py xyz 0.25 0.0 0.12 --pitch -0.785
 
@@ -22,11 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri")
 sys.path.insert(0, PKG)
 from gaze_hri.kinematics import ArmGeometry, IKError, inverse_kinematics  # noqa: E402
-from gaze_hri.so101_driver import JointMap, SafetyStop, So101Bus, move_smooth  # noqa: E402
+from gaze_hri import arms  # noqa: E402
+from gaze_hri.so101_driver import JointMap, SafetyStop, So101Bus, joint_limits_rad, move_smooth  # noqa: E402
 
-MAP = os.path.join(PKG, "config", "so101_follower.yaml")
-REST = os.path.expanduser("~/.ros/so101_rest_ticks.json")
-HOME_XYZ, HOME_PITCH, HOME_GRIP = [0.25, 0.0, 0.12], -1.2, 1.2  # 2026-09-27: gaze_hri.yaml home 과 같게 (태그 안 가림)
+HOME_XYZ, HOME_PITCH, HOME_GRIP = [0.30, 0.0, 0.19], 0.0, 1.2  # 2026-10-12: gaze_hri.yaml home 과 같게 (수평 옆 집기)
 
 
 def heights(q, g):
@@ -72,12 +71,15 @@ def main():
     ap.add_argument("--pitch", type=float, default=HOME_PITCH)
     ap.add_argument("--speed", type=float, default=15.0, help="deg/s (가장 많이 도는 관절 기준)")
     ap.add_argument("--check-only", action="store_true", help="경로 검사만, 안 움직임")
+    ap.add_argument("--arm", required=True, choices=sorted(arms.ARMS))
     a = ap.parse_args()
 
+    MAP, REST = arms.map_file(a.arm), arms.rest_file(a.arm)
     cfg = yaml.safe_load(open(MAP))
     m = JointMap(cfg["zero_ticks"], cfg["signs"])
     g = ArmGeometry()
     bus = So101Bus(cfg["port"], cfg["servo_ids"])
+    g.limits.update(joint_limits_rad(bus, m))     # 팔마다 서보 한계가 다르다 (2026-10-12)
     try:
         now = bus.ticks()
         if a.cmd == "save-rest":

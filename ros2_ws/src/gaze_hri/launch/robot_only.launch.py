@@ -23,6 +23,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     share = get_package_share_directory("gaze_hri")
     params = os.path.join(share, "config", "gaze_hri.yaml")
+    # 2026-10-12: 팔로워 2대. 파일 규칙은 gaze_hri/arms.py 와 같다 (src/config 기준)
+    arm = LaunchConfiguration("arm")
+    cfg_dir = os.path.dirname(os.path.realpath(params))
+    joint_map = [cfg_dir + "/so101_follower_", arm, ".yaml"]
+    homography = [os.path.expanduser("~/.ros/topdown_homography_"), arm, ".yaml"]
 
     mode = LaunchConfiguration("mode")
     backend = LaunchConfiguration("backend")
@@ -33,6 +38,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("mode", default_value="run",
                               description="run | calib"),
+        DeclareLaunchArgument("arm", default_value="a",
+                              description="a = …5667 (기존 팔) | b = …5906. "
+                                          "관절 캘리브/탑다운 캘리브 파일을 팔마다 따로 쓴다"),
         DeclareLaunchArgument("backend", default_value="dry_run",
                               description="dry_run | feetech | joint"),
         DeclareLaunchArgument("camera_index", default_value="0"),
@@ -51,7 +59,7 @@ def generate_launch_description():
 
         Node(package="gaze_hri", executable="topdown_click",
              name="topdown_click", output="screen",
-             parameters=[params, {"mode": mode, "camera_index": cam_idx,
+             parameters=[params, {"mode": mode, "homography_file": homography, "camera_index": cam_idx,
                                   "detect_objects": detect}]),
 
         Node(package="gaze_hri", executable="dwell_detector",
@@ -65,6 +73,6 @@ def generate_launch_description():
 
         Node(package="gaze_hri", executable="arm_server",
              name="arm_server", output="screen",
-             parameters=[params, {"backend": backend,
+             parameters=[params, {"backend": backend, "joint_map_file": joint_map,
                                   "simulate_fail_rate": fail_rate}]),
     ])

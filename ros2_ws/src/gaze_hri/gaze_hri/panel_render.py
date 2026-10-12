@@ -58,6 +58,7 @@ class PanelState:
     place_target: tuple = None
     target_info: dict = None
     tcp: tuple = None                 # 팔 끝 로봇 (x, y, z)
+    reach_band: tuple = None          # 집을 수 있는 거리 (r_min, r_max) [m] — 책상 위 띠로 그린다
     arm_phase: str = ""
     has_fixation: bool = False
     detect_on: bool = True
@@ -78,6 +79,7 @@ def render(frame, st, hud, homography):
     if st.mode == "calib":
         _draw_calibration(view, st, hud)
     else:
+        _draw_reach_band(view, st, homography)
         _draw_objects(view, st, hud)
         _draw_targets(view, st, hud, homography)
         _draw_arm_tip(view, st, hud, homography)
@@ -182,6 +184,24 @@ def _draw_needs_calibration(view, hud):
              hud.label("k 를 누르면 시작합니다 (팔이 8개 자세를 잡습니다)",
                        "Press k to start (the arm will strike 8 poses)"),
              H.FG, 13, anchor="ct", alpha=0.8)
+
+
+def _draw_reach_band(view, st, homo, max_yaw_deg=60.0):
+    """2026-10-12: 집을 수 있는 거리 띠. 화면 몇 픽셀이 수 cm 라 감으로 컵을 두면 53cm 처럼
+    범위 밖에 놓였다. 받침대 중심에서 r_min~r_max 인 책상 위 영역을 반투명하게 칠한다."""
+    if st.reach_band is None or not getattr(homo, "ready", True):
+        return
+    r0, r1 = st.reach_band
+    yaws = np.radians(np.linspace(-max_yaw_deg, max_yaw_deg, 41))
+    pts = [homo.to_pixel(r * math.cos(a), r * math.sin(a))
+           for r, seq in ((r0, yaws), (r1, yaws[::-1])) for a in seq]
+    if any(p is None for p in pts):
+        return
+    poly = np.array([[int(p[0]), int(p[1])] for p in pts], np.int32).reshape(-1, 1, 2)
+    over = view.copy()
+    cv2.fillPoly(over, [poly], (120, 200, 90))
+    cv2.addWeighted(over, 0.22, view, 0.78, 0, dst=view)
+    cv2.polylines(view, [poly], True, (120, 200, 90), 1, cv2.LINE_AA)
 
 
 def _draw_arm_tip(view, st, hud, homo):

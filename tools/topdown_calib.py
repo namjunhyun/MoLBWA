@@ -35,16 +35,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri")
 sys.path.insert(0, PKG)
 from gaze_hri.kinematics import ArmGeometry, IKError, inverse_kinematics, forward_kinematics  # noqa: E402
-from gaze_hri.so101_driver import JointMap, SafetyStop, So101Bus, move_smooth  # noqa: E402
+from gaze_hri import arms  # noqa: E402
+from gaze_hri.so101_driver import JointMap, SafetyStop, So101Bus, move_smooth, settle_ticks  # noqa: E402
 
-MAP = os.path.join(PKG, "config", "so101_follower.yaml")
 PARAMS = os.path.join(PKG, "config", "gaze_hri.yaml")
-OUT = os.path.expanduser("~/.ros/topdown_homography.yaml")
 # 팔 앞 작업 영역 (base_link, m). 컵 배치(반경 0.30~0.34)를 감싸도록.
 # 2026-09-29: 실제로 집고 놓는 범위(받침대에서 16~29cm, 좌우 ±20cm)로 넓게 다시 잡음.
 # 예전 값(앞 22~34cm 에 몰림): [(0.22,0.12),(0.22,-0.12),(0.30,0.16),(0.30,-0.16),(0.34,0.08),(0.34,-0.08),(0.26,0),(0.33,0)]
-CALIB_XY = [(0.18, 0.14), (0.18, -0.14), (0.24, 0.20), (0.24, -0.20),
-            (0.30, 0.10), (0.30, -0.10), (0.22, 0.00), (0.29, 0.00)]
+# 2026-10-12: 컵 수평 옆 집기 — 컵은 37~42cm, 이동은 그 뒤 30cm 부근. 그 범위를 감싸게 다시 잡음.
+# (그 전) [(0.18,0.14),(0.18,-0.14),(0.24,0.20),(0.24,-0.20),(0.30,0.10),(0.30,-0.10),(0.22,0),(0.29,0)]
+CALIB_XY = [(0.27, 0.14), (0.27, -0.14), (0.33, 0.20), (0.33, -0.20),
+            (0.40, 0.12), (0.40, -0.12), (0.30, 0.00), (0.42, 0.00)]
 
 
 def geometry():
@@ -97,10 +98,13 @@ def main():
     ap.add_argument("--min-tip-z", type=float, default=0.008)
     ap.add_argument("--speed", type=float, default=15.0)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--arm", required=True, choices=sorted(arms.ARMS))
     a = ap.parse_args()
 
     g, tip = geometry()
-    cfg = yaml.safe_load(open(MAP))
+    global OUT
+    OUT = arms.homography_file(a.arm)
+    cfg = yaml.safe_load(open(arms.map_file(a.arm)))
     m = JointMap(cfg["zero_ticks"], cfg["signs"])
     bus = So101Bus(cfg["port"], cfg["servo_ids"])
     try:
@@ -135,6 +139,9 @@ def main():
                 target[4] = bus.last_goal[4]                     # 롤은 그대로
                 target[5] = grip                                 # 그리퍼 조금 열기 (끝이 잘 보이게)
                 move_smooth(bus, target, max_deg_s=a.speed)
+            # 2026-10-12: 처짐 보정 — arm_server 도 집을 때 같은 보정을 하므로, 캘리브 지점도
+            # 보정된 자세에서 찍어야 클릭 좌표와 실제 집는 위치가 맞는다
+            settle_ticks(bus, target)
             time.sleep(0.8)                                      # 흔들림 가라앉기
             click["p"] = None
             print(f"[{i + 1}/{len(legs)}] 손가락 끝 = 로봇 ({x:.2f}, {y:+.2f}) — 화면에서 **두 손가락 끝의 가운데** 클릭")

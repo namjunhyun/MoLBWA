@@ -139,11 +139,19 @@ class YoloDetector:
     """
 
     def __init__(self, python, model, conf=0.25, classes=("cup", "bottle"), min_area=400,
-                 logger=None, anchor="bottom"):
+                 logger=None, anchor="bottom", imgsz=640, roi_m=None, anchor_radius=0.0):
         self.cmd = [os.path.expanduser(python), os.path.join(os.path.dirname(__file__), "yolo_worker.py"),
-                    os.path.expanduser(model), str(conf), ",".join(classes)]
+                    os.path.expanduser(model), str(conf), ",".join(classes), str(int(imgsz))]
+        # 2026-10-01: 파란 테이블에서 화면 전체를 넣으면 YOLO 가 테이블을 laptop 으로 보고 인형을
+        # 아예 못 잡았다(conf 0.02 에서도 0개). 팔 작업 영역 [x_min, x_max, y_min, y_max](m)만 잘라
+        # 넣으면 같은 인형이 0.29. 영역은 호모그래피로 픽셀 사각형을 구한다.
+        self.roi_m = list(roi_m) if roi_m else None
+        self._off = (0, 0)
         self.min_area = int(min_area)
         self.anchor = anchor   # "bottom"(바닥 접촉점) | "center"(박스 중심)
+        # 2026-10-12: 박스 아래 변은 바닥 원 중에서 **카메라 쪽 가장자리**다 (카메라가 사용자
+        # 쪽에서 팔을 본다). 물체 중심은 거기서 화면 안쪽(카메라에서 먼 쪽)으로 반지름만큼.
+        self.anchor_radius = float(anchor_radius)
         self.log = logger
         self._proc = None
         self._lock = threading.Lock()
@@ -193,7 +201,29 @@ class YoloDetector:
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
 
-    def _submit(self, frame):
+    def _roi_px(self, frame, homography):
+        """작업 영역 사각형(m)의 네 모서리를 픽셀로 옮긴 외접 사각형 (x0, y0, x1, y1)."""
+        if not self.roi_m or not hasattr(homography, "to_pixel"):
+            return None
+        x0, x1, y0, y1 = self.roi_m
+        pts = [homography.to_pixel(x, y) for x in (x0, x1) for y in (y0, y1)]
+        if any(p is None for p in pts):
+            return None
+        h, w = frame.shape[:2]
+        us, vs = [p[0] for p in pts], [p[1] for p in pts]
+        a, b = max(0, int(min(us)) - 20), min(w, int(max(us)) + 20)
+        c, d = max(0, int(min(vs)) - 20), min(h, int(max(vs)) + 20)
+        if b - a < 32 or d - c < 32:
+            return None
+        return a, c, b, d
+
+    def _submit(self, frame, roi=None):
+        if roi is not None:
+            a, c, b, d = roi
+            frame = frame[c:d, a:b]
+            self._off = (a, c)
+        else:
+            self._off = (0, 0)
         ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
         if not ok:
             return
@@ -213,11 +243,13 @@ class YoloDetector:
         with self._lock:
             ready, busy = self._ready, self._busy
         if ready and not busy:
-            self._submit(frame)
+            self._submit(frame, self._roi_px(frame, homography))
         with self._lock:
             dets = list(self._dets)
+        ox, oy = self._off
         found = []
         for _, _, x1, y1, x2, y2 in dets:
+            x1, x2, y1, y2 = x1 + ox, x2 + ox, y1 + oy, y2 + oy
             if (x2 - x1) * (y2 - y1) < self.min_area:
                 continue
             # 박스 중심이 아니라 아래쪽 가운데(바닥 접촉점)를 쓴다. 카메라가 비스듬히
@@ -231,10 +263,25 @@ class YoloDetector:
             xy = homography.to_robot(u, v)
             if xy is None:
                 continue
+            if self.anchor == "bottom" and self.anchor_radius > 0.0:
+                xy = self._shift_away_from_camera(homography, u, v, xy)
             box = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32).round().astype(np.int32)
             found.append(((u, v), xy, box.reshape(-1, 1, 2)))
         found.sort(key=lambda it: it[1][1])
         return found
+
+
+    def _shift_away_from_camera(self, homography, u, v, xy):
+        """바닥 가장자리 점 -> 물체 중심: 화면 위쪽(카메라에서 먼 쪽) 방향으로 anchor_radius."""
+        up = homography.to_robot(u, v - 20.0)
+        if up is None:
+            return xy
+        d = np.array(up, float) - np.array(xy, float)
+        n = float(np.linalg.norm(d))
+        if n < 1e-9:
+            return xy
+        c = np.array(xy, float) + d / n * self.anchor_radius
+        return (float(c[0]), float(c[1]))
 
 
 class HomographyCalibration:

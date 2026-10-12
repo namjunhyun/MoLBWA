@@ -32,11 +32,11 @@ import numpy as np
 @dataclass
 class ArmGeometry:
     """URDF에서 읽어와야 하는 값들 (단위: m, rad)."""
-    base_height: float = 0.1300      # base_link -> shoulder_lift 축까지의 z (2026-09-27 실측, 수직)
+    base_height: float = 0.1166      # base_link -> shoulder_lift 축 z. 2026-10-12 공식 URDF (0.0624+0.0542), 실측 12cm
     shoulder_offset: float = 0.0304  # 회전축에서 shoulder_lift 축까지의 수평 오프셋
     l1: float = 0.1160               # shoulder_lift -> elbow_flex
     l2: float = 0.1350               # elbow_flex   -> wrist_flex
-    l3: float = 0.1350               # wrist_flex   -> 그리퍼 파지 중심(TCP). 2026-09-24 실측 기반
+    l3: float = 0.1700               # wrist_flex   -> 파지 중심(TCP, 컵 중심). 2026-10-12 교체 그리퍼 실측 (옛 0.135)
 
     # 관절 한계. 2026-09-28: IK 4관절은 URDF 추정값(±95~110°) 대신 **모터 실제 가동 범위**
     # (so101_follower.yaml 의 틱 한계를 zero_ticks 로 환산, 양끝 3° 여유)로 바꿨다. 옛 값은

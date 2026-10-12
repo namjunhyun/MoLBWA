@@ -22,9 +22,11 @@ gaze_hri 기구학 규약 (kinematics.forward_kinematics):
 손으로 잡은 자세라 몇 도 오차는 생긴다. 탑다운 호모그래피 캘리브레이션이 "로봇이
 IK 로 믿는 위치"를 기준으로 화면을 맞추므로, 일정한 0점 오차는 상당 부분 상쇄된다.
 
-    python3 tools/so101_map_calib.py relax --yes     # 토크 OFF (팔을 받친 상태에서)
-    python3 tools/so101_map_calib.py capture B       # 자세마다
-    python3 tools/so101_map_calib.py solve           # -> config/so101_follower.yaml
+    python3 tools/so101_map_calib.py --arm a relax --yes   # 토크 OFF (팔을 받친 상태에서)
+    python3 tools/so101_map_calib.py --arm a capture B     # 자세마다
+    python3 tools/so101_map_calib.py --arm a solve         # -> config/so101_follower_a.yaml
+
+2026-10-12: 팔로워 2대(a/b, gaze_hri/arms.py) — 캡처/결과 파일이 팔마다 따로다.
 """
 import argparse
 import json
@@ -35,16 +37,17 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri"))
+from gaze_hri import arms  # noqa: E402
 from gaze_hri.so101_driver import JOINT_NAMES, So101Bus  # noqa: E402
 
-PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B8E115667-if00"   # 12V 팔로워
-CAPS = os.path.expanduser("~/.ros/so101_map_captures.json")
-OUT = os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri", "config", "so101_follower.yaml")
 Q90 = 1024          # 90° = 1024틱
+URDF_UPPER_DEG = 13.97   # 위팔 축선 vs 몸통 (atan2(0.028, 0.11257))
+URDF_LOWER_DEG = 2.21    # 아래팔 축선 vs 몸통 (atan2(0.0052, 0.1349))
 
 
-def load_caps():
-    return json.load(open(CAPS)) if os.path.exists(CAPS) else {}
+def load_caps(arm):
+    path = arms.captures_file(arm)
+    return json.load(open(path)) if os.path.exists(path) else {}
 
 
 def main():
@@ -52,16 +55,17 @@ def main():
     ap.add_argument("cmd", choices=["relax", "capture", "solve", "show"])
     ap.add_argument("pose", nargs="?")
     ap.add_argument("--yes", action="store_true")
-    ap.add_argument("--port", default=PORT)
+    ap.add_argument("--arm", required=True, choices=sorted(arms.ARMS),
+                    help="a = …5667 (기존 팔), b = …5906")
     a = ap.parse_args()
 
     if a.cmd == "solve":
-        return solve(load_caps())
+        return solve(load_caps(a.arm), a.arm)
     if a.cmd == "show":
-        print(json.dumps(load_caps(), indent=1))
+        print(json.dumps(load_caps(a.arm), indent=1))
         return 0
 
-    bus = So101Bus(a.port)
+    bus = So101Bus(arms.port(a.arm))
     try:
         if a.cmd == "relax":
             if not a.yes:
@@ -72,17 +76,18 @@ def main():
             if a.pose not in ("A", "B", "C", "D", "GC", "GO"):
                 sys.exit("pose 는 A B C D GC GO 중 하나")
             t = bus.ticks()
-            caps = load_caps()
+            caps = load_caps(a.arm)
             caps[a.pose] = t
-            os.makedirs(os.path.dirname(CAPS), exist_ok=True)
-            json.dump(caps, open(CAPS, "w"))
+            path = arms.captures_file(a.arm)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            json.dump(caps, open(path, "w"))
             print(f"{a.pose}: " + ", ".join(f"{n}={v}" for n, v in zip(JOINT_NAMES, t)))
     finally:
         bus.close()
     return 0
 
 
-def solve(c):
+def solve(c, arm):
     need = ["A", "B", "C", "D", "GC", "GO"]
     miss = [p for p in need if p not in c]
     if miss:
@@ -116,6 +121,16 @@ def solve(c):
         "wrist":    (B[3], A[3]),
     }
     zero4 = [round((b + a2) / 2) for b, a2 in est.values()]
+
+    # 2026-10-12: 손 자세는 **몸통**을 수평/수직으로 맞추지만, 기구학 각도는 **축과 축을 잇는 선**
+    # 기준이다. 공식 URDF(so101_new_calib.urdf)에서 위팔은 축선이 몸통보다 14.0°
+    # (elbow_flex origin -0.11257, -0.028), 아래팔은 2.2° (wrist_flex origin -0.1349, 0.0052)
+    # 기울어 있다. 팔 a 실측(home 자세에서 축 중심 높이/거리 자로 측정)도 어깨 -18°, 팔꿈치 +15°,
+    # 아래팔 -3° 로 같은 방향·비슷한 크기였다. 이 차이를 무시해서 그리퍼가 몇 cm 씩 어긋났다.
+    #   a1(축선) = U(몸통) - 14.0°,  a2 = F - 2.2°  ->  j2 -= 14.0°, j3 += 11.8°, j4 += 2.2°
+    # 각도에 d 를 더하려면 zero 를 sign*d 만큼 뺀다 (rad = sign*(tick - zero)).
+    for i, d in ((1, -URDF_UPPER_DEG), (2, URDF_UPPER_DEG - URDF_LOWER_DEG), (3, URDF_LOWER_DEG)):
+        zero4[i] = round(zero4[i] - (s2, s3, s4)[i - 1] * d * Q90 / 90.0)
     spread = {k: abs(b - a2) * 360 / 4096 / 2 for k, (b, a2) in est.items()}
     for k, v in spread.items():
         print(f"  0점 {k:8s}: B 추정 {est[k][0]}, A 추정 {est[k][1]} -> 평균 (불확실성 ±{v:.1f}°)")
@@ -126,7 +141,7 @@ def solve(c):
     for p in problems:
         print("[경고]", p)
     cfg = {
-        "port": PORT,
+        "port": arms.port(arm),
         "servo_ids": [1, 2, 3, 4, 5, 6],
         "zero_ticks": [int(z) for z in zero],
         "signs": sign,
@@ -136,7 +151,10 @@ def solve(c):
         "captured": {k: c[k] for k in need},
         "warnings": problems,
     }
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    OUT = arms.map_file(arm)
+    if os.path.exists(OUT):                      # 이전 캘리브 보존
+        import time
+        os.rename(OUT, OUT.replace(".yaml", time.strftime("_bak_%Y%m%d_%H%M%S.yaml")))
     with open(OUT, "w") as f:
         f.write("# tools/so101_map_calib.py solve 결과. 손으로 다시 잡으면 덮어써진다.\n")
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)

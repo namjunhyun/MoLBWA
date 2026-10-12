@@ -40,6 +40,8 @@ def make_bus(fake, **safety):
     bus = d.So101Bus.__new__(d.So101Bus)          # 시리얼 없이 조립
     bus.log = lambda m: None
     bus.ids = [1, 2, 3, 4, 5, 6]
+    # 기존 테스트들은 큰 목표를 한 번에 쓴다 -> 점프 차단(max_step_deg)은 따로 시험한다
+    safety.setdefault("max_step_deg", 360.0)
     bus.safety = d.SafetyConfig(**safety)
     bus._err_since = bus._load_since = None
     bus._n_check = 0
@@ -158,6 +160,40 @@ class TestSo101Driver(unittest.TestCase):
         f.reg[4][56] = 60000
         with self.assertRaises(d.SafetyStop):    # RuntimeError 로 새면 hold 없이 끝난다
             bus.write_ticks([2100] * 6)
+
+
+class TestStreaming(unittest.TestCase):
+    """2026-10-12: 서보 내부 가감속을 끄고 PC 스트리밍으로 바꾸면서 생긴 안전장치."""
+
+    def test_enable_disables_servo_ramp(self):
+        f = FakeServos()
+        make_bus(f).enable()
+        self.assertTrue(all(f.reg[s][41] == 0 and f.reg[s][46] == 0 for s in range(1, 7)))
+
+    def test_jump_rejected_and_holds(self):
+        f = FakeServos()
+        bus = make_bus(f, max_step_deg=8.0)
+        bus.enable()
+        bus.write_ticks([2050] * 6)              # ~4° — 허용
+        with self.assertRaises(d.SafetyStop):
+            bus.write_ticks([2400] * 6)          # ~31° 한 번에 — 거부
+        for sid in range(1, 7):
+            self.assertEqual(f.reg[sid][42], 2050)   # 점프 목표는 쓰이지 않았다
+
+    def test_move_smooth_never_jumps(self):
+        f = FakeServos()
+        bus = make_bus(f, max_step_deg=8.0)
+        bus.enable()
+        d.move_smooth(bus, [2900] * 6, max_deg_s=400.0, rate_hz=1000.0)
+        self.assertEqual(f.reg[1][42], 2900)
+
+    def test_min_jerk_endpoints(self):
+        self.assertEqual(d.min_jerk(0.0), 0.0)
+        self.assertEqual(d.min_jerk(1.0), 1.0)
+        self.assertAlmostEqual(d.min_jerk(0.5), 0.5)
+        e = 1e-4                                  # 양 끝 속도 ~0
+        self.assertLess(d.min_jerk(e) / e, 1e-3)
+        self.assertLess((1 - d.min_jerk(1 - e)) / e, 1e-3)
 
 
 class SdkShapedHandler:

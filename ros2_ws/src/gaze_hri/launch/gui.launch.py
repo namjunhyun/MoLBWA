@@ -38,6 +38,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     share = get_package_share_directory("gaze_hri")
     params = os.path.join(share, "config", "gaze_hri.yaml")
+    # 2026-10-12: 팔로워 2대. 파일 규칙은 gaze_hri/arms.py 와 같다 (src/config 기준)
+    arm = LaunchConfiguration("arm")
+    cfg_dir = os.path.dirname(os.path.realpath(params))
+    joint_map = [cfg_dir + "/so101_follower_", arm, ".yaml"]
+    homography = [os.path.expanduser("~/.ros/topdown_homography_"), arm, ".yaml"]
 
     input_src = LaunchConfiguration("input")
     backend = LaunchConfiguration("backend")
@@ -54,6 +59,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("input", default_value="mouse",
                               description="mouse | gaze"),
+        DeclareLaunchArgument("arm", default_value="a",
+                              description="a = …5667 (기존 팔) | b = …5906. "
+                                          "관절 캘리브/탑다운 캘리브 파일을 팔마다 따로 쓴다"),
         DeclareLaunchArgument("backend", default_value="dry_run",
                               description="dry_run | feetech | joint"),
         DeclareLaunchArgument("source", default_value="udp",
@@ -85,7 +93,7 @@ def generate_launch_description():
         # --- 통합 GUI ---
         Node(package="gaze_hri", executable="control_panel",
              name="control_panel", output="screen",
-             parameters=[params, {"input_source": input_src,
+             parameters=[params, {"input_source": input_src, "homography_file": homography,
                                   "camera_index": cam_idx,
                                   "ocams": ocams,
                                   "detect_objects": True}]),
@@ -100,5 +108,5 @@ def generate_launch_description():
              name="task_manager", output="screen", parameters=[params]),
         Node(package="gaze_hri", executable="arm_server",
              name="arm_server", output="screen",
-             parameters=[params, {"backend": backend}]),
+             parameters=[params, {"backend": backend, "joint_map_file": joint_map}]),
     ])

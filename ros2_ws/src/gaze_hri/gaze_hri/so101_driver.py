@@ -68,13 +68,25 @@ class JointMap:
 @dataclass
 class SafetyConfig:
     min_voltage: float = 9.0          # 12V 팔로워만. 리더(5V)는 여기서 걸린다
-    torque_limit: int = 500           # 50%. 부딪혀도 덜 아프게
-    accel: int = 20                   # 서보 가속 (0~254, 작을수록 부드럽게)
-    goal_speed: int = 600             # 틱/s ≈ 53°/s 상한 (서보 내부)
+    # 2026-10-12: 50% -> 90% (사용자 결정, 전 관절). 그리퍼 20cm + 컵을 앞 40cm 수평으로 들면
+    # 50% 에서 어깨/팔꿈치가 11° 처지고 옮기다 추종 오차로 안전 정지했다.
+    # ★ 그리퍼(6번)도 90% — 컵을 쥔 채 오래 두면 서보가 뜨거워진다 (lerobot 은 그리퍼 50% 로 둔다).
+    #    온도 감시(max_temp 60°C)가 마지막 방어선.
+    torque_limit: int = 900
+    torque_limit_by_id: dict = field(default_factory=dict)   # 관절별 예외 {서보 ID: 한계}
+    # 2026-10-12: 서보 내부 가감속/속도 상한을 끈다 (lerobot 텔레옵과 같은 0/0).
+    # 예전 accel=20, goal_speed=600 은 PC 가 8mm 마다 새 목표를 줄 때 서보가 구간마다
+    # 가속->감속을 다시 해서 덜컥거리는 주원인이었다. 이제 궤적(속도/가속)은 PC 가 촘촘한
+    # 스트림으로 만들고, 서보는 그 목표를 그대로 따라간다. 대신 한 번에 크게 튀는 목표는
+    # max_step_deg 로 막는다 (서보가 최고속으로 휘두르지 않게).
+    accel: int = 0                    # 0 = 서보 내부 가감속 없음
+    goal_speed: int = 0               # 0 = 서보 내부 속도 상한 없음
+    max_step_deg: float = 8.0         # 직전 목표 대비 한 번 쓰기에 허용하는 최대 변화 [deg]
     limit_margin: int = 30            # EEPROM 위치 한계에서 이만큼 안쪽까지만
     max_track_err: int = 200          # 목표-현재 오차(틱, ≈17.6°) — 이게
     track_err_time: float = 0.6       #   이 시간 넘게 지속되면 충돌/막힘으로 본다
-    max_load: int = 800               # 부하 80% 지속 시 정지 (그리퍼는 제외)
+    max_load: int = 950               # 부하 95% 지속 시 정지 (그리퍼는 제외). 토크 90% 에 맞춰 (옛 800)
+    max_load_by_id: dict = field(default_factory=dict)
     load_time: float = 0.5
     max_temp: int = 60                # °C
     slow_check_every: int = 10        # 온도/전압은 N 번에 한 번만 읽는다 (버스 부하 감소)
@@ -116,6 +128,16 @@ class So101Bus:
         self._n_check = 0
         self._bad = {"temp": 0, "volt": 0, "glitch": 0}
         self.last_goal = None
+        # 6축 목표를 패킷 하나로 (sync write), 위치+속도+부하(56~61)를 한 번에 (sync read).
+        # 예전엔 매 스텝 쓰기 6번 + 읽기 12번(위치/부하) = 왕복 18번이라 루프가 ~70ms 로 늘어지고
+        # 주기도 들쭉날쭉했다.
+        from scservo_sdk import GroupSyncRead, GroupSyncWrite
+        self._gsw = GroupSyncWrite(self.port, self.ph, R_GOAL_POS[0], 2)
+        for sid in self.ids:
+            self._gsw.addParam(sid, [0, 0])
+        self._gsr = GroupSyncRead(self.port, self.ph, R_PRESENT_POS[0], 6)
+        for sid in self.ids:
+            self._gsr.addParam(sid)
         log(f"[so101] {port} 연결, {v:.1f}V, 한계 {list(zip(self.lo, self.hi))}")
 
     # ---------- 저수준 ----------
@@ -150,6 +172,30 @@ class So101Bus:
         """현재 위치. ★ 말이 안 되는 값(한계에서 150틱 넘게 벗어남)은 통신 오류로 보고
         한 번 다시 읽는다. 그래도 이상하면 예외 — 엉터리 위치를 hold 목표로 쓰면 멈추려는
         순간 팔이 튄다 (2026-09-23: 이동 중 온도 레지스터가 140°C 로 한 번 잘못 읽혔다)."""
+        return self._pos_load()[0]
+
+    def _sync_read_raw(self):
+        """sync read 한 번 -> ([위치], [부하]). 실패하면 None (호출자가 개별 읽기로 물러선다)."""
+        gsr = getattr(self, "_gsr", None)
+        if gsr is None:
+            return None
+        if gsr.txRxPacket() != self._ok:
+            self._flush()
+            if gsr.txRxPacket() != self._ok:
+                return None
+        pos = [gsr.getData(sid, R_PRESENT_POS[0], 2) for sid in self.ids]
+        raw = [gsr.getData(sid, R_PRESENT_LOAD[0], 2) for sid in self.ids]
+        return pos, [-(v & 0x3FF) if v & 0x400 else v for v in raw]
+
+    def _pos_load(self, need_load=False):
+        """위치(+부하). sync read 우선, 값이 이상하면 개별 읽기로 다시 확인한다."""
+        got = self._sync_read_raw()
+        if got is not None and all(self._plausible_pos(i, v) for i, v in enumerate(got[0])):
+            return got
+        pos = self._ticks_individual()
+        return pos, (self.loads() if need_load else None)
+
+    def _ticks_individual(self):
         out = []
         for i, sid in enumerate(self.ids):
             v = self._r(sid, R_PRESENT_POS)
@@ -205,14 +251,16 @@ class So101Bus:
                 + ", ".join(f"{n} 위치 {t} (범위 {lo}~{hi})" for n, t, lo, hi in out)
                 + ". 손으로 범위 안쪽으로 옮긴 뒤 다시.")
         for sid, t in zip(self.ids, now):
-            self._w(sid, R_TORQUE_LIMIT, self.safety.torque_limit)
+            self._w(sid, R_TORQUE_LIMIT,
+                    self.safety.torque_limit_by_id.get(sid, self.safety.torque_limit))
             self._w(sid, R_ACCEL, self.safety.accel)
             self._w(sid, R_GOAL_SPEED, self.safety.goal_speed)
             self._w(sid, R_GOAL_POS, t)
         for sid in self.ids:
             self._w(sid, R_TORQUE_ENABLE, 1)
         self.last_goal = now
-        self.log(f"[so101] 토크 ON (한계 {self.safety.torque_limit / 10:.0f}%), 현재 자세 유지")
+        extra = "".join(f", ID{k} {v / 10:.0f}%" for k, v in self.safety.torque_limit_by_id.items())
+        self.log(f"[so101] 토크 ON (한계 {self.safety.torque_limit / 10:.0f}%{extra}), 현재 자세 유지")
 
     def hold(self):
         """지금 있는 자리에 세운다. 토크는 유지 (끄면 팔이 떨어진다).
@@ -244,20 +292,39 @@ class So101Bus:
     # ---------- 쓰기 + 감시 ----------
     def write_ticks(self, goal):
         """목표 틱 쓰기. 한계로 자르고, 쓴 직후 상태를 감시한다."""
-        clamped = [min(max(int(g), lo), hi) for g, lo, hi in zip(goal, self.lo, self.hi)]
-        for sid, g in zip(self.ids, clamped):
-            self._w(sid, R_GOAL_POS, g)
+        clamped = [min(max(int(round(g)), lo), hi) for g, lo, hi in zip(goal, self.lo, self.hi)]
+        if self.last_goal is not None:
+            jump = max(abs(a - b) for a, b in zip(clamped, self.last_goal))
+            if jump * 360 / TICKS_PER_REV > self.safety.max_step_deg:
+                self._stop(f"한 번에 {jump * 360 / TICKS_PER_REV:.1f}° 점프하는 목표 거부 "
+                           f"(상한 {self.safety.max_step_deg}°) — 보간 없이 쓴 명령")
+        self._write_goal(clamped)
         self.last_goal = clamped
         self.check()
         return clamped
+
+    def _write_goal(self, ticks):
+        gsw = getattr(self, "_gsw", None)
+        if gsw is None:                           # 테스트용 조립(시리얼 없음)
+            for sid, g in zip(self.ids, ticks):
+                self._w(sid, R_GOAL_POS, g)
+            return
+        for sid, g in zip(self.ids, ticks):
+            gsw.changeParam(sid, [g & 0xFF, (g >> 8) & 0xFF])
+        if gsw.txPacket() != self._ok:            # 응답 없는 패킷이라 실패 = 포트 문제
+            self._flush()
+            if gsw.txPacket() != self._ok:
+                self._stop("sync write 실패 (포트)")
 
     def check(self):
         s = self.safety
         now_t = time.monotonic()
         try:
-            pos = self.ticks()
+            pos, loads = self._pos_load(need_load=True)
         except RuntimeError as e:                 # 통신 이상 -> 일반 예외로 새지 않게 정지
             self._stop(str(e))
+        self.last_pos = list(pos)                 # 궤적 기록용 (arm_server traj_log_dir)
+        self.last_load = list(loads) if loads else None
         if self.last_goal is not None:
             errs = [abs(p - g) for p, g, sid in zip(pos, self.last_goal, self.ids)
                     if sid in s.check_ids]
@@ -268,12 +335,13 @@ class So101Bus:
                                f"{max(errs) * 360 / TICKS_PER_REV:.0f}°) — 충돌/막힘?")
             else:
                 self._err_since = None
-        loads = self.loads()
-        big = [abs(l) for l, sid in zip(loads, self.ids) if sid in s.check_ids]
-        if max(big) > s.max_load:
+        over = [(abs(l), sid) for l, sid in zip(loads, self.ids)
+                if sid in s.check_ids and abs(l) > s.max_load_by_id.get(sid, s.max_load)]
+        if over:
             self._load_since = self._load_since or now_t
             if now_t - self._load_since > s.load_time:
-                self._stop(f"부하 {max(big) / 10:.0f}% 지속")
+                l, sid = max(over)
+                self._stop(f"ID{sid} 부하 {l / 10:.0f}% 지속")
         else:
             self._load_since = None
         self._n_check += 1
@@ -312,7 +380,17 @@ class So101Bus:
             pass
 
 
-def move_smooth(bus: So101Bus, target_ticks, max_deg_s=20.0, rate_hz=25.0,
+def joint_limits_rad(bus: So101Bus, jmap: JointMap, names=JOINT_NAMES[:4]):
+    """서보 EEPROM 위치 한계(여유 limit_margin 포함)를 기구학 각도 한계로 환산.
+
+    2026-10-12: 팔로워가 2대라 kinematics.ArmGeometry 의 고정 한계(a 팔 기준 환산값)를
+    그대로 쓸 수 없다. 팔마다 서보 한계와 zero_ticks 가 달라서 실제 범위도 다르다."""
+    lo = jmap.to_rad(bus.lo)
+    hi = jmap.to_rad(bus.hi)
+    return {n: (min(a, b), max(a, b)) for n, a, b in zip(names, lo, hi)}
+
+
+def move_smooth(bus: So101Bus, target_ticks, max_deg_s=20.0, rate_hz=50.0,
                 should_stop=lambda: False):
     """현재 목표에서 target 까지 관절 공간 코사인 보간. 가장 많이 움직이는 관절이
     max_deg_s 를 넘지 않게 시간을 잡는다. 매 스텝 감시(SafetyStop)."""
@@ -320,11 +398,40 @@ def move_smooth(bus: So101Bus, target_ticks, max_deg_s=20.0, rate_hz=25.0,
     span = max(abs(t - s) for t, s in zip(target_ticks, start))
     dur = max(0.3, span * 360 / TICKS_PER_REV / max_deg_s)
     n = max(1, int(dur * rate_hz))
+    t0 = time.monotonic()
     for i in range(1, n + 1):
         if should_stop():
             bus.hold()
             return False
-        a = 0.5 - 0.5 * math.cos(math.pi * i / n)
+        a = min_jerk(i / n)
         bus.write_ticks([s + (t - s) * a for s, t in zip(start, target_ticks)])
-        time.sleep(1.0 / rate_hz)
+        # 고정 sleep 이 아니라 마감 시각까지 대기 -> 읽기/쓰기 시간이 흔들려도 주기 일정
+        time.sleep(max(0.0, t0 + i / rate_hz - time.monotonic()))
     return True
+
+
+def settle_ticks(bus: So101Bus, goal, joints=(1, 2, 3), max_deg=6.0, iters=2, wait=0.25):
+    """처짐 보정 (틱 단위, ROS 없는 도구용). arm_server 의 FeetechBackend.settle 과 같은 원리:
+    도착 후 실제 위치를 읽어 모자란 만큼 목표에 덧대 다시 쓴다. 덧댄 목표를 돌려준다."""
+    lim = max_deg * TICKS_PER_REV / 360.0
+    cmd = list(bus.last_goal)
+    for _ in range(iters):
+        time.sleep(wait)
+        pos = bus.ticks()
+        new = list(cmd)
+        for j in joints:
+            new[j] = int(round(goal[j] + max(-lim, min(lim, cmd[j] - goal[j] + goal[j] - pos[j]))))
+        if max(abs(goal[j] - pos[j]) for j in joints) < 4:      # 0.35° 안이면 끝
+            break
+        for k in range(1, 11):
+            bus.write_ticks([c + (n - c) * k / 10 for c, n in zip(cmd, new)])
+            time.sleep(0.02)
+        cmd = new
+    return cmd
+
+
+def min_jerk(tau):
+    """최소 저크 보간 0->1. 시작/끝에서 속도·가속도가 모두 0 이라 사람 손 동작에 가깝다
+    (코사인 보간은 끝에서 가속도가 0 이 아니라 멈출 때 '툭' 하고 선다)."""
+    tau = min(max(tau, 0.0), 1.0)
+    return tau ** 3 * (10 - 15 * tau + 6 * tau * tau)

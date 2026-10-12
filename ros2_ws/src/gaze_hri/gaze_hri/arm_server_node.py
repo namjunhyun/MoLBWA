@@ -36,7 +36,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty, Float64MultiArray, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from gaze_hri.so101_driver import SafetyStop
+from gaze_hri.so101_driver import SafetyStop, min_jerk
 from gaze_hri.kinematics import (JOINT_ORDER, ArmGeometry, IKError,
                                  forward_kinematics, grasp_detected,
                                  inverse_kinematics, quat_to_matrix,
@@ -74,8 +74,11 @@ class DryRunBackend:
 
     def write(self, q):
         self.q = list(q)
-        deg = ", ".join(f"{math.degrees(v):6.1f}" for v in q)
-        self.logger.info(f"  [dry-run] 관절각(deg): [{deg}]")
+        # 2026-10-12: 이제 50Hz 로 스트리밍하므로 매번 찍으면 초당 50줄 -> 25번에 한 번만
+        self._n = getattr(self, "_n", 0) + 1
+        if self._n % 25 == 1:
+            deg = ", ".join(f"{math.degrees(v):6.1f}" for v in q)
+            self.logger.info(f"  [dry-run] 관절각(deg): [{deg}]")
 
     def read(self):
         q = list(self.q)
@@ -129,10 +132,84 @@ class FeetechBackend:
         self.bus = So101Bus(cfg["port"], cfg["servo_ids"],
                             log=lambda m: logger.info(m))
         self.bus.enable()          # 목표=현재로 맞춘 뒤 토크 ON -> 튀지 않는다
+        # 2026-10-12: 처짐 보정 (관절 1~3 = 어깨/팔꿈치/손목 꺾기). 서보는 P 제어라 무게가
+        # 걸리면 목표보다 덜 올라간 채 멈춘다 (팔 a home 에서 어깨 4.1° -> 파지점 1.9cm 낮음,
+        # 자로 확인). 도착할 때마다 실제 각도를 읽어 차이만큼 명령에 덧대고, 그 값은 다음
+        # 이동에도 이어서 쓴다 (이동 중 뒤처짐도 준다).
+        self.bias = [0.0] * 6
+        self.fric_ff = 0.0          # 1번 마찰 보상 [rad] — arm_server 가 파라미터로 넣는다
 
     def write(self, q):
         # SafetyStop 은 그대로 올려 보낸다 -> execute 가 복귀 없이 멈춘다
-        self.bus.write_ticks(self.map.to_ticks(q))
+        prev = getattr(self, "last_q", None)
+        self.last_q = list(q)
+        cmd = [a + b for a, b in zip(q, self.bias)]
+        # 2026-10-12: 1번(pan) 마찰 보상. 궤적 기록상 목표가 움직이는 동안 24% 는 실제가 멈춰
+        # 있다가 최대 5틱씩 따라잡았다 (오차 ~1° 쌓여야 정지 마찰을 이김 = 뚝뚝 끊김).
+        # 움직이는 방향으로 목표를 fric_ff 만큼 앞서 준다. 멈추면(속도 0) 보상도 0 이 되게
+        # 직전 보상에서 서서히 줄인다 (한 번에 빼면 그 자체가 툭 튄다).
+        ff = getattr(self, "pan_ff", 0.0)
+        fric = getattr(self, "fric_ff", 0.0)
+        if fric and prev is not None:
+            dq = q[0] - prev[0]
+            want = math.copysign(fric, dq) if abs(dq) > 1e-5 else 0.0
+            ff += max(-fric / 10, min(fric / 10, want - ff))
+        self.pan_ff = ff
+        cmd[0] += ff
+        goal = self.bus.write_ticks(self.map.to_ticks(cmd))
+        self._log_row(goal)
+
+    def start_log(self, path):
+        """2026-10-12: 궤적 기록 — 쓸 때마다 (시각, 목표 틱 6, 실제 틱 6). 끊김/떨림을 추측 말고 잰다."""
+        self.stop_log()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._log = open(path, "w")
+        self._log.write("t," + ",".join(f"goal{i}" for i in range(1, 7)) + ","
+                        + ",".join(f"pos{i}" for i in range(1, 7)) + ","
+                        + ",".join(f"load{i}" for i in range(1, 7)) + "\n")
+        self._log_t0 = time.monotonic()
+
+    def stop_log(self):
+        f = getattr(self, "_log", None)
+        if f:
+            f.close()
+        self._log = None
+
+    def _log_row(self, goal):
+        f = getattr(self, "_log", None)
+        pos = getattr(self.bus, "last_pos", None)
+        load = getattr(self.bus, "last_load", None) or [0] * 6
+        if f and pos:
+            f.write(f"{time.monotonic() - self._log_t0:.4f},"
+                    + ",".join(str(int(v)) for v in list(goal) + list(pos) + list(load)) + "\n")
+
+    def settle(self, max_deg, iters, wait=0.25, joints=(1, 2, 3)):
+        """목표(마지막 write 의 q)에 실제 관절이 오도록 bias 를 고친다. 바뀌는 bias 는
+        10단계로 나눠 써서 툭 튀지 않게 한다. 남은 최대 오차(deg)를 돌려준다."""
+        q = getattr(self, "last_q", None)
+        if q is None:
+            return 0.0
+        lim = math.radians(max_deg)
+        err = 0.0
+        for _ in range(iters):
+            time.sleep(wait)
+            act = self.read()
+            new = list(self.bias)
+            for j in joints:
+                new[j] = max(-lim, min(lim, self.bias[j] + (q[j] - act[j])))
+            err = max(abs(q[j] - act[j]) for j in joints)
+            if err < math.radians(0.3):
+                break
+            old = list(self.bias)
+            for k in range(1, 11):
+                self.bias = [o + (n - o) * k / 10 for o, n in zip(old, new)]
+                self.bus.write_ticks(self.map.to_ticks([a + b for a, b in zip(q, self.bias)]))
+                time.sleep(0.02)
+        return math.degrees(err)
+
+    def reset_bias(self):
+        """안전 정지 뒤: 서보 목표가 '지금 위치'로 바뀌었으니 bias 를 덧대면 튄다."""
+        self.bias = [0.0] * 6
 
     def read(self):
         return self.map.to_rad(self.bus.ticks())
@@ -212,8 +289,26 @@ class ArmServer(Node):
         self.declare_parameter("adaptive_pitch", False)
         self.declare_parameter("pick_approach_height", 0.0)
         self.declare_parameter("lift_height", 0.12)       # 잡은 뒤 들어올리는 높이
-        self.declare_parameter("step_time", 0.04)         # 보간 한 스텝 시간 [s]
-        self.declare_parameter("cartesian_step", 0.008)   # 보간 간격 [m]
+        # 2026-10-12: 궤적 스트리밍 (텔레옵처럼 촘촘한 목표를 일정 주기로). 예전 step_time 방식은
+        # 8mm 점마다 쓰기->6축 읽기->sleep 이라 실제 주기가 ~14Hz 로 늘어지고 들쭉날쭉했다.
+        self.declare_parameter("stream_hz", 50.0)         # 목표 송신 주기 [Hz]
+        self.declare_parameter("tcp_speed", 0.10)         # 직선 이동 TCP 최고 속도 [m/s]
+        self.declare_parameter("gripper_speed_deg_s", 90.0)  # 그리퍼 개폐 최고 속도
+        self.declare_parameter("cartesian_step", 0.008)   # 직선 경로 IK 샘플 간격 [m]
+        # 2026-10-12: 집기 방식. top = 위에서 비스듬히 (기존), side = 그리퍼를 책상과 수평으로
+        # 두고 컵 옆에서 밀고 들어가 잡는다 (컵 입구가 그리퍼보다 넓어 위로는 못 끼운다).
+        # side 순서: 컵 뒤 standoff 지점 위(high_z) -> 그대로 내려감 -> 수평으로 밀고 들어감 ->
+        # 잡기 -> 수직으로 들기(high_z) -> 놓을 곳 위 -> 내려놓기 -> 열기 -> 뒤로 빠짐 -> 위로.
+        self.declare_parameter("grasp_mode", "top")
+        self.declare_parameter("side_standoff", 0.09)     # 컵 중심 -> 밀고 들어가기 시작점 [m]
+        self.declare_parameter("side_high_z", 0.20)       # 이동 높이 (TCP, 컵 높이 위) [m]
+        self.declare_parameter("side_min_radius", 0.37)   # 이보다 가까우면 수평 자세 불가
+        # 처짐 보정 (feetech 전용, FeetechBackend.settle)
+        self.declare_parameter("sag_correction", True)
+        self.declare_parameter("sag_max_deg", 6.0)        # 관절당 덧대는 최대량
+        self.declare_parameter("sag_iters", 2)
+        self.declare_parameter("traj_log_dir", "")        # 비우면 궤적 기록 안 함
+        self.declare_parameter("pan_friction_ff_deg", 0.0)  # 1번 마찰 보상 (FeetechBackend.write)
         self.declare_parameter("gripper_open", 1.2)       # rad
         self.declare_parameter("gripper_closed", 0.15)    # rad
         self.declare_parameter("home_q", [0.0, -0.6, 1.2, -0.6, 0.0, 1.2])
@@ -232,6 +327,7 @@ class ArmServer(Node):
         self.declare_parameter("grasp_margin", 0.08)      # rad
         self.declare_parameter("grasp_settle", 0.9)       # 닫고 나서 대기 [s]
         self.declare_parameter("min_grasp_load", 0)       # 0이면 부하 검사 안 함
+        self.declare_parameter("grasp_check", "gap")      # gap | load | none (2026-10-12)
         self.declare_parameter("max_grasp_retries", 3)
         self.declare_parameter("retry_offset", 0.006)     # 재시도 시 흔드는 폭 [m]
         self.declare_parameter("simulate_fail_rate", 0.0)  # dry_run 전용
@@ -257,11 +353,19 @@ class ArmServer(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.backend = self._make_backend()
+        if isinstance(self.backend, FeetechBackend):
+            self.backend.fric_ff = math.radians(float(self.get_parameter("pan_friction_ff_deg").value))
+            # 2026-10-12: 관절 한계를 이 팔의 서보 한계에서 환산 (팔로워 2대, 팔마다 다르다)
+            from gaze_hri.so101_driver import joint_limits_rad
+            lim = joint_limits_rad(self.backend.bus, self.backend.map)
+            self.geo.limits.update(lim)
+            self.get_logger().info("관절 한계(서보 기준, deg): " + ", ".join(
+                f"{n} {math.degrees(a):.0f}~{math.degrees(b):.0f}" for n, (a, b) in lim.items()))
         self.home = self._resolve_home()
         if isinstance(self.backend, FeetechBackend):
             # 실제 팔은 home 이 아니라 지금 있는 자세에서 출발한다. home_q 로 두면
             # 첫 보간이 엉뚱한 곳에서 시작해 팔이 한 번에 튄다.
-            self.q = list(self.backend.read())
+            self._resync_after_stop()
             self.get_logger().info(f"현재 관절각(rad): {[round(v, 3) for v in self.q]}")
         else:
             self.q = list(self.home)
@@ -372,7 +476,7 @@ class ArmServer(Node):
                                    "goto_joints: /task/cancel 로 중단됨")
         except SafetyStop as exc:
             self.get_logger().error(f"안전 정지 (goto_joints): {exc}")
-            self.q = list(self.backend.read())
+            self._resync_after_stop()
 
     # ------------------------------------------------------------------
     def transform_to_base(self, point, source_frame):
@@ -435,7 +539,7 @@ class ArmServer(Node):
             raise IKError("중간점 풀이 실패")
         return best
 
-    def move_to(self, target_xyz, pitch, gripper, label=""):
+    def move_to(self, target_xyz, pitch, gripper, label="", strict=False):
         """현재 TCP에서 목표까지 직교공간 직선 보간으로 이동.
 
         관절공간만으로 보간하면 두 자세를 잇는 TCP 궤적이 직선이 아니라 휘어서,
@@ -443,7 +547,9 @@ class ArmServer(Node):
         TCP 직선을 따라가며 각 점에서 IK를 푼다. 중간점이 하나라도 안 풀리면
         기존처럼 관절 보간으로 떨어진다(도달 자체는 보장).
         """
-        cands = [pitch, -math.pi / 6, -math.pi / 4, -math.pi / 3, -math.pi / 2]
+        # strict: 이 각도가 아니면 의미가 없는 동작(수평 집기) — 다른 각도로 대체하지 않는다
+        cands = [pitch] if strict else [pitch, -math.pi / 6, -math.pi / 4, -math.pi / 3,
+                                         -math.pi / 2]
         q_goal = used_pitch = path = None
         reasons = []
         for cand in dict.fromkeys(cands):            # 순서 유지 중복 제거
@@ -470,23 +576,15 @@ class ArmServer(Node):
                 f"{math.degrees(used_pitch):.0f}deg 로 대체"
             )
 
-        step_time = float(self.get_parameter("step_time").value)
-        # 2026-09-28: 직선 경로도 관절 속도 제한을 따른다. 예전엔 8cm 하강을 0.4s(10단계 x 0.04s)에
-        # 몰아서, -55° 접근에서 팔꿈치 53° 를 초당 ~130° 로 요구 -> 서보가 못 따라가 26° 추종 오차
-        # 안전정지. 각 단계 대기 = max(step_time, 가장 많이 움직이는 관절 / joint_speed_deg_s).
-        vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
-        q_prev = list(self.q[:4])
-        for q in path:
-            if self._cancel:
-                return
-            dq = max(abs(a - b) for a, b in zip(q[:4], q_prev))
-            q_prev = list(q[:4])
-            self.q = list(q) + [0.0, gripper]
-            self.backend.write(self.q)
-            time.sleep(max(step_time, dq / vmax if vmax > 1e-6 else step_time))
-
-        self.q = list(q_goal) + [0.0, gripper]
-        self.backend.write(self.q)
+        # 2026-10-12: 경로(path)는 s=0..1 에 고르게 놓인 관절각 목록이다. 시간축은 최소 저크로
+        # 따로 입혀서 stream_hz 로 끊김 없이 보낸다. 관절 속도 제한(2026-09-28, 26° 추종 오차
+        # 안전정지 원인)은 _path_duration 이 최고 속도 기준으로 지킨다.
+        start = forward_kinematics(self.q[:4], self.geo)
+        dist = float(np.linalg.norm(np.asarray(target_xyz, dtype=float) - start))
+        # path 의 마지막 점이 곧 목표 IK 해다 (직선: 연속성 유지한 해, 관절: q_goal). q_goal 을
+        # 따로 덧붙이지 않는다 — 팔꿈치 해가 다르면 마지막 한 칸에서 튄다.
+        grid = [list(self.q[:4])] + [list(q) for q in path]
+        self._stream_grid(grid, self.q[5], gripper, self._path_duration(grid, dist))
 
     def _plan_path(self, target_xyz, q_goal, used_pitch):
         """TCP 직선 보간 경로(관절각 목록). 중간점이 안 풀리면 관절 보간으로."""
@@ -500,12 +598,16 @@ class ArmServer(Node):
         if step_len > 1e-6 and dist > step_len:
             n = max(2, int(math.ceil(dist / step_len)))
             q_ref = q_start
+            # 2026-10-12: 접근각도 출발 자세의 각도에서 목표 각도로 경로를 따라 고르게 바꾼다.
+            # 예전엔 첫 칸부터 목표 각도로 풀어서 첫 칸에서 손목이 ~50° 꺾였고, 속도 제한을
+            # 그 칸에 맞추느라 경로 전체가 수십 초로 늘어졌다 (팔 B, 캘리브 끝 자세 -> 수평 접근 54s+).
+            p0 = float(q_start[1] + q_start[2] + q_start[3])
             try:
                 for i in range(1, n + 1):
-                    # 코사인 이징: 시작/끝이 부드러워 저가 서보에서 진동이 덜하다
-                    s = 0.5 - 0.5 * math.cos(math.pi * i / n)
+                    # 경로는 기하만 (s 균등). 가감속은 _stream_grid 의 최소 저크가 맡는다.
+                    s = i / n
                     q_ref = self._ik_continuous(start + (target - start) * s,
-                                                used_pitch, q_ref)
+                                                p0 + (used_pitch - p0) * s, q_ref)
                     path.append(q_ref)
             except IKError:
                 path = []
@@ -513,15 +615,8 @@ class ArmServer(Node):
                     "  직교 경로 중간점이 안 풀려 관절 보간으로 이동합니다.")
 
         if not path:
-            # 2026-09-27: 고정 스텝(0.03rad/step)이라 joint_speed_deg_s를 무시하고 있었다.
-            # go_home()의 _joint_move()와 같은 방식으로 속도 설정을 따르게 맞춘다.
-            vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
-            step_time = float(self.get_parameter("step_time").value)
-            span = float(np.max(np.abs(np.array(q_goal) - np.array(q_start))))
-            n = max(6, int(span / vmax / step_time))
-            for i in range(1, n + 1):
-                s = 0.5 - 0.5 * math.cos(math.pi * i / n)
-                path.append([qs + (qg - qs) * s for qs, qg in zip(q_start, q_goal)])
+            # 관절 공간 직선 (속도/가감속은 _stream_grid 가 정한다)
+            path = [list(q_start), list(q_goal)]
         return path
 
     def _lowest_tip(self, path):
@@ -538,8 +633,7 @@ class ArmServer(Node):
         # 여는 동작이면 dry-run 파지 시뮬 상태도 함께 해제한다.
         if value > self.q[5] and hasattr(self.backend, "release"):
             self.backend.release()
-        self.q[5] = value
-        self.backend.write(self.q)
+        self._move_gripper(value)
         time.sleep(settle)
 
     # ------------------------------------------------------------------
@@ -562,8 +656,7 @@ class ArmServer(Node):
         if isinstance(self.backend, DryRunBackend):
             self.backend.simulate_grasp()
 
-        self.q[5] = g_close
-        self.backend.write(self.q)
+        self._move_gripper(g_close)
         time.sleep(settle)
 
         try:
@@ -573,19 +666,25 @@ class ArmServer(Node):
             return True
 
         gap = actual - g_close
-        held = grasp_detected(g_close, actual, margin)
-        self.get_logger().info(
-            f"  파지 확인: 명령 {g_close:.3f} / 실제 {actual:.3f} "
-            f"(차이 {gap:.3f} rad, 기준 {margin:.3f}) -> {'물었음' if held else '빈손'}"
-        )
-
-        # 부하 검사 (설정된 경우에만)
-        if held and min_load > 0 and hasattr(self.backend, "read_gripper_load"):
-            load = self.backend.read_gripper_load()
-            if load is not None and load < min_load:
-                self.get_logger().warn(f"  부하가 낮습니다 ({load} < {min_load}). 놓친 것 같습니다.")
+        load = (self.backend.read_gripper_load()
+                if hasattr(self.backend, "read_gripper_load") else None)
+        # 2026-10-12: 판정 방식. gap = 명령보다 덜 닫혔나 (단단한 물체), load = 그리퍼 부하
+        # (플라스틱 컵은 눌려서 명령 위치까지 닫히므로 gap 으로는 늘 '빈손'이었다),
+        # none = 판정 안 함 (부하 기준을 실측하는 동안). 어느 방식이든 값은 항상 기록한다.
+        mode = self.get_parameter("grasp_check").value
+        if mode == "none":
+            held = True
+        elif mode == "load":
+            held = load is not None and load >= min_load
+        else:
+            held = grasp_detected(g_close, actual, margin)
+            if held and min_load > 0 and load is not None and load < min_load:
                 held = False
-
+        self.get_logger().info(
+            f"  파지 확인[{mode}]: 명령 {g_close:.3f} / 실제 {actual:.3f} "
+            f"(차이 {gap:.3f} rad, 기준 {margin:.3f}), 그리퍼 부하 {load} (기준 {min_load}) "
+            f"-> {'물었음' if held else '빈손'}"
+        )
         return held
 
     def pick_with_retry(self, pick, pitch, fb):
@@ -664,18 +763,84 @@ class ArmServer(Node):
         """관절 공간 코사인 보간. 가장 많이 움직이는 관절이 joint_speed_deg_s 를 넘지 않게
         시간을 잡는다. 예전엔 거리와 무관하게 0.8초(20스텝)였다 — 먼 자세면 휘두른다."""
         q_start = list(self.q)
-        span = max(abs(b - a) for a, b in zip(q_start, target))
         vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
-        n = max(10, int(span / vmax / 0.04))
+        span = max(abs(b - a) for a, b in zip(q_start, target))
+        duration = max(0.5, 1.875 * span / vmax)       # 최소 저크 최고 속도 = 1.875 x 평균
+        done = self._stream(lambda s: [a + (b - a) * s for a, b in zip(q_start, target)],
+                            duration)
+        if done:
+            self._settle()
+        return done
+
+    # ------------------------------------------------------------------
+    # 궤적 스트리밍 (2026-10-12)
+    # ------------------------------------------------------------------
+    def _stream(self, q_of, duration):
+        """q_of(s) 를 s = min_jerk(t/T) 로 따라가며 stream_hz 주기로 쓴다.
+
+        텔레옵이 부드러운 이유와 같은 구조: 서보 내부 가감속은 끄고(so101_driver), PC 가
+        촘촘하고 연속인 목표를 일정 주기로 준다. sleep 은 마감 시각 기준이라 버스 지연이
+        흔들려도 주기가 밀리지 않는다."""
+        hz = float(self.get_parameter("stream_hz").value)
+        n = max(1, int(math.ceil(duration * hz)))
+        self._moved = True
+        t0 = time.monotonic()
         for i in range(1, n + 1):
             if self._cancel:
                 return False
-            s = 0.5 - 0.5 * math.cos(math.pi * i / n)
-            self.q = [a + (b - a) * s for a, b in zip(q_start, target)]
+            self.q = list(q_of(min_jerk(i / n)))
             self.backend.write(self.q)
-            time.sleep(0.04)
-        self.q = list(target)
+            time.sleep(max(0.0, t0 + i / hz - time.monotonic()))
         return True
+
+    def _path_duration(self, grid, tcp_dist):
+        """경로를 최소 저크로 지날 때 관절 최고 속도와 TCP 최고 속도가 한계를 넘지 않는 시간.
+        최소 저크의 최고 ds/dt 는 1.875/T 이고, 관절 속도 = (dq/ds)·(ds/dt)."""
+        vmax = math.radians(float(self.get_parameter("joint_speed_deg_s").value))
+        vtcp = float(self.get_parameter("tcp_speed").value)
+        g = np.asarray(grid, dtype=float)
+        n_seg = len(g) - 1
+        dq_ds = np.max(np.abs(np.diff(g, axis=0))) * n_seg if n_seg > 0 else 0.0
+        return max(0.4, 1.875 * dq_ds / vmax, 1.875 * tcp_dist / vtcp)
+
+    def _stream_grid(self, grid, g_start, g_end, duration):
+        """s 균등 격자(관절 4개) 위를 선형 보간하며 스트리밍. 그리퍼도 같이 보간한다."""
+        g = np.asarray(grid, dtype=float)
+        n_seg = len(g) - 1
+
+        def q_of(s):
+            x = s * n_seg
+            k = min(int(x), n_seg - 1)
+            q4 = g[k] + (g[k + 1] - g[k]) * (x - k)
+            return list(q4) + [0.0, g_start + (g_end - g_start) * s]
+        done = self._stream(q_of, duration)
+        if done:
+            self.q = list(g[-1]) + [0.0, g_end]
+            self.backend.write(self.q)
+            self._settle()
+        return done
+
+    def _resync_after_stop(self):
+        """안전 정지 뒤 상태 맞추기: 서보 목표 = 현재 위치이므로 bias 도 지운다."""
+        if hasattr(self.backend, "reset_bias"):
+            self.backend.reset_bias()
+        self.q = list(self.backend.read())
+
+    def _settle(self):
+        if not (hasattr(self.backend, "settle") and self.get_parameter("sag_correction").value):
+            return
+        left = self.backend.settle(float(self.get_parameter("sag_max_deg").value),
+                                   int(self.get_parameter("sag_iters").value))
+        b = getattr(self.backend, "bias", [0.0] * 6)
+        self.get_logger().info(f"  처짐 보정 bias(deg) {[round(math.degrees(v), 1) for v in b[1:4]]}, "
+                               f"남은 오차 {left:.1f}°")
+
+    def _move_gripper(self, value):
+        g0 = self.q[5]
+        v = math.radians(float(self.get_parameter("gripper_speed_deg_s").value))
+        q4 = list(self.q[:5])
+        self._stream(lambda s: q4 + [g0 + (value - g0) * s],
+                     max(0.2, 1.875 * abs(value - g0) / v))
 
     def go_home(self):
         self._joint_move(list(self.home))
@@ -706,6 +871,12 @@ class ArmServer(Node):
                                          held_gap=margin * 2.0)
 
         self._goal_active = True     # finally 에서 반드시 내린다
+        self._moved = False          # 이번 목표에서 팔을 움직였나 (거부만 했으면 home 안 감)
+        log_dir = os.path.expanduser(str(self.get_parameter("traj_log_dir").value))
+        if log_dir and hasattr(self.backend, "start_log"):
+            path = os.path.join(log_dir, time.strftime("traj_%m%d_%H%M%S.csv"))
+            self.backend.start_log(path)
+            self.get_logger().info(f"궤적 기록: {path}")
         try:
             pick = self.transform_to_base(g.pick, g.frame_id)
             place = self.transform_to_base(g.place, g.frame_id)
@@ -715,6 +886,9 @@ class ArmServer(Node):
             self.get_logger().info(
                 f"base_link 기준 — 집기: {np.round(pick, 3)}, 놓기: {np.round(place, 3)}"
             )
+
+            if self.get_parameter("grasp_mode").value == "side":
+                return self._execute_side(pick, place, fb, goal_handle, result)
 
             approach = float(self.get_parameter("approach_height").value)
             lift = float(self.get_parameter("lift_height").value)
@@ -794,7 +968,7 @@ class ArmServer(Node):
             # 충돌/막힘/과부하로 멈춘 것이다. 여기서 home 으로 가면 같은 곳에 다시 부딪힐
             # 수 있다 -> 그 자리에 세운 채로 사람을 부른다.
             self.get_logger().error(f"★ 안전 정지 — 복귀하지 않고 그 자리에 멈춤: {exc}")
-            self.q = list(self.backend.read())
+            self._resync_after_stop()
             goal_handle.abort()
             result.success = False
             result.message = f"안전 정지: {exc}"
@@ -802,7 +976,9 @@ class ArmServer(Node):
         except IKError as exc:
             self.get_logger().error(f"역기구학 실패: {exc}")
             # 실패 지점에서 그대로 멈추면 팔이 어정쩡한 자세로 남는다.
-            self._safe_go_home()
+            # 2026-10-12: 단, 아직 한 번도 안 움직였으면(범위 밖 목표 거부) 그대로 둔다.
+            if getattr(self, "_moved", True):
+                self._safe_go_home()
             goal_handle.abort()
             result.success = False
             result.message = str(exc)
@@ -815,6 +991,8 @@ class ArmServer(Node):
             result.message = f"내부 오류: {exc}"
             return result
         finally:
+            if hasattr(self.backend, "stop_log"):
+                self.backend.stop_log()
             self._goal_active = False
             # 동작이 어떻게 끝나든 '지금 멈춰 있다'는 것을 GUI에 알린다
             self.pub_phase.publish(String(data=""))
@@ -823,6 +1001,113 @@ class ArmServer(Node):
                 # dry_run 동안 self.q 만 움직였을 뿐 실제 팔은 그대로다.
                 # 상태를 되돌려 놓지 않으면 다음 실제 동작이 엉뚱한 곳에서 출발한다.
                 self.q = q_backup
+
+    # ------------------------------------------------------------------
+    # 수평 옆 집기 (2026-10-12)
+    # ------------------------------------------------------------------
+    def _side_points(self, p, label):
+        """p(파지점)의 반경 방향 u, 밀고 들어가기 시작점(낮은/높은), p 바로 위(높은)."""
+        r = float(np.linalg.norm(p[:2]))
+        r_min = float(self.get_parameter("side_min_radius").value)
+        if r < r_min - 1e-6:
+            raise IKError(f"{label} 위치가 받침대에서 {r * 100:.1f}cm — 수평 집기는 "
+                          f"{r_min * 100:.0f}cm 이상이어야 한다 (그리퍼 20cm + 손목 한계)")
+        u = np.array([p[0] / r, p[1] / r, 0.0])
+        d = float(self.get_parameter("side_standoff").value)
+        z_hi = float(self.get_parameter("side_high_z").value)
+        pre_low = p - u * d
+        pre_high = np.array([pre_low[0], pre_low[1], z_hi])
+        above = np.array([p[0], p[1], z_hi])
+        return u, pre_low, pre_high, above
+
+    def _side_pick(self, pick, fb):
+        g_open = float(self.get_parameter("gripper_open").value)
+        off = float(self.get_parameter("retry_offset").value)
+        u, pre_low, pre_high, _ = self._side_points(pick, "집을")
+        z = np.array([0.0, 0.0, 1.0])
+        # 재시도마다: 그대로 / 조금 더 깊이 / 조금 위 / 조금 아래
+        nudges = [np.zeros(3), u * off, z * off, -z * off]
+        for attempt in range(int(self.get_parameter("max_grasp_retries").value)):
+            if self._cancel:
+                return False
+            target = pick + nudges[min(attempt, len(nudges) - 1)]
+            if attempt == 0:
+                fb("APPROACH_PICK", 0.1)
+                self.move_to(pre_high, 0.0, g_open, strict=True)
+                fb("DESCEND", 0.2)
+                self.move_to(pre_low, 0.0, g_open, strict=True)
+            else:
+                self.get_logger().warn(f"파지 재시도 {attempt + 1}")
+                fb(f"RETRY_{attempt + 1}", 0.3)
+                self.move_to(pre_low + (target - pick), 0.0, g_open, strict=True)
+            fb("INSERT", 0.3)
+            self.move_to(target, 0.0, g_open, strict=True)
+            fb("GRASP", 0.4)
+            if self.close_and_verify():
+                return True
+            self.set_gripper(g_open, settle=0.4)        # 실패: 열고 뒤로 빠졌다가 다시
+            self.move_to(pre_low + (target - pick), 0.0, g_open, strict=True)
+        return False
+
+    def _execute_side(self, pick, place, fb, goal_handle, result):
+        g_open = float(self.get_parameter("gripper_open").value)
+        g_close = float(self.get_parameter("gripper_closed").value)
+        _, _, _, pick_above = self._side_points(pick, "집을")
+        _, place_pre_low, place_pre_high, place_above = self._side_points(place, "놓을")
+
+        if not self._side_pick(pick, fb):
+            if self._cancel or goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result.success = False
+                result.message = "사용자 취소 — 그 자리에서 정지했습니다."
+                return result
+            self._side_retreat_home(pick, g_open)
+            goal_handle.abort()
+            result.success = False
+            result.message = "파지 실패 — 컵 위치(탑다운 클릭)나 grasp_height 를 확인하세요."
+            self.get_logger().error(result.message)
+            return result
+
+        fb("LIFT", 0.5)
+        self.move_to(pick_above, 0.0, g_close, strict=True)
+        if not self.close_and_verify():
+            goal_handle.abort()
+            result.success = False
+            result.message = "들어올리는 중에 컵을 놓쳤습니다."
+            self.get_logger().error(result.message)
+            self.go_home()
+            return result
+
+        fb("TRANSFER", 0.65)
+        self.move_to(place_above, 0.0, g_close, strict=True)
+        fb("PLACE_DESCEND", 0.8)
+        self.move_to(place, 0.0, g_close, strict=True)
+        fb("RELEASE", 0.9)
+        self.set_gripper(g_open)
+        fb("RETREAT", 0.95)
+        self.move_to(place_pre_low, 0.0, g_open, strict=True)
+        self.move_to(place_pre_high, 0.0, g_open, strict=True)
+        self.go_home()
+
+        if self._cancel or goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            result.success = False
+            result.message = "사용자 취소"
+            return result
+        goal_handle.succeed()
+        result.success = True
+        result.message = "집어서 옮기기 완료 (수평 옆 집기)"
+        return result
+
+    def _side_retreat_home(self, p, g_open):
+        """실패 후 복귀: 컵을 쓸지 않게 뒤로 빠졌다가 위로 올라간 다음 home."""
+        try:
+            _, pre_low, pre_high, _ = self._side_points(p, "복귀")
+            self.move_to(pre_low, 0.0, g_open, strict=True)
+            self.move_to(pre_high, 0.0, g_open, strict=True)
+        except IKError as exc:
+            self.get_logger().warn(f"뒤로 빠지기 실패({exc}) — 바로 home")
+        self.go_home()
 
     def _choose_task_pitch(self, pitch, pts, label=""):
         cand = pitch

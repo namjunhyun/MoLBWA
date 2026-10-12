@@ -22,10 +22,10 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri"))
+from gaze_hri import arms  # noqa: E402
 from gaze_hri.so101_driver import (JOINT_NAMES, JointMap, SafetyStop,  # noqa: E402
                                    So101Bus, move_smooth)
 
-MAP = os.path.join(HERE, "..", "ros2_ws", "src", "gaze_hri", "config", "so101_follower.yaml")
 
 
 def main():
@@ -34,9 +34,13 @@ def main():
     ap.add_argument("--deg", type=float, default=5.0)
     ap.add_argument("--speed", type=float, default=10.0, help="deg/s")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--arm", required=True, choices=sorted(arms.ARMS))
     a = ap.parse_args()
 
-    cfg = yaml.safe_load(open(MAP))
+    if a.joint == "relax":                       # 캘리브 전에도 쓸 수 있게 맵 없이
+        cfg = {"port": arms.port(a.arm), "servo_ids": [1, 2, 3, 4, 5, 6]}
+    else:
+        cfg = yaml.safe_load(open(arms.map_file(a.arm)))
     bus = So101Bus(cfg["port"], cfg["servo_ids"])
     try:
         if a.joint == "relax":
