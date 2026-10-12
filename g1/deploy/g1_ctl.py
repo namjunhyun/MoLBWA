@@ -6,7 +6,8 @@ status    : 모드 이름('ai' = 고수준, '' = 디벨롭/R&D) + 정책 서버 
 release   : 디벨롭 모드 (MotionSwitcher.ReleaseMode) — 이후 로봇은 스스로 못 선다(하네스)
 highlevel : 고수준 모드 — SelectMode 를 ai → normal → advanced 로 시도(각 2초 뒤 확인), 성공하면 곧바로 Damp. 정책 서버가 돌면 거부
             (console.py 와 같은 순서. 셋 다 실패하면 로봇 재부팅)
-damp      : 비상정지 — 정책 서버가 돌면 SIGTERM(kp0·kd2 댐핑 3초), 아니면 고수준 SetFsmId(1)(R&D 상태에선 안 먹는다)
+damp      : 비상정지 — 정책 서버가 돌면 SIGTERM(kp0·kd2 댐핑 3초), 디벨롭 모드면 서버 --damp_only(같은 댐핑),
+            고수준이면 SetFsmId(1)
 stop      : 정지(기본자세) — 정책 서버가 돌면 SIGINT(기본자세 유지 후 끝), 아니면 고수준 StopMove()
 start     : 정책 서버 발행(--arm). 디벨롭 모드이고 서버가 없을 때만
 """
@@ -84,8 +85,13 @@ def main(cmd):
                 return f"고수준 모드 완료 ({after!r}) → 댐핑 상태. 일으키려면 리모컨/기본 앱"
         return "고수준 복귀 실패 (ai/normal/advanced) — 로봇 재부팅 필요"
     if cmd in ("damp", "stop"):
+        if name == "" and cmd == "damp":   # 디벨롭 모드인데 정책이 없다 → 서버의 send_damp 로 kp0·kd2 3초
+            r = subprocess.run(["python3", os.path.join(HERE, "g1_motion_server.py")] + SERVER_ARGS + ["--arm", "--damp_only"],
+                               cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=30)
+            last = [l for l in r.stdout.splitlines() if "댐핑" in l or "거부" in l or "오지 않는다" in l]
+            return "디벨롭 모드 댐핑: " + (last[-1] if last else f"코드 {r.returncode}")
         if name == "":
-            return "정책 서버도 고수준도 없다 — 이미 힘이 빠진 상태"
+            return "디벨롭 모드·정책 없음 — 정지할 동작이 없다 (힘을 빼려면 비상정지)"
         c = loco()
         if cmd == "damp":
             c.SetFsmId(1)

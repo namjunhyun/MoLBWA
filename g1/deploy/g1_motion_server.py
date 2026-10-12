@@ -148,6 +148,8 @@ AP.add_argument("--viewer", action="store_true",
                 help="mujoco 백엔드에서 실시간 뷰어 창을 띄운다 (화면으로 보며 확인)")
 AP.add_argument("--sim_pose_log", default="",
                 help="mujoco 전용: 스텝별 세그먼트·머리(몸통 위 0.45 m)·골반·양발 world 위치를 npz 로 (눈에 보이는 흔들림 측정)")
+AP.add_argument("--damp_only", action="store_true",
+                help="--arm 과 함께: 정책 없이 kp=0·kd=2 댐핑만 3초 발행하고 끝 (디벨롭 모드에서 정책이 안 돌 때의 비상정지)")
 AP.add_argument("--sim_realtime", action="store_true",
                 help="mujoco 전용: 뷰어 없이도 실시간 속도로 돈다 (조작 패널로 명령을 보낼 때)")
 AP.add_argument("--arm", action="store_true", help="실제로 DDS 에 발행한다 (없으면 dry-run)")
@@ -739,6 +741,13 @@ if bridge.ok:
     if args.arm and _mode != "":
         sys.exit("[거부] 고수준 컨트롤러가 살아 있다(또는 확인 불가). 'R&D 진입' 후 다시 발행하라 — "
                  "그대로 쏘면 두 컨트롤러가 싸워 정책이 발산한다.")
+
+if args.damp_only:
+    # 위 관문(--arm 이면 고수준이 살아 있을 때 거부)을 지난 뒤에만 온다
+    if not bridge.ok:
+        sys.exit("--damp_only 는 --arm 과 함께 (DDS 를 열어야 댐핑을 보낼 수 있다)")
+    send_damp()
+    sys.exit(0)
 
 if args.probe > 0:
     # 발행 없이 수신만 — 인터페이스가 맞는지, lowstate 가 규칙적으로 오는지,
