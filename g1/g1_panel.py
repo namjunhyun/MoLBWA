@@ -158,7 +158,7 @@ robot = {"status": ""}
 def poll_status():
     while args.ssh:
         robot["status"] = ctl("status")
-        time.sleep(3)
+        time.sleep(10)   # 젯슨 부하 최소화 (정책 루프 20 ms 주기)
 
 
 threading.Thread(target=poll_status, daemon=True).start()

@@ -63,6 +63,10 @@ def main(cmd):
     if cmd in ("damp", "stop") and pid:            # 정책 서버가 돌면 DDS 를 열지 않고 신호만 (가장 빠른 경로)
         os.kill(pid, signal.SIGTERM if cmd == "damp" else signal.SIGINT)
         return f"정책 서버 {pid} 에 {'SIGTERM(댐핑)' if cmd == 'damp' else 'SIGINT(기본자세 유지 후 종료)'}"
+    if cmd == "status" and pid:
+        # 정책 중엔 DDS 를 새로 열지 않는다 — 참여자 생성·탐색이 정책 루프 주기를 깨뜨렸다
+        # (2026-10-12 실기: 3초마다 status → p99 62.9 ms, 5회 연속 놓쳐 정책 중단). 정책은 디벨롭 모드에서만 돈다.
+        return f"mode=디벨롭(정책 실행 중) server={pid}"
     dds(); m = switcher(); name = mode_name(m)
     if cmd == "status":
         return f"mode={name or '디벨롭'} server={pid or '-'}"
