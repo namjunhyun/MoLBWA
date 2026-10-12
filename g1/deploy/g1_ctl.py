@@ -108,8 +108,16 @@ def main(cmd):
         if name != "":
             return f"거부: 모드가 {name!r} — 먼저 디벨롭 모드"
         args = ["python3", os.path.join(HERE, "g1_motion_server.py")] + SERVER_ARGS + (["--arm"] if cmd == "start" else ["--run_sec", "20"])
-        subprocess.Popen(args, cwd=HERE, stdout=open(LOG, "w"), stderr=subprocess.STDOUT, start_new_session=True)
-        return f"정책 서버 시작({'발행' if cmd == 'start' else 'dry-run 20초'}) — 로그 {LOG}"
+        # 런마다 새 로그 (예전엔 server.log 하나를 덮어써 직전 런 기록이 사라졌다). server.log 는 최신 런을 가리키는 링크
+        run_log = os.path.join(HERE, "logs", time.strftime("server_%m%d_%H%M%S.log"))
+        os.makedirs(os.path.dirname(run_log), exist_ok=True)
+        if cmd == "start":
+            args += ["--log_csv", run_log[:-4] + ".csv"]
+        subprocess.Popen(args, cwd=HERE, stdout=open(run_log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+        if os.path.lexists(LOG):
+            os.remove(LOG)
+        os.symlink(run_log, LOG)
+        return f"정책 서버 시작({'발행' if cmd == 'start' else 'dry-run 20초'}) — 로그 {run_log}"
     return f"모르는 명령 {cmd}"
 
 
