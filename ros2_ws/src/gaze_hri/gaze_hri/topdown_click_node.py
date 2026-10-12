@@ -80,6 +80,14 @@ class _HomographyAdapter:
     def to_robot(self, u, v):
         return self.node.pixel_to_robot(u, v)
 
+    def to_pixel(self, x, y):
+        if self.node.H is None:
+            return None
+        p = np.linalg.inv(self.node.H) @ np.array([float(x), float(y), 1.0])
+        if abs(p[2]) < 1e-9:
+            return None
+        return float(p[0] / p[2]), float(p[1] / p[2])
+
 
 class TopdownClick(Node):
 
@@ -124,6 +132,8 @@ class TopdownClick(Node):
         self.declare_parameter("yolo_classes", ["cup", "bottle"])
         # 이 노드의 호모그래피는 tip_z 0.13m 평면 -> 박스 중심이 맞다 (table_view 주석 참고)
         self.declare_parameter("yolo_anchor", "center")
+        self.declare_parameter("yolo_imgsz", 640)
+        self.declare_parameter("yolo_roi_m", [0.0])     # [x_min, x_max, y_min, y_max] m, 4개가 아니면 끔
 
         # 기구학 (순기구학으로 손끝 좌표를 구할 때 사용)
         self.declare_parameter("base_height", 0.0563)
@@ -510,7 +520,10 @@ class TopdownClick(Node):
                     self.get_parameter("yolo_classes").value,
                     self.get_parameter("min_area").value,
                     logger=self.get_logger(),
-                    anchor=self.get_parameter("yolo_anchor").value)
+                    anchor=self.get_parameter("yolo_anchor").value,
+                    imgsz=self.get_parameter("yolo_imgsz").value,
+                    roi_m=(list(self.get_parameter("yolo_roi_m").value)
+                           if len(self.get_parameter("yolo_roi_m").value) == 4 else None))
                 self.get_logger().info(
                     f"물체 검출: YOLO (좌표 기준점: {self.get_parameter('yolo_anchor').value})")
             return self._yolo.detect(frame, _HomographyAdapter(self))

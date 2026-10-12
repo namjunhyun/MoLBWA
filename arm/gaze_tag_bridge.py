@@ -75,6 +75,10 @@ class GazeToBase:
         self.last_ray = None
         self.hold_s = 0.0 if calib_mode else hold_s   # 캘리브 때는 옛 자세를 섞지 않는다
         self._last_T, self._last_T_t = None, 0.0
+        # 스탬프 맞춤 latch: slam_at(t)->T_w_hc|'wait'|None 이 주어지면 태그 관측을 (영상 스탬프, T_tag)
+        # 로 쌓아 두고, 그 시각의 SLAM 포즈가 도착한 뒤에 latch 한다.
+        self.slam_at = None
+        self._pending = []
 
     def update_slam(self, T_w_hc, map_id, ok, t=None):
         """SLAM 포즈 입력. 발산 방어: ORB-SLAM3 는 발산 중에도 30Hz 로 포즈를 낸다
@@ -97,7 +101,17 @@ class GazeToBase:
         self._last_slam_pos = pos if np.all(np.isfinite(pos)) else None
         self.tracker.update_slam(np.asarray(T_w_hc, float), map_id, ok, t)
 
-    def step(self, T_tag, gaze_uv, t=None, gaze_ray=None):
+    def flush_pending(self):
+        keep = []
+        for ts, T_tag in self._pending:
+            T_w_hc = self.slam_at(ts)
+            if isinstance(T_w_hc, str):          # 'wait': 그 시각 SLAM 포즈 아직 안 옴
+                keep.append((ts, T_tag))
+            elif T_w_hc is not None:
+                self.tracker.update_tag(T_tag, None, T_w_hc_at=T_w_hc)
+        self._pending = keep[-30:]
+
+    def step(self, T_tag, gaze_uv, t=None, gaze_ray=None, stamp=None):
         """-> (p_ab or None, T_origin or None, 출처 'tag'/'slam' 또는 무효 사유)
 
         gaze_ray: (origin_hc, direction_hc) 또는 None. docs/12 (R,p_eye) 실전 연결 —
@@ -112,9 +126,14 @@ class GazeToBase:
         if T_tag is not None:
             self.direct.update_tag(T_tag)
             if self.tracker is not None:
-                self.tracker.update_tag(T_tag, t)       # latch 생성/갱신 + drift 기록
+                if self.slam_at is not None and stamp is not None:
+                    self._pending.append((stamp, T_tag))
+                else:
+                    self.tracker.update_tag(T_tag, t)   # latch 생성/갱신 + drift 기록
         else:
             self.direct.miss()
+        if self.tracker is not None and self.slam_at is not None:
+            self.flush_pending()
 
         T, src = self.direct.T_headcam_to_armbase(), "tag"
         # 2026-09-27: 태그가 한두 프레임 깜빡이면 즉시 무효 -> dwell 버퍼가 0.35초마다 리셋돼
@@ -170,6 +189,8 @@ def main():
                          "전이면 자동으로 옛 픽셀(--gaze-px-port) 경로로 대체됨")
     ap.add_argument("--slam", action="store_true",
                     help="태그가 안 보일 때 SLAM(/orbslam3/pose)으로 이어 간다")
+    ap.add_argument("--latest-pose", action="store_true",
+                    help="(옛 방식) 태그 latch 에 영상 스탬프 대신 최신 SLAM 포즈를 쓴다")
     ap.add_argument("--calib-mode", action="store_true",
                     help="T_BW 캘리브용. 테이블 평면 교차 대신 광선 위 점을 그대로 보낸다 "
                          "(그리퍼 끝처럼 공중의 점을 볼 때 쓸 것)")
@@ -190,6 +211,8 @@ def main():
                      use_slam=args.slam, calib_mode=args.calib_mode, hold_s=args.tag_hold_s)
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
                      gaze_px_port=args.gaze_px_port, gaze_ray_port=args.gaze_ray_port)
+    if args.slam and not args.latest_pose:
+        g2b.slam_at = src.slam_at
     sender = GazeUdpSender(args.udp_host, args.udp_port)
     log.info("송신 %s:%d, 응시점 높이 z=%.3f (테이블 %.3f + %.3f), SLAM %s",
              args.udp_host, args.udp_port, g2b.plane_z, args.table_z, args.gaze_height,
@@ -215,7 +238,8 @@ def main():
             if gaze_ray is not None:
                 n_ray_input += 1
             g2b.last_ray = None
-            p, T_origin, info = g2b.step(T, gaze_uv, gaze_ray=gaze_ray)
+            p, T_origin, info = g2b.step(T, gaze_uv, gaze_ray=gaze_ray,
+                                         stamp=getattr(src, "last_frame_stamp", None))
             if args.debug_ray and g2b.last_ray is not None:
                 dbg_o.append(g2b.last_ray[0]); dbg_d.append(g2b.last_ray[1])
 

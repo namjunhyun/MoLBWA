@@ -27,6 +27,7 @@ import argparse
 import logging
 import os
 import sys
+import collections
 import threading
 import time
 
@@ -107,6 +108,9 @@ class GazeSource:
                 self.T_w_hc = None
                 self.map_id = 0
                 self.last_pose_t = 0.0
+                # 2026-09-29: (헤더 스탬프, T) 기록. 태그 관측은 그 영상 스탬프의 SLAM 자세와
+                # 짝지어야 한다 — 최신 포즈를 쓰면 SLAM 처리 지연만큼 머리 움직일 때 5~10cm 어긋남.
+                self.pose_buf = collections.deque(maxlen=90)
                 self.create_subscription(PoseStamped, "/orbslam3/pose", self._pose, 10)
                 # ★ ORB-SLAM3 패치로 추가해야 하는 토픽. patches/orbslam3_ros2.patch 참고.
                 self.create_subscription(Int32, "/orbslam3/map_id", self._map, 10)
@@ -127,9 +131,10 @@ class GazeSource:
                     return
                 if img.ndim == 2:
                     img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 with self.lock:
                     self._seq += 1
-                    self.scene = (img, self._seq)
+                    self.scene = (img, self._seq, st)
 
             def _pose(self, msg):
                 from scipy.spatial.transform import Rotation as R
@@ -137,9 +142,11 @@ class GazeSource:
                 T = np.eye(4)
                 T[:3, :3] = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
                 T[:3, 3] = [p.x, p.y, p.z]
+                st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 with self.lock:
                     self.T_w_hc = T
                     self.last_pose_t = time.time()
+                    self.pose_buf.append((st, T))
 
             def _map(self, msg):
                 with self.lock:
@@ -188,7 +195,29 @@ class GazeSource:
         if got is None or got[1] == self._last_seq:
             return None, None, None
         self._last_seq = got[1]
+        self.last_frame_stamp = got[2]
         return got[0], self._gaze.latest(), None
+
+    def slam_at(self, t, max_gap_s=0.1):
+        """영상 스탬프 t 의 SLAM 헤드캠 자세(앞뒤 포즈 사이 보간). 아직 그 시각까지
+        포즈가 안 왔으면 'wait', 버퍼보다 오래됐거나 간격이 크면 None."""
+        if self._node is None or t is None:
+            return None
+        with self._node.lock:
+            buf = list(self._node.pose_buf)
+        if not buf or t < buf[0][0]:
+            return None
+        if t > buf[-1][0]:
+            return "wait"
+        for (t0, T0), (t1, T1) in zip(buf, buf[1:]):
+            if t0 <= t <= t1:
+                if t1 - t0 > max_gap_s:
+                    return None
+                if t1 - t0 < 1e-6:
+                    return T1
+                from anchor import _slerp_pose
+                return _slerp_pose(T0, T1, (t - t0) / (t1 - t0))
+        return buf[-1][1] if abs(buf[-1][0] - t) < 1e-6 else None
 
     def gaze_ray(self):
         """-> (origin_hc, direction_hc) 또는 None. docs/12 (R,p_eye) 실전 연결용.

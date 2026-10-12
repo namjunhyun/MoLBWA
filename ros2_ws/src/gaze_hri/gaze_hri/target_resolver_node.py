@@ -104,6 +104,9 @@ class TargetResolver(Node):
         self.declare_parameter("place_min_r", 0.16)
         self.declare_parameter("place_max_r", 0.29)
         self.declare_parameter("place_max_yaw_deg", 65.0)
+        # 2026-10-01: 집는 점을 팔 받침 쪽으로 이만큼 당긴다 [m] (+ = 안쪽). 탑다운 위치가 인형
+        # 중심보다 먼 쪽으로 잡혀 손가락이 인형 뒤 끝을 집었다.
+        self.declare_parameter("pick_pull_in_m", 0.0)
 
         self.base_frame = self.get_parameter("base_frame").value
         self.plane = np.array(self.get_parameter("table_plane").value, dtype=float)
@@ -276,6 +279,11 @@ class TargetResolver(Node):
                 self._store_pick_correction(p, origin_base, on_plane + n * self.grasp_height)
             else:
                 on_plane = self._gaze_to_table(p, origin_base)
+            pull = float(self.get_parameter("pick_pull_in_m").value)
+            r = float(np.hypot(on_plane[0], on_plane[1]))
+            if pull != 0.0 and r > 1e-6:
+                k = max(r - pull, 0.0) / r
+                on_plane = np.array([on_plane[0] * k, on_plane[1] * k, on_plane[2]])
             final = on_plane + n * self.grasp_height
 
         else:  # place

@@ -84,13 +84,16 @@ class AnchorTracker:
             self.latched_map_id = None
         self.T_w_hc, self.map_id, self.slam_ok, self._slam_t = T_w_hc, map_id, tracking_ok, t
 
-    def update_tag(self, T_hc_ab_meas: np.ndarray, t: float | None = None):
-        """태그가 보일 때마다 호출. latch 를 생성하거나 갱신한다."""
+    def update_tag(self, T_hc_ab_meas: np.ndarray, t: float | None = None,
+                   T_w_hc_at: np.ndarray | None = None):
+        """태그가 보일 때마다 호출. latch 를 생성하거나 갱신한다.
+        T_w_hc_at: 태그 영상과 같은 스탬프의 SLAM 자세(있으면 최신 포즈 대신 쓴다)."""
         t = time.time() if t is None else t
         if self.T_w_hc is None or not self.slam_ok:
             log.debug("SLAM pose 없음 -> latch 보류")
             return
-        T_w_ab_meas = self.T_w_hc @ T_hc_ab_meas
+        T_w_hc = self.T_w_hc if T_w_hc_at is None else T_w_hc_at
+        T_w_ab_meas = T_w_hc @ T_hc_ab_meas
 
         if self.T_w_ab is None or self.latched_map_id != self.map_id:
             self.T_w_ab = T_w_ab_meas

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """YOLO 검출 워커. ~/yolo-env 의 파이썬으로 띄운다 (시스템 numpy 1.x 와 torch 충돌을 피하려고 프로세스를 분리).
 
-    yolo_worker.py MODEL CONF CLS1,CLS2,...
+    yolo_worker.py MODEL CONF CLS1,CLS2,... [IMGSZ]
 
 프로토콜: stdin 으로 [uint32 길이][JPEG], stdout 으로 JSON 한 줄
 {"dets": [[클래스, conf, x1, y1, x2, y2], ...]}. 시작하면 {"ready": true} 를 한 번 낸다.
@@ -26,6 +26,7 @@ def read_exact(f, n):
 
 def main():
     model_path, conf, classes = sys.argv[1], float(sys.argv[2]), sys.argv[3].split(",")
+    imgsz = int(sys.argv[4]) if len(sys.argv) > 4 else 640
     out = sys.stdout
     sys.stdout = sys.stderr            # 라이브러리 출력이 프로토콜을 오염시키지 않게
 
@@ -46,7 +47,7 @@ def main():
         if data is None:
             break
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-        r = model.predict(img, conf=conf, classes=ids, imgsz=640, verbose=False)[0]
+        r = model.predict(img, conf=conf, classes=ids, imgsz=imgsz, verbose=False)[0]
         dets = [[names[int(b.cls)], float(b.conf)] + [float(x) for x in b.xyxy[0]] for b in r.boxes]
         out.write(json.dumps({"dets": dets}) + "\n")
         out.flush()
