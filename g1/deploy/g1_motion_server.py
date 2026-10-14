@@ -36,7 +36,7 @@ import numpy as np
 
 # segment_player 가 g1_protocol 을 같은 폴더(Jetson) 또는 부모 폴더(저장소)에서 찾는다.
 from segment_player import SegmentPlayer
-from g1_protocol import PART_TO_SEGMENT, PORT_CMD, TURN_BINS, PORT_STATE, decode, encode, plan
+from g1_protocol import PART_TO_SEGMENT, PORT_CMD, TURN_BINS, PORT_STATE, decode, encode, plan_msg
 
 
 class _SafeOut:
@@ -74,6 +74,8 @@ AP.add_argument("--fake_events", type=int, default=0,
                 help="mujoco 백엔드 전용: 6 초 간격으로 무작위 part/bearing act 를 N 번 내부 주입하고, "
                      "마지막 동작이 끝나 idle 로 돌아오면 재생을 끝낸다. 요약에 이벤트별 heading 오차·지연 표")
 AP.add_argument("--fake_seed", type=int, default=0, help="--fake_events 의 난수 씨앗")
+AP.add_argument("--fake_attend", default="",
+                help="mujoco 전용: 가짜 이벤트를 '같이 보기'(attend)로. '물체방위,착용자방위' 예: 60,-30 (+ = 왼쪽)")
 AP.add_argument("--fake_tail_sec", type=float, default=0.0,
                 help="--fake_events: 마지막 동작이 끝나 idle 로 돌아온 뒤 이만큼 더 idle 을 재생하고 끝낸다 (동작 후 흔들림 측정)")
 AP.add_argument("--fake_bearing", type=int, default=None,
@@ -873,9 +875,8 @@ k = 0
 def wrap_deg(a):
     return (a + 180.0) % 360.0 - 180.0
 def turn_deg(segs):
-    """계획한 회전 bin(+ = 왼쪽). turn_l135 -> 135, turn_r90 -> -90, 회전 없으면 0."""
-    n = segs[0]
-    return 0 if not n.startswith("turn_") else int(n[6:]) * (1 if n[5] == "l" else -1)
+    """계획한 회전 bin 합(+ = 왼쪽). [turn_l135, wave] -> 135, [turn_l60, point, turn_r90, celebrate] -> -30."""
+    return sum(int(n[6:]) * (1 if n[5] == "l" else -1) for n in segs if n.startswith("turn_"))
 for t in itertools.count():
     if stop["v"] or (n_run is not None and t >= n_run):
         break
@@ -898,17 +899,25 @@ for t in itertools.count():
         except OSError:              # BlockingIOError = 비었다. 그 밖의 소켓 오류도 제어를 멈추지 않는다
             break
     if args.fake_events and len(events) < args.fake_events and t >= fake_next and player.state == "idle":
-        msgs.append({"seq": player.last_seq + 1, "cmd": "act", "part": args.fake_part or str(fake_rng.choice(fake_parts)),
-                     "bearing_deg": args.fake_bearing if args.fake_bearing is not None
-                     else (None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181)))})
+        if args.fake_attend:
+            _o, _u = (int(v) for v in args.fake_attend.split(","))
+            msgs.append({"seq": player.last_seq + 1, "cmd": "attend", "obj_bearing_deg": _o, "user_bearing_deg": _u})
+        else:
+            msgs.append({"seq": player.last_seq + 1, "cmd": "act", "part": args.fake_part or str(fake_rng.choice(fake_parts)),
+                         "bearing_deg": args.fake_bearing if args.fake_bearing is not None
+                         else (None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181)))})
         fake_next = t + int(6.0 / CTRL_DT)
     for m in msgs:
         if player.command(m):
-            segs = plan(m["part"], m["bearing_deg"])
-            b = m["bearing_deg"]
-            events.append({"part": m["part"], "bearing": b, "segs": segs, "t_acc": t,
+            segs = plan_msg(m)
+            if m["cmd"] == "attend":
+                part, b = "attend", m["user_bearing_deg"]
+                print(f"  [attend] seq {m['seq']} 물체 {m['obj_bearing_deg']} 착용자 {b} -> {' + '.join(segs)}")
+            else:
+                part, b = m["part"], m["bearing_deg"]
+                print(f"  [act] seq {m['seq']} {part} bearing {b} -> {' + '.join(segs)}")
+            events.append({"part": part, "bearing": b, "segs": segs, "t_acc": t,
                            "target": wrap_deg(yaw_now + turn_deg(segs)), "lat_ms": None, "err": None})
-            print(f"  [act] seq {m['seq']} {m['part']} bearing {b} -> {' + '.join(segs)}")
 
     k, first = player.step()
     if sim is not None:

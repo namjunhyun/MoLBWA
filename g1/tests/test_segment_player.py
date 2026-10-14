@@ -109,3 +109,24 @@ def test_garbage_rejected():
     assert not p.command(act(1, bearing_deg="0"))
     assert p.last_seq == -1
     assert p.command(act(1))
+
+
+def test_attend_point_turn_back_celebrate():
+    segs = dict(SEGS, turn_l60=(30, 33), point=(33, 35), turn_r90=(35, 37), celebrate=(37, 40))
+    p = SegmentPlayer(segs)
+    assert p.command({"seq": 1, "cmd": "attend", "obj_bearing_deg": 60, "user_bearing_deg": -30})
+    names = []
+    for _ in range(3 + 2 + 2 + 3 + 1):
+        p.step()
+        names.append(p.segment)
+    assert names == ["turn_l60"] * 3 + ["point"] * 2 + ["turn_r90"] * 2 + ["celebrate"] * 3 + ["idle"]
+
+
+def test_attend_rejected_without_clips_or_bad_types():
+    p = SegmentPlayer(SEGS)                     # point·celebrate 없는 라이브러리
+    assert not p.command({"seq": 1, "cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 0})
+    p = SegmentPlayer(dict(SEGS, point=(30, 32), celebrate=(32, 34)))
+    assert not p.command({"seq": 2, "cmd": "attend", "obj_bearing_deg": 1.5, "user_bearing_deg": 0})
+    assert not p.command({"seq": 3, "cmd": "attend", "obj_bearing_deg": True, "user_bearing_deg": 0})
+    assert not p.command({"seq": 4, "cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 0, "gesture": "dance"})
+    assert p.command({"seq": 5, "cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 5})   # 회전 없이 point+celebrate

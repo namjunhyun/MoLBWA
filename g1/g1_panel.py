@@ -13,7 +13,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from g1_protocol import PART_TO_SEGMENT, PORT_CMD, PORT_STATE, decode, encode, plan
+from g1_protocol import PART_TO_SEGMENT, PORT_CMD, PORT_STATE, decode, encode, plan, plan_attend
 
 AP = argparse.ArgumentParser()
 AP.add_argument("--jetson", default="127.0.0.1", help="g1_motion_server 가 도는 곳 (sim 이면 127.0.0.1)")
@@ -90,6 +90,11 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <div class="row pre"></div>
 <div class="row"><button class="wave" onclick="act('g1_face')">👋 손 흔들기</button>
 <button class="shake" onclick="act('g1_hand')">🤝 악수</button></div>
+<h3 style="margin:18px 0 4px">같이 보기 <small style="color:#888">(물체 쪽으로 돌아 가리킨 뒤 착용자 쪽으로 돌아와 축하)</small></h3>
+<div>물체 방위 <b id="odeg">60</b>° <input id="o" type="range" min="-180" max="180" step="15" value="60"></div>
+<div style="color:#888;font-size:13px">착용자 방위 = 위 원의 주황 점(슬라이더)</div>
+<div class="row"><button class="wave" style="background:#d97706" onclick="attend('celebrate')">🎉 같이 보고 축하</button>
+<button class="wave" style="background:#0891b2" onclick="attend('wave')">👀 같이 보고 손 흔들기</button></div>
 <div id="st">상태: ?</div><p id="msg" style="color:#888"></p><div id="log"></div>
 <script>
 const b=document.getElementById('b'),pre=document.querySelector('.pre');
@@ -102,6 +107,9 @@ async function c(cmd,warn){if(warn&&!confirm(warn))return;document.getElementByI
 const r=await fetch('/ctl/'+cmd,{method:'POST'});document.getElementById('robot').textContent='로봇: '+(await r.json()).msg}
 setInterval(async()=>{const r=await(await fetch('/robot')).json();if(r.log)document.getElementById('log').textContent=r.log;
 if(r.status&&!document.getElementById('robot').textContent.includes('보내는 중'))document.getElementById('robot').textContent='로봇: '+r.status},2000);
+const o=document.getElementById('o');o.oninput=()=>document.getElementById('odeg').textContent=o.value;
+async function attend(g){const r=await fetch('/attend',{method:'POST',body:JSON.stringify({obj_bearing_deg:+o.value,user_bearing_deg:+b.value,gesture:g})});
+document.getElementById('msg').textContent=(await r.json()).msg}
 async function act(p){const r=await fetch('/act',{method:'POST',body:JSON.stringify({part:p,bearing_deg:+b.value})});
 document.getElementById('msg').textContent=(await r.json()).msg}
 setInterval(async()=>{const s=await(await fetch('/state')).json(),busy=s.state!=='idle';
@@ -139,13 +147,18 @@ class H(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            part, b = req["part"], int(req["bearing_deg"])
-            segs = plan(part, b)   # 잘못된 부위·각도는 여기서 ValueError
+            if self.path == "/attend":
+                msg = {"cmd": "attend", "obj_bearing_deg": int(req["obj_bearing_deg"]),
+                       "user_bearing_deg": int(req["user_bearing_deg"]), "gesture": req.get("gesture", "celebrate")}
+                segs = plan_attend(msg["obj_bearing_deg"], msg["user_bearing_deg"], msg["gesture"])
+            else:
+                msg = {"cmd": "act", "part": req["part"], "bearing_deg": int(req["bearing_deg"])}
+                segs = plan(msg["part"], msg["bearing_deg"])   # 잘못된 부위·각도는 여기서 ValueError
         except (ValueError, KeyError, TypeError):
             self.send_error(400)
             return
         last["seq"] = seq = max(last["seq"] + 1, state["seq"] + 1, int(time.time() * 1000))   # g1_dwell.next_seq 와 같은 규칙
-        tx.sendto(encode({"seq": seq, "cmd": "act", "part": part, "bearing_deg": b}), (args.jetson, PORT_CMD))
+        tx.sendto(encode(dict(msg, seq=seq)), (args.jetson, PORT_CMD))
         self._send(json.dumps({"msg": f"보냄 seq {seq}: {' → '.join(segs)}"}))
 
     def log_message(self, *a):

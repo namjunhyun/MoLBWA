@@ -1,4 +1,4 @@
-"""모션 라이브러리 재생 커서: idle 반복 -> act 명령 -> plan() 세그먼트들(turn_l*/turn_r*?, 동작) -> idle.
+"""모션 라이브러리 재생 커서: idle 반복 -> act/attend 명령 -> plan_msg() 세그먼트들(turn_l*/turn_r*?, 동작) -> idle.
 
 라이브러리 npz 는 50 fps = 제어 50 Hz 라서 step 1회 = 1프레임. 세그먼트 경계는
 library_meta.json 의 npz 프레임 인덱스 [start, end). Jetson(Python 3.8)에도 올라간다.
@@ -9,10 +9,10 @@ import os
 import sys
 
 try:                                    # Jetson: 같은 폴더에 scp 됨
-    from g1_protocol import plan
+    from g1_protocol import plan_msg
 except ImportError:                     # 저장소: g1/deploy/ 의 부모가 g1/
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from g1_protocol import plan
+    from g1_protocol import plan_msg
 
 
 class SegmentPlayer:
@@ -48,8 +48,8 @@ class SegmentPlayer:
         return s + self._i - 1, first
 
     def command(self, msg) -> bool:
-        """act 이고, 쉬는 중이고, seq 가 새것일 때만 수락. 와이파이 중복·역순 패킷은 seq 로 거른다."""
-        if not isinstance(msg, dict) or msg.get("cmd") != "act":
+        """act·attend 이고, 쉬는 중이고, seq 가 새것일 때만 수락. 와이파이 중복·역순 패킷은 seq 로 거른다."""
+        if not isinstance(msg, dict) or msg.get("cmd") not in ("act", "attend"):
             return False
         seq = msg.get("seq")
         if type(seq) is not int or seq <= self.last_seq:
@@ -57,10 +57,10 @@ class SegmentPlayer:
         if self.segment != "idle" or self._queue:
             return False
         bearing = msg.get("bearing_deg")
-        if bearing is not None and type(bearing) is not int:   # float·bool 거부 (bool 은 int 의 하위형)
+        if msg["cmd"] == "act" and bearing is not None and type(bearing) is not int:   # float·bool 거부 (bool 은 int 의 하위형)
             return False
         try:
-            queue = plan(msg.get("part"), bearing)
+            queue = plan_msg(msg)
         except (ValueError, TypeError):
             return False
         if any(n not in self.segments for n in queue):

@@ -45,3 +45,25 @@ def test_roundtrip_and_garbage():
     assert decode(encode(m)) == m
     assert decode(b"\xff\x00{") is None
     assert decode(b"[1,2]") is None
+
+
+@pytest.mark.parametrize("o,u,expect", [
+    (60, -30, ["turn_l60", "point", "turn_r90", "celebrate"]),     # 60 으로 돈 뒤 착용자까지 -90
+    (0, 0, ["point", "celebrate"]),
+    (-45, -45, ["turn_r45", "point", "celebrate"]),                 # 물체 쪽에 착용자도 있음
+    (170, -170, ["turn_l165", "point", "turn_l30", "celebrate"]),   # 165 로 돈 뒤 -170 은 +25 → 30 bin
+    (52, 0, ["turn_l45", "point", "turn_r45", "celebrate"]),        # 두 번째 회전은 실제로 향한 bin 기준
+])
+def test_plan_attend(o, u, expect):
+    from g1_protocol import plan_attend
+    assert plan_attend(o, u) == expect
+
+
+def test_plan_msg_dispatch():
+    from g1_protocol import plan_msg
+    assert plan_msg({"cmd": "act", "part": "g1_face", "bearing_deg": 90}) == ["turn_l90", "wave"]
+    assert plan_msg({"cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 0, "gesture": "wave"}) == ["point", "wave"]
+    for bad in ({"cmd": "ping"}, {"cmd": "attend", "obj_bearing_deg": 0},
+                {"cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 0, "gesture": "x"}):
+        with pytest.raises((ValueError, TypeError)):
+            plan_msg(bad)
