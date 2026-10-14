@@ -95,6 +95,16 @@ def upper_only(rows: np.ndarray, standby: dict, root_z: float = 0.76, freeze_wai
     return out
 
 
+def scale_arm(rows: np.ndarray, standby: dict, side: str, k_pitch: float, k_elbow: float) -> np.ndarray:
+    """한쪽 팔의 어깨 pitch·팔꿈치를 대기자세 기준 변위 × k 로 줄인다 — 같은 동작을 더 낮게.
+    2026-10-14: 가리키기 후보가 눈높이(어깨 pitch −80~−90°)라 탁자 높이로 낮추려고 (k≈0.5 → 약 −35°)."""
+    out = rows.copy()
+    for n, k in ((f"{side}_shoulder_pitch_joint", k_pitch), (f"{side}_elbow_joint", k_elbow)):
+        j = 7 + CSV_JOINTS.index(n)
+        out[:, j] = standby[n] + k * (rows[:, j] - standby[n])
+    return out
+
+
 def pad_ends(rows: np.ndarray, start_s: float, end_s: float, fps: float = 30.0) -> np.ndarray:
     a, b = int(round(start_s * fps)), int(round(end_s * fps))
     return np.concatenate([np.repeat(rows[:1], a, 0), rows, np.repeat(rows[-1:], b, 0)])
@@ -119,6 +129,7 @@ if __name__ == "__main__":
     ap.add_argument("--pad_start", type=float, default=None); ap.add_argument("--pad_end", type=float, default=None)
     ap.add_argument("--upper_only", action="store_true", help="다리·골반은 대기자세로 고정하고 허리·팔만 클립을 따른다")
     ap.add_argument("--freeze_waist", action="store_true", help="--upper_only 와 함께: 허리 3관절도 대기자세로 (팔만 움직임)")
+    ap.add_argument("--arm_scale", default="", help="한 팔을 낮추기: 'right:0.5,0.4' = 어깨 pitch 변위×0.5, 팔꿈치 변위×0.4 (대기자세 기준)")
     a = ap.parse_args()
     rows = retime(convert(np.load(a.src, allow_pickle=False), a.t0, a.t1, a.waist_yaw, a.ramp), a.speed)
     if a.vmax > 0:
@@ -126,7 +137,12 @@ if __name__ == "__main__":
     if a.upper_only:
         import json
         meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")))
-        rows = upper_only(rows, dict(zip(meta["joint_names"], meta["default_joint_pos"])), freeze_waist=a.freeze_waist)
+        standby = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
+        rows = upper_only(rows, standby, freeze_waist=a.freeze_waist)
+        if a.arm_scale:
+            side, ks = a.arm_scale.split(":")
+            kp, ke = (float(v) for v in ks.split(","))
+            rows = scale_arm(rows, standby, side, kp, ke)
     ps = a.pad if a.pad_start is None else a.pad_start
     pe = a.pad if a.pad_end is None else a.pad_end
     if ps > 0 or pe > 0:

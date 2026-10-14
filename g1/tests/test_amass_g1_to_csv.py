@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "motion"))
-from amass_g1_to_csv import convert, pad, pad_ends, rate_limit, retime, smooth_env, upper_only  # noqa: E402
+from amass_g1_to_csv import convert, pad, pad_ends, rate_limit, retime, scale_arm, smooth_env, upper_only  # noqa: E402
 from make_idle_csv import CSV_JOINTS  # noqa: E402
 
 
@@ -88,3 +88,12 @@ def test_upper_only_freeze_waist_keeps_arms():
     r = convert(fake(n=10))
     o = upper_only(r, {n: 0.5 for n in CSV_JOINTS}, freeze_waist=True)
     assert np.allclose(o[:, 7:22], 0.5) and np.allclose(o[:, 22:], r[:, 22:])
+
+
+def test_scale_arm_shrinks_only_that_arm_about_standby():
+    r = convert(fake(n=5)); standby = {n: 0.1 for n in CSV_JOINTS}
+    o = scale_arm(r, standby, "right", 0.5, 0.0)
+    jp, je = 7 + CSV_JOINTS.index("right_shoulder_pitch_joint"), 7 + CSV_JOINTS.index("right_elbow_joint")
+    assert np.allclose(o[:, jp], 0.1 + 0.5 * (r[:, jp] - 0.1)) and np.allclose(o[:, je], 0.1)
+    others = [c for c in range(r.shape[1]) if c not in (jp, je)]
+    assert np.allclose(o[:, others], r[:, others])
