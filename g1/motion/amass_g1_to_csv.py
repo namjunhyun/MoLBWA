@@ -105,6 +105,15 @@ def scale_arm(rows: np.ndarray, standby: dict, side: str, k_pitch: float, k_elbo
     return out
 
 
+def arm_gap(rows: np.ndarray, deg: float) -> np.ndarray:
+    """두 어깨 roll 을 바깥으로 deg 만큼 벌린다(왼 +, 오른 −). 2026-10-14: 박수 후보가 손끼리 5~7 cm 관통 —
+    실기에선 손목끼리 부딪히므로 간격을 띄운다."""
+    out = rows.copy()
+    out[:, 7 + CSV_JOINTS.index("left_shoulder_roll_joint")] += np.radians(deg)
+    out[:, 7 + CSV_JOINTS.index("right_shoulder_roll_joint")] -= np.radians(deg)
+    return out
+
+
 def pad_ends(rows: np.ndarray, start_s: float, end_s: float, fps: float = 30.0) -> np.ndarray:
     a, b = int(round(start_s * fps)), int(round(end_s * fps))
     return np.concatenate([np.repeat(rows[:1], a, 0), rows, np.repeat(rows[-1:], b, 0)])
@@ -129,6 +138,7 @@ if __name__ == "__main__":
     ap.add_argument("--pad_start", type=float, default=None); ap.add_argument("--pad_end", type=float, default=None)
     ap.add_argument("--upper_only", action="store_true", help="다리·골반은 대기자세로 고정하고 허리·팔만 클립을 따른다")
     ap.add_argument("--freeze_waist", action="store_true", help="--upper_only 와 함께: 허리 3관절도 대기자세로 (팔만 움직임)")
+    ap.add_argument("--arm_gap", type=float, default=0.0, help="두 어깨 roll 을 바깥으로 벌릴 각(도) — 박수 손 관통 방지")
     ap.add_argument("--arm_scale", default="", help="한 팔을 낮추기: 'right:0.5,0.4' = 어깨 pitch 변위×0.5, 팔꿈치 변위×0.4 (대기자세 기준)")
     a = ap.parse_args()
     rows = retime(convert(np.load(a.src, allow_pickle=False), a.t0, a.t1, a.waist_yaw, a.ramp), a.speed)
@@ -143,6 +153,8 @@ if __name__ == "__main__":
             side, ks = a.arm_scale.split(":")
             kp, ke = (float(v) for v in ks.split(","))
             rows = scale_arm(rows, standby, side, kp, ke)
+    if a.arm_gap:
+        rows = arm_gap(rows, a.arm_gap)
     ps = a.pad if a.pad_start is None else a.pad_start
     pe = a.pad if a.pad_end is None else a.pad_end
     if ps > 0 or pe > 0:
