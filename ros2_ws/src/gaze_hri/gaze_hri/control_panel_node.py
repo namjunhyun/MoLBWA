@@ -40,6 +40,8 @@
     python -m gaze_hri.panel_render preview.png executing
 """
 
+import json
+import math
 import os
 import time
 
@@ -96,6 +98,16 @@ class ControlPanel(Node):
         self.declare_parameter("yolo_conf", 0.25)
         self.declare_parameter("yolo_classes", ["cup", "bottle"])
         self.declare_parameter("show_arm_tip", True)
+        # 2026-10-14: 두 팔. 이 노드의 homography_file 은 첫 팔(좌표 기준) 것이고, 다른 팔은
+        # 띠/팔 끝 표시만 그 팔의 호모그래피로 그린다.
+        self.declare_parameter("joint_states_topic", "/joint_states")
+        # 두 팔 GUI 에서는 k(캘리브)를 막는다 — 캘리브 자세 명령을 받을 팔이 없고, 끝까지 가면
+        # 팔 a 호모그래피를 덮어쓴다 (2026-10-14 실수로 k 눌림)
+        self.declare_parameter("allow_calib", True)
+        self.declare_parameter("arm_label", "")
+        self.declare_parameter("other_arm_labels", [""])
+        self.declare_parameter("other_arm_homographies", [""])
+        self.declare_parameter("other_arm_joint_topics", [""])
         # 캘리브레이션 (GUI 안에서 k 키로 실행)
         self.declare_parameter("calib_height", 0.005)
         self.declare_parameter("ransac_threshold_m", 0.005)
@@ -180,6 +192,13 @@ class ControlPanel(Node):
         # ---- 통신 ----
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.pub_objects = self.create_publisher(PoseArray, "/objects/poses", 10)
+        # 2026-10-14: /objects/poses 와 같은 순서의 클래스 이름 (JSON 목록). 물병->컵 이면 따르기
+        self.pub_labels = self.create_publisher(String, "/objects/labels", 10)
+        # 2026-10-14: 따르기 보정 — p = 보정 모드 켜기/끄기, r = 리더로 맞춘 자세 기록 (+화면 저장)
+        self.pub_teleop = self.create_publisher(String, "/teleop/cmd", 10)
+        self.pub_pour_calib = self.create_publisher(Bool, "/task/pour_calib", 10)
+        self.pour_calib = False
+        self.declare_parameter("snapshot_dir", "~/MoLBWA-gaze-hri/notes/pour_calib/snap")
         self.pub_cancel = self.create_publisher(Empty, "/task/cancel", 10)
         # 캘리브레이션 때 팔을 기준 자세로 보낸다
         self.pub_joints = self.create_publisher(
@@ -197,7 +216,25 @@ class ControlPanel(Node):
         self.create_subscription(GazeTarget, "/gaze/target", self.on_target, 10)
         self.create_subscription(String, "/task/state", self.on_state, 10)
         self.create_subscription(String, "/arm/phase", self.on_phase, 10)
-        self.create_subscription(JointState, "/joint_states", self.on_joints, 10)
+        self.create_subscription(String, "/task/message", self.on_task_message, 10)
+        self.create_subscription(JointState, self.get_parameter("joint_states_topic").value,
+                                 self.on_joints, 10)
+        self.other_arms = []          # [[이름, TableHomography, tcp]]
+        self._reach_cache = {}
+        for name, hf, topic in zip(self.get_parameter("other_arm_labels").value,
+                                   self.get_parameter("other_arm_homographies").value,
+                                   self.get_parameter("other_arm_joint_topics").value):
+            if not name:
+                continue
+            h = TableHomography()
+            ok, why = h.load(os.path.expanduser(hf))
+            if not ok:
+                self.get_logger().error(f"팔 {name} 호모그래피를 못 읽었습니다 ({why})")
+                continue
+            entry = [name, h, None]
+            self.other_arms.append(entry)
+            self.create_subscription(JointState, topic,
+                                     lambda m, e=entry: self._on_other_joints(e, m), 10)
 
         # ---- 상태 ----
         self.mode = "run"            # run | calib
@@ -272,6 +309,89 @@ class ControlPanel(Node):
         except Exception:                               # noqa: BLE001
             self.tcp = None
 
+    def _reach_arc(self, label):
+        """~/.ros/so101_reach_{a|b}.json (손으로 그린 띠). 파일이 바뀌면 다시 읽는다."""
+        if not label:
+            return None
+        f = os.path.expanduser(f"~/.ros/so101_reach_{label.lower()}.json")
+        try:
+            mt = os.path.getmtime(f)
+        except OSError:
+            return None
+        c = self._reach_cache.get(f)
+        if c is None or c[0] != mt:
+            try:
+                c = (mt, json.load(open(f)))
+            except ValueError:
+                return None
+            self._reach_cache[f] = c
+        return c[1]
+
+    def _band_at(self, label, xy, lo, hi):
+        """그 팔의 띠 (손으로 그린 게 있으면 가장 가까운 pan 칸)."""
+        arc = self._reach_arc(label)
+        if not arc or not arc.get("pan_deg"):
+            return lo, hi
+        pan = math.degrees(math.atan2(xy[1], xy[0]))
+        k = min(range(len(arc["pan_deg"])), key=lambda i: abs(arc["pan_deg"][i] - pan))
+        if abs(arc["pan_deg"][k] - pan) > 7.5:
+            return None                     # 그 방향은 손으로 그린 범위 밖
+        return arc["r_min"][k], arc["r_max"][k]
+
+    def _object_info(self):
+        """검출 물체마다 각 팔 받침대까지 거리 글자와, 어느 팔이든 집기 띠 안인지."""
+        band = self.get_parameter("reach_band").value
+        if len(band) != 2:
+            return []
+        lo, hi = band
+        homs = [(self.get_parameter("arm_label").value or "", self.homography)] + \
+               [(n, h) for n, h, _ in self.other_arms]
+        labels = list(getattr(self.detector, "last_labels", []))
+
+        def dists(u, v):
+            out_ = []
+            for name, h in homs:
+                xy = h.to_robot(u, v)
+                out_.append((name, None if xy is None else math.hypot(*xy)))
+            return out_
+
+        def in_band(name, u, v, r, label=None):
+            h = dict(homs)[name]
+            xy = h.to_robot(u, v)
+            # 물병은 가까우면 위에서 수직으로 내려와 잡는다 (arm_server vertical_min_radius 0.27)
+            b = self._band_at(name, xy, lo, hi) if xy else None
+            return b is not None and r is not None and b[0] <= r <= b[1]
+        # 2026-10-14: 물병을 고른 상태면 컵마다 '따르기 가능' 을 따로 본다. 컵은 따르는 팔에서
+        # 컵 중심(기준점에서 팔 쪽으로 3cm) 23~40cm, 그 팔에서 병도 집기 띠(수평 집기) 안.
+        bottle_r = None
+        if self.task_state == "PICK_SELECTED" and self.pick_target is not None:
+            for i, ((u, v), (x, y), _) in enumerate(self.objects):
+                if i < len(labels) and labels[i] == "bottle" and \
+                        math.hypot(x - self.pick_target[0], y - self.pick_target[1]) < 0.06:
+                    bottle_r = {n: (r, in_band(n, u, v, r, "bottle")) for n, r in dists(u, v)}
+        out = []
+        for i, ((u, v), _, _) in enumerate(self.objects):
+            ds = dists(u, v)
+            txt = " ".join(f"{n}{r * 100:.0f}" for n, r in ds if r is not None) + "cm"
+            if bottle_r is not None and i < len(labels) and labels[i] == "cup":
+                ok = any(r is not None and 0.23 <= r - 0.03 <= 0.40
+                         and bottle_r.get(n) is not None and bottle_r[n][1]
+                         for n, r in ds)
+                out.append((txt + (" 따르기 OK" if ok else " 따르기 X"), ok))
+            else:
+                lab = labels[i] if i < len(labels) else None
+                out.append((txt, any(in_band(n, u, v, r, lab) for n, r in ds)))
+        return out
+
+    def _on_other_joints(self, entry, msg):
+        if not self.show_tip or len(msg.position) < 4:
+            return
+        try:
+            p = forward_kinematics(list(msg.position[:4]), self.geo)
+            entry[2] = (float(p[0]), float(p[1]), float(p[2]))
+        except Exception:                               # noqa: BLE001
+            entry[2] = None
+
     # ==================================================================
     # 입력
     # ==================================================================
@@ -293,6 +413,13 @@ class ControlPanel(Node):
         if self.mode == "calib":
             self.calib_click(x, y)
         elif self.source == "mouse":
+            # 2026-10-14: 물체 박스 안을 찍으면 그 물체의 기준점(박스 아래 변 가운데)을 찍은 것으로
+            # 친다. 컵 몸통을 찍었는데 기준점에서 9.6cm 라 '빈 곳'으로 보고 물병을 컵 옆에 그냥
+            # 옮겨 버렸다 (따르기 대신).
+            for ((u, v), _, c) in self.objects:
+                if c is not None and cv2.pointPolygonTest(c, (float(x), float(y)), False) >= 0:
+                    x, y = int(round(u)), int(round(v))
+                    break
             self.held_px = (x, y)
             self.held_until = time.time() + self.hold_time
             xy = self.homography.to_robot(x, y)
@@ -304,6 +431,10 @@ class ControlPanel(Node):
         if key in (ord("q"), 27):
             raise KeyboardInterrupt
         if key == ord("k"):
+            if not self.get_parameter("allow_calib").value and self.mode != "calib":
+                self.say("두 팔 화면에서는 캘리브를 할 수 없습니다 (팔별 topdown_calib 사용)",
+                         "Calibration disabled in dual-arm GUI")
+                return
             self.toggle_calibration()
         elif key == ord("u") and self.mode == "calib":
             if self.calib.undo():
@@ -320,6 +451,22 @@ class ControlPanel(Node):
             self.held_until, self.held_px = 0.0, None
             self.pub_cancel.publish(Empty())
             self.say("비상 정지 — 동작을 중단했습니다", "EMERGENCY STOP")
+        elif key == ord("p"):
+            self.pour_calib = not self.pour_calib
+            self.say("따르기 보정 모드 켬 — 물병 -> 컵 을 고르면 리더로 맞춰 기록합니다"
+                     if self.pour_calib else "따르기 보정 모드 끔",
+                     "Pour calibration ON" if self.pour_calib else "Pour calibration OFF", 4.0)
+        elif key in (ord("8"), ord("4"), ord("2"), ord("6")):
+            self.nudge(*{ord("8"): (0, -1), ord("4"): (-1, 0), ord("2"): (0, 1),
+                         ord("6"): (1, 0)}[key])
+        elif key in (ord("+"), ord("="), ord("-")):
+            d = -1 if key == ord("-") else 1
+            self.pub_teleop.publish(String(data=f"tilt:{d}"))
+            self.say("더 기울임 +5°" if d > 0 else "덜 기울임 -5°", f"tilt {d * 5:+d} deg", 1.0)
+        elif key == ord("r"):
+            path = self.save_snapshot()
+            self.pub_teleop.publish(String(data=f"record:{path or ''}"))
+            self.say("기록했습니다", "Recorded")
         elif key == ord("d"):
             self.detect_on = not self.detect_on
             self.say(f"물체 검출 {'켬' if self.detect_on else '끔'}",
@@ -404,6 +551,11 @@ class ControlPanel(Node):
             "컵 색을 잡았습니다. config 에 남기려면 아래를 복사하세요:\n"
             f"    hsv_lower: {lower}\n    hsv_upper: {upper}")
 
+    def on_task_message(self, msg):
+        """task_manager 의 거부/실패 이유 — 화면 아래에 8초. 길면 앞부분만."""
+        t = msg.data if len(msg.data) <= 110 else msg.data[:108] + "…"
+        self.say(t, t, 8.0)
+
     def say(self, ko, en, seconds=2.5):
         self.notice = self.hud.label(ko, en)
         self.notice_until = time.time() + seconds
@@ -441,9 +593,38 @@ class ControlPanel(Node):
 
         cv2.imshow(WIN, render(frame, self.build_state(now), self.hud,
                                self.homography))
-        key = cv2.waitKey(1) & 0xFF
-        if key != 255:
-            self.handle_key(key)
+        raw = cv2.waitKeyEx(1)
+        if raw != -1:
+            # 화살표 (GTK/Qt 코드) -> 따르기 보정 입구 조정. 일반 키는 아래 바이트로
+            arrow = {65361: (-1, 0), 65362: (0, -1), 65363: (1, 0), 65364: (0, 1),
+                     0x1000012: (-1, 0), 0x1000013: (0, -1), 0x1000014: (1, 0), 0x1000015: (0, 1)}
+            if raw in arrow:
+                self.nudge(*arrow[raw])
+            else:
+                self.handle_key(raw & 0xFF)
+
+    def nudge(self, dx, dy):
+        """따르기 보정 멈춤 중: 병 입구를 화면 방향으로 1cm (8 위, 2 아래, 4 왼쪽, 6 오른쪽)."""
+        self.pub_teleop.publish(String(data=f"nudge:{dx}:{dy}"))
+        self.say({(0, -1): "입구 ↑ 1cm", (0, 1): "입구 ↓ 1cm", (-1, 0): "입구 ← 1cm",
+                  (1, 0): "입구 → 1cm"}[(dx, dy)], "nudge 1cm", 1.0)
+
+    def save_snapshot(self):
+        """보정 기록용: 지금 화면 + 검출 결과(픽셀 박스, 라벨, 좌표)."""
+        if self.frame is None:
+            return None
+        d = os.path.expanduser(self.get_parameter("snapshot_dir").value)
+        os.makedirs(d, exist_ok=True)
+        base = os.path.join(d, time.strftime("snap_%m%d_%H%M%S"))
+        cv2.imwrite(base + ".png", self.frame)
+        labels = list(getattr(self.detector, "last_labels", []))
+        objs = [{"px": [float(u), float(v)], "xy": [float(x), float(y)],
+                 "box": c.reshape(-1, 2).tolist() if c is not None else None,
+                 "label": labels[i] if i < len(labels) else None}
+                for i, ((u, v), (x, y), c) in enumerate(self.objects)]
+        json.dump({"objects": objs, "homography_file": self.calib_file},
+                  open(base + ".json", "w"), ensure_ascii=False)
+        return base + ".png"
 
     def publish_objects(self):
         pa = PoseArray()
@@ -455,6 +636,11 @@ class ControlPanel(Node):
             p.orientation.w = 1.0
             pa.poses.append(p)
         self.pub_objects.publish(pa)
+        self.pub_pour_calib.publish(Bool(data=self.pour_calib))
+        labels = list(getattr(self.detector, "last_labels", []))
+        if len(labels) != len(pa.poses):
+            labels = ["object"] * len(pa.poses)
+        self.pub_labels.publish(String(data=json.dumps(labels)))
 
     def publish_mouse_point(self, now):
         holding = now < self.held_until and self.held_px is not None
@@ -509,6 +695,12 @@ class ControlPanel(Node):
             reach_band=(tuple(self.get_parameter("reach_band").value)
                         if len(self.get_parameter("reach_band").value) == 2 else None),
             arm_phase=self.arm_phase,
+            tip_label=self.get_parameter("arm_label").value,
+            other_arms=[(h, tcp if self.show_tip else None, n) for n, h, tcp in self.other_arms],
+            object_info=self._object_info(),
+            reach_arcs={id(h): a for h, a in
+                        [(self.homography, self._reach_arc(self.get_parameter("arm_label").value))]
+                        + [(h, self._reach_arc(n)) for n, h, _ in self.other_arms] if a},
             has_fixation=self.has_fixation,
             detect_on=self.detect_on,
             calibrated=self.homography.ready,

@@ -45,3 +45,32 @@ def captures_file(arm):
 
 def rest_file(arm):
     return os.path.expanduser(f"~/.ros/so101_rest_ticks_{_check(arm)}.json")
+
+
+# ---------------------------------------------------------------------------
+# 리더 팔 (2026-10-14) — 텔레옵/따르기 보정용. 아직 연결 전이라 포트는 파일로 지정한다:
+#   python3 tools/so101_leader.py ports              # 새로 보이는 포트 확인
+#   python3 tools/so101_leader.py assign --arm b --port /dev/serial/by-id/...
+# -> ~/.ros/so101_leaders.yaml  {a: <by-id>, b: <by-id>}
+# ---------------------------------------------------------------------------
+LEADERS_FILE = os.path.expanduser("~/.ros/so101_leaders.yaml")
+
+
+def leader_port(arm):
+    """팔 arm 을 조종할 리더의 포트. 지정 안 됐으면 None."""
+    _check(arm)
+    if not os.path.exists(LEADERS_FILE):
+        return None
+    import yaml
+    with open(LEADERS_FILE) as f:
+        return (yaml.safe_load(f) or {}).get(arm)
+
+
+def leader_map_file(arm):
+    """tools/so101_leader.py solve 결과 (리더 틱 <-> 기구학 각도)."""
+    return os.path.abspath(os.path.join(_CONFIG, f"so101_leader_{_check(arm)}.yaml"))
+
+
+def leader_captures_file(arm):
+    return os.path.expanduser(f"~/.ros/so101_leader_captures_{_check(arm)}.json")
+

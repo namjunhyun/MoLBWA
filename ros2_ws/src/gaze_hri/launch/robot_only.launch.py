@@ -28,6 +28,7 @@ def generate_launch_description():
     cfg_dir = os.path.dirname(os.path.realpath(params))
     joint_map = [cfg_dir + "/so101_follower_", arm, ".yaml"]
     homography = [os.path.expanduser("~/.ros/topdown_homography_"), arm, ".yaml"]
+    rest_ticks = [os.path.expanduser("~/.ros/so101_rest_ticks_"), arm, ".json"]
 
     mode = LaunchConfiguration("mode")
     backend = LaunchConfiguration("backend")
@@ -74,5 +75,6 @@ def generate_launch_description():
         Node(package="gaze_hri", executable="arm_server",
              name="arm_server", output="screen",
              parameters=[params, {"backend": backend, "joint_map_file": joint_map,
+                                  "rest_ticks_file": rest_ticks,
                                   "simulate_fail_rate": fail_rate}]),
     ])

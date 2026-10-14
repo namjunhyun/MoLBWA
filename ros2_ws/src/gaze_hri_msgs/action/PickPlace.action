@@ -6,6 +6,8 @@ string frame_id                 # pick/place 가 표현된 좌표계.
                                 # target_resolver 를 거친 목표는 "base_link" 가 들어온다.
 float32 approach_pitch          # 그리퍼 접근 각도 [rad], 0=수평, -1.57=수직(top-down)
 bool dry_run                    # true면 이 목표에 한해 서보로 명령을 보내지 않는다(좌표/IK만 검증)
+string task                     # "" = 집어서 옮기기, "pour" = pick 의 병을 들어 place(컵 중심)에 따르는 시늉 후 제자리
+string pick_label               # 집을 물체 YOLO 이름 ("bottle" 이면 가까울 때 위에서 수직으로 내려와 잡는다)
 ---
 # Result
 bool success

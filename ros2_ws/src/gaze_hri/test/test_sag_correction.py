@@ -83,3 +83,16 @@ class TestSag(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestLiveTrack(unittest.TestCase):
+    def test_track_step_pays_back_sag_while_moving(self):
+        """2026-10-14: 물병 따르기 중 처짐 — 쓸 때마다 조금씩 bias 를 더해 목표에 붙는다."""
+        be = make()
+        q = [0.0, 1.0, -1.0, -0.5, 0.0, 0.5]
+        for _ in range(150):
+            be.write(q)
+            be.bus.last_pos = be.bus.ticks()
+            be.track_step(0.04, math.radians(20))
+        self.assertLess(abs(be.read()[1] - q[1]), math.radians(0.5))
+        self.assertLess(abs(be.read()[2] - q[2]), math.radians(0.5))

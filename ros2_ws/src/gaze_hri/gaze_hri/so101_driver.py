@@ -380,6 +380,55 @@ class So101Bus:
             pass
 
 
+class LeaderBus:
+    """리더 팔 (2026-10-14). **읽기 전용** — 어떤 레지스터에도 쓰지 않는다 (토크도 건드리지 않음).
+
+    리더는 5V 라 So101Bus(전압 9V 미만 거부)로는 못 연다. 위치만 sync read 한다.
+    """
+
+    def __init__(self, port: str, ids=(1, 2, 3, 4, 5, 6)):
+        from scservo_sdk import COMM_SUCCESS, GroupSyncRead, PacketHandler, PortHandler
+        self._ok = COMM_SUCCESS
+        self.ids = list(ids)
+        self.port = PortHandler(port)
+        if not self.port.openPort() or not self.port.setBaudRate(1_000_000):
+            raise RuntimeError(f"리더 시리얼 포트 열기 실패: {port}")
+        self.ph = PacketHandler(0)
+        self.port_name = port
+        for sid in self.ids:
+            _, res, _ = self.ph.ping(self.port, sid)
+            if res != self._ok:
+                self.close()
+                raise RuntimeError(f"리더 서보 ID{sid} 응답 없음 ({port})")
+        self._gsr = GroupSyncRead(self.port, self.ph, R_PRESENT_POS[0], 2)
+        for sid in self.ids:
+            self._gsr.addParam(sid)
+        self.last = None
+
+    def ticks(self):
+        """현재 위치 틱. 읽기 실패나 튀는 값(직전보다 300틱 넘게)이면 직전 값을 쓴다 —
+        리더 값은 그대로 팔로워 목표가 되므로 한 번 잘못 읽힌 값이 팔을 튀게 하면 안 된다."""
+        for _ in range(2):
+            if self._gsr.txRxPacket() == self._ok:
+                t = [self._gsr.getData(sid, R_PRESENT_POS[0], 2) for sid in self.ids]
+                if self.last is None or max(abs(a - b) for a, b in zip(t, self.last)) < 300:
+                    self.last = t
+                    return t
+            try:
+                self.port.clearPort()
+            except Exception:
+                pass
+        if self.last is None:
+            raise RuntimeError(f"리더 위치를 읽지 못함 ({self.port_name})")
+        return self.last
+
+    def close(self):
+        try:
+            self.port.closePort()
+        except Exception:
+            pass
+
+
 def joint_limits_rad(bus: So101Bus, jmap: JointMap, names=JOINT_NAMES[:4]):
     """서보 EEPROM 위치 한계(여유 limit_margin 포함)를 기구학 각도 한계로 환산.
 

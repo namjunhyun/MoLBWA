@@ -88,6 +88,21 @@ def main():
 
 
 def solve(c, arm):
+    cfg, problems = compute_map(c, arms.port(arm))
+    OUT = arms.map_file(arm)
+    if os.path.exists(OUT):                      # 이전 캘리브 보존
+        import time
+        os.rename(OUT, OUT.replace(".yaml", time.strftime("_bak_%Y%m%d_%H%M%S.yaml")))
+    with open(OUT, "w") as f:
+        f.write("# tools/so101_map_calib.py solve 결과. 손으로 다시 잡으면 덮어써진다.\n")
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    print(f"저장: {os.path.abspath(OUT)}")
+    return 1 if problems else 0
+
+
+def compute_map(c, port):
+    """캡처 6자세 -> 관절 맵 dict. 리더 팔(tools/so101_leader.py)도 같은 계산을 쓴다
+    (2026-10-14: 리더도 같은 SO-101 기구라 자세 정의와 URDF 축선 보정이 똑같다)."""
     need = ["A", "B", "C", "D", "GC", "GO"]
     miss = [p for p in need if p not in c]
     if miss:
@@ -141,7 +156,7 @@ def solve(c, arm):
     for p in problems:
         print("[경고]", p)
     cfg = {
-        "port": arms.port(arm),
+        "port": port,
         "servo_ids": [1, 2, 3, 4, 5, 6],
         "zero_ticks": [int(z) for z in zero],
         "signs": sign,
@@ -151,16 +166,9 @@ def solve(c, arm):
         "captured": {k: c[k] for k in need},
         "warnings": problems,
     }
-    OUT = arms.map_file(arm)
-    if os.path.exists(OUT):                      # 이전 캘리브 보존
-        import time
-        os.rename(OUT, OUT.replace(".yaml", time.strftime("_bak_%Y%m%d_%H%M%S.yaml")))
-    with open(OUT, "w") as f:
-        f.write("# tools/so101_map_calib.py solve 결과. 손으로 다시 잡으면 덮어써진다.\n")
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
-    print(f"저장: {os.path.abspath(OUT)}")
     print(f"  zero={zero}\n  sign={sign}\n  그리퍼 최대 열림 {grip_open_rad:.2f} rad")
-    return 1 if problems else 0
+    return cfg, problems
+
 
 
 if __name__ == "__main__":

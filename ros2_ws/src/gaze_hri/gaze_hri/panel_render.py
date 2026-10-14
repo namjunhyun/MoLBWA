@@ -60,6 +60,10 @@ class PanelState:
     tcp: tuple = None                 # 팔 끝 로봇 (x, y, z)
     reach_band: tuple = None          # 집을 수 있는 거리 (r_min, r_max) [m] — 책상 위 띠로 그린다
     arm_phase: str = ""
+    tip_label: str = ""               # 두 팔일 때 팔 이름 ("A")
+    other_arms: list = field(default_factory=list)
+    object_info: list = field(default_factory=list)
+    reach_arcs: dict = field(default_factory=dict)    # 2026-10-14: id(homography) -> 손으로 그린 띠 (pan/r_min/r_max)   # 2026-10-14: [(글자, 집기 가능?)] objects 순서  # 2026-10-14: [(호모그래피, tcp, 이름)] 다른 팔들
     has_fixation: bool = False
     detect_on: bool = True
     calibrated: bool = False
@@ -80,9 +84,13 @@ def render(frame, st, hud, homography):
         _draw_calibration(view, st, hud)
     else:
         _draw_reach_band(view, st, homography)
+        for homo_o, _, _ in st.other_arms:
+            _draw_reach_band(view, st, homo_o)
         _draw_objects(view, st, hud)
         _draw_targets(view, st, hud, homography)
         _draw_arm_tip(view, st, hud, homography)
+        for homo_o, tcp_o, name_o in st.other_arms:
+            _draw_arm_tip(view, st, hud, homo_o, tcp_o, name_o)
         _draw_pointer(view, st, hud, homography)
         if not st.calibrated:
             _draw_needs_calibration(view, hud)
@@ -119,6 +127,14 @@ def _draw_objects(view, st, hud):
         hud.marker(view, (u, v), H.OBJ, radius=int(r + 6), thickness=1, dashed=True)
         off = (r + 16) * 0.707             # 대각선으로 컵 바깥에
         hud.badge(view, (u + off, v - off), str(i), H.OBJ, radius=10)
+        if i - 1 < len(st.object_info):
+            # 각 팔 받침대까지 거리 — 초록이면 어떤 팔이든 집을 수 있다 (검출 점 = 박스 아래 변)
+            txt, ok = st.object_info[i - 1]
+            # 거리 기준점 (박스 아래 변 가운데 = 바닥 카메라 쪽 가장자리) — 몸통이 띠 안에 보여도
+            # 이 점 기준이다
+            cv2.circle(view, (int(u), int(v)), 4, (20, 20, 20), -1, cv2.LINE_AA)
+            cv2.circle(view, (int(u), int(v)), 3, H.PLACE if ok else H.WARN, -1, cv2.LINE_AA)
+            hud.chip(view, (u, v + 8), txt, H.PLACE if ok else H.WARN, 11, anchor="ct", alpha=0.7)
 
 
 def _draw_targets(view, st, hud, homo):
@@ -186,10 +202,31 @@ def _draw_needs_calibration(view, hud):
              H.FG, 13, anchor="ct", alpha=0.8)
 
 
+def _draw_reach_arc(view, homo, arc):
+    """tools/so101_reach_trace.py 로 손으로 그린 띠 (pan 칸마다 최소/최대 거리)."""
+    pans = np.radians(arc["pan_deg"])
+    pts = [homo.to_pixel(r * math.cos(a), r * math.sin(a)) for a, r in zip(pans, arc["r_min"])]
+    pts += [homo.to_pixel(r * math.cos(a), r * math.sin(a))
+            for a, r in zip(pans[::-1], arc["r_max"][::-1])]
+    if len(pts) < 4 or any(p is None for p in pts):
+        return False
+    poly = np.array([[int(p[0]), int(p[1])] for p in pts], np.int32).reshape(-1, 1, 2)
+    over = view.copy()
+    cv2.fillPoly(over, [poly], (120, 200, 90))
+    cv2.addWeighted(over, 0.22, view, 0.78, 0, dst=view)
+    cv2.polylines(view, [poly], True, (120, 200, 90), 1, cv2.LINE_AA)
+    return True
+
+
 def _draw_reach_band(view, st, homo, max_yaw_deg=60.0):
     """2026-10-12: 집을 수 있는 거리 띠. 화면 몇 픽셀이 수 cm 라 감으로 컵을 두면 53cm 처럼
     범위 밖에 놓였다. 받침대 중심에서 r_min~r_max 인 책상 위 영역을 반투명하게 칠한다."""
-    if st.reach_band is None or not getattr(homo, "ready", True):
+    if not getattr(homo, "ready", True):
+        return
+    arc = st.reach_arcs.get(id(homo))
+    if arc and _draw_reach_arc(view, homo, arc):
+        return
+    if st.reach_band is None:
         return
     r0, r1 = st.reach_band
     yaws = np.radians(np.linspace(-max_yaw_deg, max_yaw_deg, 41))
@@ -204,10 +241,13 @@ def _draw_reach_band(view, st, homo, max_yaw_deg=60.0):
     cv2.polylines(view, [poly], True, (120, 200, 90), 1, cv2.LINE_AA)
 
 
-def _draw_arm_tip(view, st, hud, homo):
-    if st.tcp is None:
+def _draw_arm_tip(view, st, hud, homo, tcp=None, name=None):
+    """팔 끝 표시. tcp/name 을 주면 다른 팔 (그 팔의 호모그래피로 그린다)."""
+    if tcp is None and name is None:
+        tcp, name = st.tcp, st.tip_label
+    if tcp is None:
         return
-    px = homo.to_pixel(st.tcp[0], st.tcp[1])
+    px = homo.to_pixel(tcp[0], tcp[1])
     if not px:
         return
     u, v = int(px[0]), int(px[1])
@@ -216,7 +256,8 @@ def _draw_arm_tip(view, st, hud, homo):
     cv2.drawMarker(view, (u, v), (250, 250, 250), cv2.MARKER_TILTED_CROSS,
                    14, 2, cv2.LINE_AA)
     # 목표 칩(위쪽)과 겹치지 않게 아래에 붙인다
-    hud.chip(view, (u, v + 12), hud.label("팔 끝", "TCP"),
+    hud.chip(view, (u, v + 12), hud.label(f"팔 끝 {name}" if name else "팔 끝",
+                                          f"TCP {name}" if name else "TCP"),
              (250, 250, 250), 11, anchor="cb", alpha=0.6)
 
 
@@ -299,9 +340,9 @@ def _draw_footer(canvas, y, st, hud):
             "click=gripper tip   u=undo   c=abort   q=quit"), H.MUTED, 12)
     else:
         hud.text(canvas, (18, y + 8), hud.label(
-            "좌클릭 선택   우클릭 컵 색 지정   k 캘리브   c 취소   "
-            "space 비상정지   d 검출   q 종료",
-            "L=select  R=pick color  k=calib  c=cancel  space=E-STOP  "
+            "좌클릭 선택  c 취소  space 비상정지  p 따르기 보정  8/4/2/6(화살표) 입구 1cm  +/- 기울기 5°  r 확정  "
+            "d 검출  q 종료",
+            "L=select  c=cancel  space=E-STOP  p=pour calib  8/4/2/6 nudge  +/- tilt  r=confirm  "
             "d=detect  q=quit"), H.MUTED, 12)
 
 

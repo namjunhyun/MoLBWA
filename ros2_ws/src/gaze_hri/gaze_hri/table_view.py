@@ -248,7 +248,8 @@ class YoloDetector:
             dets = list(self._dets)
         ox, oy = self._off
         found = []
-        for _, _, x1, y1, x2, y2 in dets:
+        labels = []
+        for name, _, x1, y1, x2, y2 in dets:
             x1, x2, y1, y2 = x1 + ox, x2 + ox, y1 + oy, y2 + oy
             if (x2 - x1) * (y2 - y1) < self.min_area:
                 continue
@@ -267,8 +268,12 @@ class YoloDetector:
                 xy = self._shift_away_from_camera(homography, u, v, xy)
             box = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32).round().astype(np.int32)
             found.append(((u, v), xy, box.reshape(-1, 1, 2)))
-        found.sort(key=lambda it: it[1][1])
-        return found
+            labels.append(name)
+        # 2026-10-14: 클래스 이름(cup/bottle)은 found 와 같은 순서로 last_labels 에 둔다
+        # (found 의 3-튜플 모양은 그리는 쪽 여러 곳이 풀어 쓰므로 그대로 둔다)
+        order = sorted(range(len(found)), key=lambda i: found[i][1][1])
+        self.last_labels = [labels[i] for i in order]
+        return [found[i] for i in order]
 
 
     def _shift_away_from_camera(self, homography, u, v, xy):

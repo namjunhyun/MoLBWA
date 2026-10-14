@@ -52,3 +52,8 @@ notes/traj/
 notes/gui_*.log
 notes/move_log_*.csv
 ros2_ws/src/gaze_hri/config/*_bak_*.yaml
+
+# 2026-10-14: 두 팔 GUI/보정 실행 기록 (재생성 가능)
+notes/panel_*.log
+notes/teleop/
+notes/pour_calib/snap/

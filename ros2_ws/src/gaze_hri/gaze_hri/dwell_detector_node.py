@@ -48,6 +48,10 @@ class DwellDetector(Node):
         self.declare_parameter("min_valid_ratio", 0.7)
         self.declare_parameter("cooldown", 1.5)
         self.declare_parameter("exit_radius", 0.10)
+        # 2026-10-14: 마우스 모드 — 새 클릭(valid False->True)마다 연타 방지를 푼다. 마우스는 클릭할
+        # 때만 점을 보내서 '시선이 밖으로 나갔다' 가 안 생기고, 물체 클릭은 늘 같은 기준점이라
+        # 따르기로 놓을 곳이었던 컵을 다시 집으려 하면 영영 확정이 안 됐다.
+        self.declare_parameter("rearm_on_new_click", False)
         self.declare_parameter("max_sample_age", 0.35)   # 이보다 오래 끊기면 버퍼 리셋
         # 2026-09-28: "dwell"(1.2초 응시 유지로 자동 확정) | "key"(/gaze/confirm 을 받은 순간의
         # 시선으로 확정 — 탑다운 창 스페이스바). key 모드에선 자동 확정을 하지 않는다.
@@ -97,6 +101,11 @@ class DwellDetector(Node):
     # ------------------------------------------------------------------
     def on_valid(self, msg: Bool):
         t = self.now()
+        if (msg.data and self.get_parameter("rearm_on_new_click").value
+                and not getattr(self, "_valid_prev", False)):
+            self.left_since_fix = True
+            self.buf.clear()
+        self._valid_prev = bool(msg.data)
         self.valid_buf.append((t, msg.data))
         self._trim(self.valid_buf, t)
 
