@@ -1,0 +1,204 @@
+"""손 위치 + 손바닥 방향을 맞추는 팔 IK (MuJoCo 운동학, 감쇠 최소제곱). 라이브러리 csv(36열)를 만들거나 고친다.
+
+    # 가리키기: 기존 클립의 손 위치는 그대로, 오른손 손바닥을 위로 (팔을 뻗은 구간에만, 앞뒤는 부드럽게)
+    python3 hand_ik.py palm_up IN.csv OUT.csv --side right
+    # 박수: 아래 손(왼손) 손바닥 위로 가슴 앞에 받치고, 위 손(오른손) 손바닥 아래로 내려쳐 4번
+    python3 hand_ik.py clap_stack OUT.csv [--claps 4] [--hz 1.6]
+
+손바닥 방향 = rubber_hand 메시의 가장 얇은 축, 부호는 손가락이 굽는 쪽(=손바닥). 2026-10-14 사용자 요청:
+"가리키기 손바닥 위로, 박수는 손바닥 마주보게 위아래로(한 손 위·한 손 아래)". 데이터셋 손목 관절은 전부 0 이라 새로 만든다.
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+import mujoco as mj
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from make_idle_csv import CSV_JOINTS  # noqa: E402
+
+XML = os.environ.get("G1_MUJOCO_XML", os.path.expanduser(
+    "~/unitree_g1_vibes/RL-shenanigans/unitree_mujoco/unitree_robots/g1/scene_29dof.xml"))
+ARM = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_roll", "wrist_pitch", "wrist_yaw"]
+FPS = 30
+
+
+class Arm:
+    def __init__(self):
+        self.m = mj.MjModel.from_xml_path(XML)
+        self.d = mj.MjData(self.m)
+        self.adr = {n: self.m.jnt_qposadr[mj.mj_name2id(self.m, mj.mjtObj.mjOBJ_JOINT, n)] for n in CSV_JOINTS}
+        self.dof = {n: self.m.jnt_dofadr[mj.mj_name2id(self.m, mj.mjtObj.mjOBJ_JOINT, n)] for n in CSV_JOINTS}
+        self.lim = {n: self.m.jnt_range[mj.mj_name2id(self.m, mj.mjtObj.mjOBJ_JOINT, n)] for n in CSV_JOINTS}
+        self.hand = {}
+        for s in ("left", "right"):
+            g = next(g for g in range(self.m.ngeom) if self.m.geom_type[g] == mj.mjtGeom.mjGEOM_MESH
+                     and mj.mj_id2name(self.m, mj.mjtObj.mjOBJ_MESH, self.m.geom_dataid[g]) == f"{s}_rubber_hand")
+            mid = self.m.geom_dataid[g]
+            v = self.m.mesh_vert[self.m.mesh_vertadr[mid]:self.m.mesh_vertadr[mid] + self.m.mesh_vertnum[mid]].astype(float)
+            c = v - v.mean(0)
+            _, U = np.linalg.eigh(c.T @ c)
+            n, f = U[:, 0], U[:, 2]
+            tip = c[(c @ f) > np.percentile(c @ f, 85)]
+            if abs(np.percentile(c @ f, 85)) < abs(np.percentile(c @ f, 15)):
+                tip = c[(c @ f) < np.percentile(c @ f, 15)]
+            if (tip @ n).mean() < 0:      # 손끝이 굽는 쪽 = 손바닥
+                n = -n
+            th = (c @ n).max() - (c @ n).min()
+            self.hand[s] = (g, n, v.mean(0), th)
+
+    def set(self, row):
+        d = self.d
+        d.qpos[:] = 0
+        d.qpos[:3] = row[:3]
+        d.qpos[3:7] = row[[6, 3, 4, 5]]
+        for j, n in enumerate(CSV_JOINTS):
+            d.qpos[self.adr[n]] = row[7 + j]
+        mj.mj_forward(self.m, d)
+
+    def palm(self, s):
+        """(손 중심 world, 손바닥 법선 world)"""
+        g, n, ctr, _ = self.hand[s]
+        R = self.d.geom_xmat[g].reshape(3, 3)
+        return self.d.geom_xpos[g] + R @ ctr, R @ n
+
+    def solve(self, row, side, p_tgt=None, n_tgt=None, w_ori=1.0, iters=60, q_ref=None, lam=0.15):
+        """row 의 side 팔 7관절만 바꿔 손 중심 → p_tgt, 손바닥 법선 → n_tgt. 관절 한계 안. 다른 관절 불변.
+        q_ref(36열 행)가 있으면 팔 관절을 그 자세 쪽으로 lam 만큼 당긴다 — 7관절이라 해가 여러 개라
+        프레임마다 다른 해로 튀던 것(관절속도 40 rad/s)을 막는다."""
+        row = row.copy()
+        names = [f"{side}_{a}_joint" for a in ARM]
+        g = self.hand[side][0]
+        b = self.m.geom_bodyid[g]
+        for _ in range(iters):
+            self.set(row)
+            pc, nc = self.palm(side)
+            e, J = [], []
+            jp = np.zeros((3, self.m.nv)); jr = np.zeros((3, self.m.nv))
+            mj.mj_jac(self.m, self.d, jp, jr, pc, b)
+            cols = [self.dof[n] for n in names]
+            if p_tgt is not None:
+                e.append(p_tgt - pc); J.append(jp[:, cols])
+            if n_tgt is not None:
+                # 법선 회전 오차: nc → n_tgt 로 돌리는 축각, ṅ = ω × n
+                e.append(w_ori * np.cross(nc, n_tgt)); J.append(w_ori * jr[:, cols])
+            if q_ref is not None:
+                ci = [7 + CSV_JOINTS.index(n) for n in names]
+                e.append(lam * (q_ref[ci] - row[ci])); J.append(lam * np.eye(len(names)))
+            e = np.concatenate(e); J = np.vstack(J)
+            if np.linalg.norm(e[:6]) < 1e-4:
+                break
+            dq = J.T @ np.linalg.solve(J @ J.T + 1e-3 * np.eye(len(e)), e)
+            for k, n in enumerate(names):
+                lo, hi = self.lim[n]
+                row[7 + CSV_JOINTS.index(n)] = np.clip(row[7 + CSV_JOINTS.index(n)] + 0.5 * dq[k], lo + 0.02, hi - 0.02)
+        return row
+
+
+def smooth_step(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
+
+
+def palm_up(rows, side, arm: Arm, ramp_s=0.6):
+    """팔을 뻗은 구간(어깨 pitch 가 최대 변위의 60% 이상)에서 손바닥을 위로. 손 위치는 원본 유지. 앞뒤 ramp 로 섞는다."""
+    jp = 7 + CSV_JOINTS.index(f"{side}_shoulder_pitch_joint")
+    dev = np.abs(rows[:, jp] - rows[0, jp])
+    on = dev >= 0.6 * dev.max()
+    idx = np.where(on)[0]
+    a, b = idx[0], idx[-1]
+    r = int(ramp_s * FPS)
+    w = np.array([smooth_step((k - (a - r)) / r) * smooth_step(((b + r) - k) / r) for k in range(len(rows))])
+    out = rows.copy()
+    prev = None
+    for k in range(len(rows)):
+        if w[k] <= 0:
+            continue
+        arm.set(rows[k])
+        p, n = arm.palm(side)
+        tgt = n + w[k] * (np.array([0, 0, 1.0]) - n)        # 원래 법선 → 위 로 비율만큼
+        tgt /= np.linalg.norm(tgt)
+        seed = rows[k].copy()
+        if prev is not None:                                   # 이전 프레임 해로 시작(연속성)
+            for a_ in ARM:
+                c = 7 + CSV_JOINTS.index(f"{side}_{a_}_joint")
+                seed[c] = prev[c] + (rows[k][c] - rows[k - 1][c])
+        out[k] = arm.solve(seed, side, p_tgt=p, n_tgt=tgt, w_ori=0.5, q_ref=rows[k])
+        prev = out[k]
+    return out, w
+
+
+def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12):
+    """아래 손(왼손) 손바닥 위로 가슴 앞, 위 손(오른손) 손바닥 아래로 lift 만큼 들었다 내려치기."""
+    arm.set(standby_row)
+    torso = arm.d.xpos[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "torso_link")].copy()
+    yaw_R = arm.d.xmat[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "pelvis")].reshape(3, 3)
+    fwd, left = yaw_R[:, 0], yaw_R[:, 1]
+    base = torso + 0.30 * fwd + 0.0 * left + np.array([0, 0, 0.12])   # 가슴 앞
+    gap = 0.5 * (arm.hand["left"][3] + arm.hand["right"][3]) + 0.01   # 손 두께 + 1 cm (부딪힘 직전)
+    up, down = np.array([0, 0, 1.0]), np.array([0, 0, -1.0])
+    t_in, t_out = 1.0, 1.0
+    t_clap = claps / hz
+    T = t_in + t_clap + t_out
+    N = int(T * FPS)
+    rows = np.repeat(standby_row[None], N, 0)
+    arm.set(standby_row)
+    pL0, nL0 = arm.palm("left"); pR0, nR0 = arm.palm("right")
+    cur = standby_row.copy()
+    for k in range(N):
+        t = k / FPS
+        a_in = smooth_step(t / t_in); a_out = smooth_step((T - t) / t_out)
+        a = min(a_in, a_out)
+        if t_in <= t <= t_in + t_clap:
+            ph = (t - t_in) * hz
+            h = gap + lift * 0.5 * (1 + np.cos(2 * np.pi * ph))     # 위에서 시작 → 바닥에서 짝
+        else:
+            h = gap + lift
+        pL = pL0 + a * (base - pL0)
+        pR = pR0 + a * (base + np.array([0, 0, h]) - pR0)
+        nL = nL0 + a * (up - nL0); nL /= np.linalg.norm(nL)
+        nR = nR0 + a * (down - nR0); nR /= np.linalg.norm(nR)
+        ref = standby_row if a < 1e-3 else cur      # 밖으로 나갈 땐 대기자세 쪽으로, 박수 중엔 직전 프레임 쪽으로
+        cur = arm.solve(cur, "left", pL, nL, w_ori=0.5, q_ref=ref)
+        cur = arm.solve(cur, "right", pR, nR, w_ori=0.5, q_ref=ref)
+        rows[k] = cur
+    return rows
+
+
+def report(rows, arm: Arm, sides):
+    out = []
+    for s in sides:
+        nz = []
+        for r in rows:
+            arm.set(r); nz.append(arm.palm(s)[1][2])
+        out.append(f"{s} 손바닥 법선 z 최대 {max(nz):+.2f} 최소 {min(nz):+.2f}")
+    v = np.abs(np.diff(rows[:, 7:], axis=0)).max() * FPS
+    return " | ".join(out) + f" | 관절속도 최대 {v:.1f} rad/s"
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["palm_up", "clap_stack"])
+    ap.add_argument("paths", nargs="+")
+    ap.add_argument("--side", default="right")
+    ap.add_argument("--claps", type=int, default=4)
+    ap.add_argument("--hz", type=float, default=1.6)
+    ap.add_argument("--lift", type=float, default=0.12)
+    a = ap.parse_args()
+    arm = Arm()
+    if a.mode == "palm_up":
+        rows = np.loadtxt(a.paths[0], delimiter=",")
+        out, _ = palm_up(rows, a.side, arm)
+        np.savetxt(a.paths[1], out, delimiter=",", fmt="%.9f")
+        print(a.paths[1], report(out, arm, [a.side]))
+    else:
+        idle = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")
+        import json
+        meta = json.load(open(idle))
+        sb = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
+        row = np.zeros(36); row[2] = 0.76; row[6] = 1.0
+        row[7:] = [sb[n] for n in CSV_JOINTS]
+        out = clap_stack(row, arm, a.claps, a.hz, a.lift)
+        np.savetxt(a.paths[0], out, delimiter=",", fmt="%.9f")
+        print(a.paths[0], f"{len(out)} 프레임 {len(out)/FPS:.2f}s", report(out, arm, ["left", "right"]))
