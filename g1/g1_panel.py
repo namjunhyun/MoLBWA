@@ -92,7 +92,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <button class="shake" onclick="act('g1_hand')">🤝 악수</button></div>
 <h3 style="margin:18px 0 4px">같이 보기 <small style="color:#888">(물체 쪽으로 돌아 가리킨 뒤 착용자 쪽으로 돌아와 축하)</small></h3>
 <div>물체 방위 <b id="odeg">60</b>° <input id="o" type="range" min="-180" max="180" step="15" value="60"></div>
-<div style="color:#888;font-size:13px">착용자 방위 = 위 원의 주황 점(슬라이더)</div>
+<div style="color:#888;font-size:13px">착용자 방위 = 위 원의 주황 점(슬라이더). ⚠ 가리키기·축하 동작은 학습 전 — 그 전엔 로봇이 이 명령을 거부하고 서 있기만 한다</div>
 <div class="row"><button class="wave" style="background:#d97706" onclick="attend('celebrate')">🎉 같이 보고 축하</button>
 <button class="wave" style="background:#0891b2" onclick="attend('wave')">👀 같이 보고 손 흔들기</button></div>
 <div id="st">상태: ?</div><p id="msg" style="color:#888"></p><div id="log"></div>
