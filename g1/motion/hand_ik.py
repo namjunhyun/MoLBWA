@@ -101,7 +101,7 @@ def smooth_step(x):
     return x * x * (3 - 2 * x)
 
 
-def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0):
+def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0, inside=False, up_frac=1.0):
     """팔을 뻗은 구간(어깨 pitch 가 최대 변위의 60% 이상)에서 손바닥을 위로. 손 위치는 원본 유지. 앞뒤 ramp 로 섞는다."""
     jp = 7 + CSV_JOINTS.index(f"{side}_shoulder_pitch_joint")
     dev = np.abs(rows[:, jp] - rows[0, jp])
@@ -109,7 +109,11 @@ def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0):
     idx = np.where(on)[0]
     a, b = idx[0], idx[-1]
     r = int(ramp_s * FPS)
-    w = np.array([smooth_step((k - (a - r)) / r) * smooth_step(((b + r) - k) / r) for k in range(len(rows))])
+    if inside:   # 팔을 다 든 뒤에 돌리기 시작해 내리기 전에 되돌림 (2026-10-15: 팔이 내려간 채 어깨가 0→46° 확 돌던 것)
+        w = np.array([smooth_step((k - a) / r) * smooth_step((b - k) / r) for k in range(len(rows))])
+    else:
+        w = np.array([smooth_step((k - (a - r)) / r) * smooth_step(((b + r) - k) / r) for k in range(len(rows))])
+    w = w * up_frac
     out = rows.copy()
     prev = None
     for k in range(len(rows)):
@@ -194,12 +198,15 @@ if __name__ == "__main__":
     ap.add_argument("--left", type=float, default=0.0, help="박수 위치: 왼쪽(+) 치우침(m) — 왼팔이 덜 가로지르게")
     ap.add_argument("--gap", type=float, default=0.01, help="손 두께 외 두 손 사이 여유(m)")
     ap.add_argument("--up", type=float, default=0.12, help="받침 손 높이: 몸통 원점 위(m)")
+    ap.add_argument("--ramp", type=float, default=0.6, help="palm_up: 손바닥 돌리는 시간(s)")
+    ap.add_argument("--inside", action="store_true", help="palm_up: 팔을 다 든 뒤에 돌리기 시작")
+    ap.add_argument("--up_frac", type=float, default=1.0, help="palm_up: 손바닥을 위로 돌리는 비율(1 = 완전히 위)")
     ap.add_argument("--yaw_dir", type=int, default=0, help="palm_up: 어깨 yaw 를 원본에서 +1(증가만)/−1(감소만) 으로 제한")
     a = ap.parse_args()
     arm = Arm()
     if a.mode == "palm_up":
         rows = np.loadtxt(a.paths[0], delimiter=",")
-        out, _ = palm_up(rows, a.side, arm, yaw_dir=a.yaw_dir)
+        out, _ = palm_up(rows, a.side, arm, ramp_s=a.ramp, yaw_dir=a.yaw_dir, inside=a.inside, up_frac=a.up_frac)
         np.savetxt(a.paths[1], out, delimiter=",", fmt="%.9f")
         print(a.paths[1], report(out, arm, [a.side]))
     else:
