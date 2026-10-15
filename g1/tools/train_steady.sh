@@ -1,5 +1,6 @@
 #!/bin/bash
 # 흔들림 페널티 이어 학습 (train_library.sh + 골반 롤·피치 각속도² 페널티, 가중치 STEADY_W 기본 0.05). train_steady.py 참고
+#   (ARM_W=1.0 이면 팔 관절각 추종 보상 추가, ARM_STD 기본 0.3)
 #   사용: MOTION=molbwa_library5.npz LOAD_RUN=2026-10-09_22-45-27 LOAD_CKPT=model_15998.pt ITERS=2000 PUSH=1.2 bash g1/tools/train_steady.sh
 #   다른 GPU 작업이 없을 때만 (RUNBOOK 0). env 2048 = RAM 16GB 에서 안전한 값.
 set -e

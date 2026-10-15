@@ -63,7 +63,7 @@ class Arm:
         R = self.d.geom_xmat[g].reshape(3, 3)
         return self.d.geom_xpos[g] + R @ ctr, R @ n
 
-    def solve(self, row, side, p_tgt=None, n_tgt=None, w_ori=1.0, iters=60, q_ref=None, lam=0.15):
+    def solve(self, row, side, p_tgt=None, n_tgt=None, w_ori=1.0, iters=60, q_ref=None, lam=0.15, bounds=None):
         """row 의 side 팔 7관절만 바꿔 손 중심 → p_tgt, 손바닥 법선 → n_tgt. 관절 한계 안. 다른 관절 불변.
         q_ref(36열 행)가 있으면 팔 관절을 그 자세 쪽으로 lam 만큼 당긴다 — 7관절이라 해가 여러 개라
         프레임마다 다른 해로 튀던 것(관절속도 40 rad/s)을 막는다."""
@@ -91,7 +91,7 @@ class Arm:
                 break
             dq = J.T @ np.linalg.solve(J @ J.T + 1e-3 * np.eye(len(e)), e)
             for k, n in enumerate(names):
-                lo, hi = self.lim[n]
+                lo, hi = (bounds or {}).get(n, self.lim[n])
                 row[7 + CSV_JOINTS.index(n)] = np.clip(row[7 + CSV_JOINTS.index(n)] + 0.5 * dq[k], lo + 0.02, hi - 0.02)
         return row
 
@@ -101,7 +101,7 @@ def smooth_step(x):
     return x * x * (3 - 2 * x)
 
 
-def palm_up(rows, side, arm: Arm, ramp_s=0.6):
+def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0):
     """팔을 뻗은 구간(어깨 pitch 가 최대 변위의 60% 이상)에서 손바닥을 위로. 손 위치는 원본 유지. 앞뒤 ramp 로 섞는다."""
     jp = 7 + CSV_JOINTS.index(f"{side}_shoulder_pitch_joint")
     dev = np.abs(rows[:, jp] - rows[0, jp])
@@ -124,19 +124,24 @@ def palm_up(rows, side, arm: Arm, ramp_s=0.6):
             for a_ in ARM:
                 c = 7 + CSV_JOINTS.index(f"{side}_{a_}_joint")
                 seed[c] = prev[c] + (rows[k][c] - rows[k - 1][c])
-        out[k] = arm.solve(seed, side, p_tgt=p, n_tgt=tgt, w_ori=0.5, q_ref=rows[k])
+        bounds = None
+        if yaw_dir:   # 어깨 yaw 를 원본에서 한쪽으로만 — 반대쪽은 위팔이 몸통을 파고든다(2026-10-15, −4 cm)
+            yn = f"{side}_shoulder_yaw_joint"; y0 = rows[k][7 + CSV_JOINTS.index(yn)]; lo, hi = arm.lim[yn]
+            bounds = {yn: (y0 - 0.02, hi) if yaw_dir > 0 else (lo, y0 + 0.02)}
+        out[k] = arm.solve(seed, side, p_tgt=p, n_tgt=tgt, w_ori=0.5, q_ref=rows[k], bounds=bounds)
         prev = out[k]
     return out, w
 
 
-def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12):
+def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12, fwd=0.30, left=0.0, gap_extra=0.01, up=0.12):
     """아래 손(왼손) 손바닥 위로 가슴 앞, 위 손(오른손) 손바닥 아래로 lift 만큼 들었다 내려치기."""
     arm.set(standby_row)
     torso = arm.d.xpos[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "torso_link")].copy()
     yaw_R = arm.d.xmat[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "pelvis")].reshape(3, 3)
-    fwd, left = yaw_R[:, 0], yaw_R[:, 1]
-    base = torso + 0.30 * fwd + 0.0 * left + np.array([0, 0, 0.12])   # 가슴 앞
-    gap = 0.5 * (arm.hand["left"][3] + arm.hand["right"][3]) + 0.01   # 손 두께 + 1 cm (부딪힘 직전)
+    fwdv, leftv = yaw_R[:, 0], yaw_R[:, 1]
+    fwd_m, left_m = fwd, left
+    base = torso + fwd_m * fwdv + left_m * leftv + np.array([0, 0, up])   # 몸통 원점 기준 앞·왼·위
+    gap = 0.5 * (arm.hand["left"][3] + arm.hand["right"][3]) + gap_extra   # 손 두께 + 여유 (학습 시뮬은 자기 충돌 켜짐 → 닿으면 못 따라간다)
     up, down = np.array([0, 0, 1.0]), np.array([0, 0, -1.0])
     t_in, t_out = 1.0, 1.0
     t_clap = claps / hz
@@ -185,11 +190,16 @@ if __name__ == "__main__":
     ap.add_argument("--claps", type=int, default=4)
     ap.add_argument("--hz", type=float, default=1.6)
     ap.add_argument("--lift", type=float, default=0.12)
+    ap.add_argument("--fwd", type=float, default=0.30, help="박수 위치: 몸통 앞 거리(m)")
+    ap.add_argument("--left", type=float, default=0.0, help="박수 위치: 왼쪽(+) 치우침(m) — 왼팔이 덜 가로지르게")
+    ap.add_argument("--gap", type=float, default=0.01, help="손 두께 외 두 손 사이 여유(m)")
+    ap.add_argument("--up", type=float, default=0.12, help="받침 손 높이: 몸통 원점 위(m)")
+    ap.add_argument("--yaw_dir", type=int, default=0, help="palm_up: 어깨 yaw 를 원본에서 +1(증가만)/−1(감소만) 으로 제한")
     a = ap.parse_args()
     arm = Arm()
     if a.mode == "palm_up":
         rows = np.loadtxt(a.paths[0], delimiter=",")
-        out, _ = palm_up(rows, a.side, arm)
+        out, _ = palm_up(rows, a.side, arm, yaw_dir=a.yaw_dir)
         np.savetxt(a.paths[1], out, delimiter=",", fmt="%.9f")
         print(a.paths[1], report(out, arm, [a.side]))
     else:
@@ -199,6 +209,25 @@ if __name__ == "__main__":
         sb = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
         row = np.zeros(36); row[2] = 0.76; row[6] = 1.0
         row[7:] = [sb[n] for n in CSV_JOINTS]
-        out = clap_stack(row, arm, a.claps, a.hz, a.lift)
+        out = clap_stack(row, arm, a.claps, a.hz, a.lift, a.fwd, a.left, a.gap, a.up)
         np.savetxt(a.paths[0], out, delimiter=",", fmt="%.9f")
         print(a.paths[0], f"{len(out)} 프레임 {len(out)/FPS:.2f}s", report(out, arm, ["left", "right"]))
+
+
+def min_clearance(rows, arm: Arm):
+    """충돌 geom(contype≠0) 기준 최소 거리: 왼팔↔오른팔, 왼팔↔몸통, 오른팔↔몸통 (m, 음수 = 관통)."""
+    m, d = arm.m, arm.d
+    def geoms(pred):
+        return [g for g in range(m.ngeom) if m.geom_contype[g] and pred(mj.mj_id2name(m, mj.mjtObj.mjOBJ_BODY, m.geom_bodyid[g]) or "")]
+    armL = geoms(lambda b: b.startswith("left_") and any(k in b for k in ("elbow", "wrist", "hand", "shoulder_yaw")))
+    armR = geoms(lambda b: b.startswith("right_") and any(k in b for k in ("elbow", "wrist", "hand", "shoulder_yaw")))
+    torso = geoms(lambda b: b in ("torso_link", "pelvis"))
+    best = {"L-R": 9.0, "L-torso": 9.0, "R-torso": 9.0}
+    ft = np.zeros(6)
+    for r in rows:
+        arm.set(r)
+        for key, A, B in (("L-R", armL, armR), ("L-torso", armL, torso), ("R-torso", armR, torso)):
+            for ga in A:
+                for gb in B:
+                    best[key] = min(best[key], mj.mj_geomDistance(m, d, ga, gb, 0.3, ft))
+    return best
