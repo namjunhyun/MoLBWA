@@ -6,6 +6,7 @@ bridge : {"t", "label": g1_face|g1_hand|g1_torso|None, "bearing_deg": float|None
 cmd    : {"seq", "cmd": "act"|"ping", "part", "bearing_deg": int|None}
          {"seq", "cmd": "attend", "obj_bearing_deg": int, "user_bearing_deg": int, "gesture": "celebrate"|...}
            = 같이 보기: 물체 쪽으로 돌아 가리키고 → 착용자 쪽으로 돌아와 동작 (plan_attend)
+         {"cmd": "say", "path": "<젯슨 안 WAV 경로>"} = 지원이 스피커 재생(seq 불필요, 동작과 동시에 가능). g1/g1_say.py
 state  : {"state": "idle"|"turning"|"acting", "seq"}
 
 bearing_deg 는 G1 torso 기준 사용자 방위(+ = 왼쪽, 도). 회전 클립 turn_l*/turn_r* 도 l = 왼쪽(+).

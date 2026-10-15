@@ -749,6 +749,16 @@ if bridge.ok:
         sys.exit("[거부] 고수준 컨트롤러가 살아 있다(또는 확인 불가). 'R&D 진입' 후 다시 발행하라 — "
                  "그대로 쏘면 두 컨트롤러가 싸워 정책이 발산한다.")
 
+# 스피커: 이미 연 DDS 를 같이 쓴다(새 프로세스가 DDS 를 열면 제어주기가 깨진다). 실패해도 정책은 계속.
+speaker = None
+if bridge.ok and not args.damp_only and not args.probe:
+    try:
+        from g1_audio import Speaker
+        speaker = Speaker()
+        print("스피커 준비 — UDP {cmd: say, path} 로 WAV 재생")
+    except Exception as e:
+        print(f"[경고] 스피커 준비 실패({type(e).__name__}: {e}) — 말하기 명령은 무시한다")
+
 if args.damp_only:
     # 위 관문(--arm 이면 고수준이 살아 있을 때 거부)을 지난 뒤에만 온다
     if not bridge.ok:
@@ -908,6 +918,12 @@ for t in itertools.count():
                          else (None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181)))})
         fake_next = t + int(6.0 / CTRL_DT)
     for m in msgs:
+        if isinstance(m, dict) and m.get("cmd") == "say" and isinstance(m.get("path"), str):
+            if speaker is not None:
+                speaker.say(m["path"])
+            else:
+                print(f"  [say] (스피커 없음 — 시뮬/dry-run) {m['path']}")
+            continue
         if player.command(m):
             segs = plan_msg(m)
             if m["cmd"] == "attend":
