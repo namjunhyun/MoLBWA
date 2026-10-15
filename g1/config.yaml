@@ -20,3 +20,7 @@ yolo:
   model: "~/yolo-env/g1_parts.pt"
   conf: 0.25
   classes: [g1_face, g1_hand, g1_torso]
+
+# 같이 보기: 착용자가 보는 물체까지 가정 거리 (스테레오 깊이 연결 전). 지원이 기준 물체 방위 계산에 쓴다
+attend:
+  object_dist_m: 1.5

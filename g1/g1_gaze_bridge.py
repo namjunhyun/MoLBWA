@@ -6,6 +6,7 @@
 
 label       : 시선 픽셀을 포함하는 YOLO 박스 (hand > face > torso, 손 박스가 몸통 박스 안이라)
 bearing_deg : G1 torso 기준 헤드캠(=사용자 머리) 방위, + 왼쪽. 태그 번들이 안 보이면 null
+obj_bearing_deg : 착용자가 보는 점의 G1 torso 기준 방위(같이 보기용). 거리는 config attend.object_dist_m(기본 1.5 m) 가정
 valid       : 이번 프레임에 시선 픽셀이 있었는가
 
 arm/gaze_tag_bridge.py 와 같은 구조: 순수 함수 + 얇은 루프. 무거운 의존(cv2, apriltag, rclpy)은 main 안에서.
@@ -48,6 +49,17 @@ def bearing_deg(T_hc_torso: np.ndarray) -> float:
     """T_hc_torso(p_hc = T @ p_torso) -> torso 기준 헤드캠 원점 방위 [deg], (-180, 180]. +x 정면, +y 왼쪽."""
     p = np.linalg.inv(T_hc_torso)[:3, 3]
     deg = math.degrees(math.atan2(p[1], p[0]))
+    return 180.0 if deg == -180.0 else deg
+
+
+def object_bearing_deg(T_hc_torso: np.ndarray, uv: tuple[float, float], K: np.ndarray, dist_m: float) -> float:
+    """착용자가 보는 점의 G1 torso 기준 방위 [deg] (+ 왼쪽) — '같이 보기'에서 지원이가 돌아볼 방향.
+    헤드캠 광선(K⁻¹[u,v,1])을 dist_m 만큼 따라간 점을 torso 좌표로 옮긴다. 거리는 스테레오 깊이가 있으면 그 값,
+    없으면 설정값(대충 1~2 m) — 지원이와 착용자가 다른 자리라 거리를 모르면 가까운 물체일수록 방향이 틀어진다."""
+    ray = np.linalg.solve(K, np.array([uv[0], uv[1], 1.0]))
+    p_cam = ray / np.linalg.norm(ray) * dist_m
+    p_t = np.linalg.inv(T_hc_torso) @ np.append(p_cam, 1.0)
+    deg = math.degrees(math.atan2(p_t[1], p_t[0]))
     return 180.0 if deg == -180.0 else deg
 
 
@@ -105,7 +117,9 @@ def main():
     from run_demo import GazeSource, load_intrinsics
 
     cfg = yaml.safe_load(open(args.config))
-    tags = TagBundleDetector(cfg, load_intrinsics())
+    K = load_intrinsics()
+    tags = TagBundleDetector(cfg, K)
+    obj_dist = float(cfg.get("attend", {}).get("object_dist_m", 1.5))   # 스테레오 깊이 연결 전 가정 거리
     yolo = _Yolo(cfg["yolo"])
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
                      gaze_px_port=args.gaze_px_port)
@@ -124,9 +138,10 @@ def main():
             T = tags.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
             label = pick_part(yolo(frame), uv)
             bearing = None if T is None else bearing_deg(T)
+            obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
             sock.sendto(encode({"t": time.time(), "label": label, "bearing_deg": bearing,
-                                "valid": uv is not None}), dst)
+                                "obj_bearing_deg": obj_b, "valid": uv is not None}), dst)
             n += 1
             n_label += label is not None
             n_bear += bearing is not None

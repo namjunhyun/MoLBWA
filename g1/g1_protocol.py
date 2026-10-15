@@ -2,7 +2,7 @@
 
     g1_gaze_bridge ─55057─> g1_interaction ─55070─> g1_motion_server ─55071─> g1_interaction
 
-bridge : {"t", "label": g1_face|g1_hand|g1_torso|None, "bearing_deg": float|None, "valid"}
+bridge : {"t", "label": g1_face|g1_hand|g1_torso|None, "bearing_deg": float|None, "obj_bearing_deg": float|None, "valid"}
 cmd    : {"seq", "cmd": "act"|"ping", "part", "bearing_deg": int|None}
          {"seq", "cmd": "attend", "obj_bearing_deg": int, "user_bearing_deg": int, "gesture": "celebrate"|...}
            = 같이 보기: 물체 쪽으로 돌아 가리키고 → 착용자 쪽으로 돌아와 동작 (plan_attend)

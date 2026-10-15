@@ -116,3 +116,26 @@ def test_single_tag_pnp_gives_bearing(tag_id, bear):
     got = bearing_deg(T_est)
     assert abs((got - bear + 180) % 360 - 180) < 2.0
     assert plan("g1_face", got) == plan("g1_face", bear)
+
+
+def _cam_at(x, y, yaw_deg):
+    """torso 평면 (x, y) 에 서서 yaw 방향을 보는 헤드캠(OpenCV: z 앞, x 오른쪽, y 아래)의 T_hc_torso."""
+    import numpy as np
+    c, s = np.cos(np.radians(yaw_deg)), np.sin(np.radians(yaw_deg))
+    z = np.array([c, s, 0.0]); xr = np.array([s, -c, 0.0]); yd = np.array([0, 0, -1.0])
+    T_tc = np.eye(4); T_tc[:3, :3] = np.stack([xr, yd, z], 1); T_tc[:3, 3] = [x, y, 1.0]
+    return np.linalg.inv(T_tc)
+
+
+def test_object_bearing_center_and_offsets():
+    import numpy as np
+    from g1_gaze_bridge import object_bearing_deg
+    K = np.array([[500.0, 0, 320], [0, 500.0, 240], [0, 0, 1]])
+    # 착용자가 지원이 정면 2 m 에서 지원이 쪽(−x)을 보며 화면 중앙을 응시, 1 m 앞 점 → 지원이 정면 1 m → 0°
+    T = _cam_at(2.0, 0.0, 180.0)
+    assert abs(object_bearing_deg(T, (320, 240), K, 1.0)) < 1e-6
+    # 화면 오른쪽(착용자 기준 오른쪽 = 지원이 기준 왼쪽 +y) → 양수
+    assert object_bearing_deg(T, (500, 240), K, 1.0) > 10
+    # 착용자가 지원이 왼쪽(+y 2 m)에 서서 정면(+x)을 보고 3 m 앞 점 → torso 기준 (3, 2) → atan2(2,3)
+    T2 = _cam_at(0.0, 2.0, 0.0)
+    assert abs(object_bearing_deg(T2, (320, 240), K, 3.0) - np.degrees(np.arctan2(2, 3))) < 1e-6
