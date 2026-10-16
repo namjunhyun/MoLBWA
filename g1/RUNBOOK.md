@@ -5,7 +5,7 @@
 **명령은 그대로 복사해 쓴다.** 인자를 손으로 바꾸고 싶어지면 먼저 그 이유가 플레이북에 기각돼 있지 않은지 본다.
 
 > **2026-10-15 현재: 실기는 웹 패널(8-5)로 한다** — 2026-10-12 하네스 없이 서기·밀기 통과(정책 18400).
-> 같이 보기(가리키기·박수) 정책은 21300 + 라이브러리 v10 (시뮬 관문 통과, 실기 업로드 대기).
+> 같이 보기(가리키기·박수) 정책은 v16 22900 + 라이브러리 v12 (2026-10-16 시뮬 관문 통과·목표 동작 재작성, 실기 업로드 대기).
 > 젯슨은 와이파이 DHCP(그날 192.168.50.107)·내부망 eth1 192.168.123.174, 계정 unitree. 8장은 SSH·`uname -m`=`aarch64` 부터.
 
 ---
@@ -474,7 +474,7 @@ ros2 bag record /g1/event /g1/state /g1/dwell_progress -o "$ART/bag_$(date +%m%d
 
 ```bash
 # 젯슨에 파일 올리기 (정책·라이브러리·코드, md5 대조) — 정책 바꿀 땐 이 스크립트의 cp 3줄만 고친다
-bash .artifact/upload_jetson.sh                        # 현재: policy_v14_21300.npz + molbwa_library10.npz
+bash .artifact/upload_jetson.sh                        # 현재: policy_v16_22900.npz + molbwa_library12.npz
 # 데스크탑에서 패널
 python3 g1/g1_panel.py --jetson <젯슨 IP> --ssh unitree@<젯슨 IP>     # → http://<데스크탑>:8080 (폰 가능)
 ```
