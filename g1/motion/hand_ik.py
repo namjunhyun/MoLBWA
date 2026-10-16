@@ -101,7 +101,7 @@ def smooth_step(x):
     return x * x * (3 - 2 * x)
 
 
-def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0, inside=False, up_frac=1.0):
+def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0, inside=False, up_frac=1.0, wrist_lock=None):
     """팔을 뻗은 구간(어깨 pitch 가 최대 변위의 60% 이상)에서 손바닥을 위로. 손 위치는 원본 유지. 앞뒤 ramp 로 섞는다."""
     jp = 7 + CSV_JOINTS.index(f"{side}_shoulder_pitch_joint")
     dev = np.abs(rows[:, jp] - rows[0, jp])
@@ -132,12 +132,20 @@ def palm_up(rows, side, arm: Arm, ramp_s=0.6, yaw_dir=0, inside=False, up_frac=1
         if yaw_dir:   # 어깨 yaw 를 원본에서 한쪽으로만 — 반대쪽은 위팔이 몸통을 파고든다(2026-10-15, −4 cm)
             yn = f"{side}_shoulder_yaw_joint"; y0 = rows[k][7 + CSV_JOINTS.index(yn)]; lo, hi = arm.lim[yn]
             bounds = {yn: (y0 - 0.02, hi) if yaw_dir > 0 else (lo, y0 + 0.02)}
+        if wrist_lock is not None:   # 손목을 곧게 — 2026-10-16: 손목을 꺾어 손바닥을 돌려 '좀비 팔'처럼 보였다
+            bounds = dict(bounds or {}, **wrist_bounds(side, wrist_lock))
         out[k] = arm.solve(seed, side, p_tgt=p, n_tgt=tgt, w_ori=0.5, q_ref=rows[k], bounds=bounds)
         prev = out[k]
     return out, w
 
 
-def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12, fwd=0.30, left=0.0, gap_extra=0.01, up=0.12):
+def wrist_bounds(side, lock):
+    """손목 pitch·yaw 를 ±lock(rad) 로 — 손바닥 방향은 팔뚝 회전(wrist_roll)·어깨로 만들게 한다."""
+    return {f"{side}_wrist_pitch_joint": (-lock, lock), f"{side}_wrist_yaw_joint": (-lock, lock)}
+
+
+def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12, fwd=0.30, left=0.0, gap_extra=0.01, up=0.12,
+               elbow_out=0.0, wrist_lock=None):
     """아래 손(왼손) 손바닥 위로 가슴 앞, 위 손(오른손) 손바닥 아래로 lift 만큼 들었다 내려치기."""
     arm.set(standby_row)
     torso = arm.d.xpos[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "torso_link")].copy()
@@ -168,9 +176,46 @@ def clap_stack(standby_row, arm: Arm, claps=4, hz=1.6, lift=0.12, fwd=0.30, left
         pR = pR0 + a * (base + np.array([0, 0, h]) - pR0)
         nL = nL0 + a * (up - nL0); nL /= np.linalg.norm(nL)
         nR = nR0 + a * (down - nR0); nR /= np.linalg.norm(nR)
-        ref = standby_row if a < 1e-3 else cur      # 밖으로 나갈 땐 대기자세 쪽으로, 박수 중엔 직전 프레임 쪽으로
-        cur = arm.solve(cur, "left", pL, nL, w_ori=0.5, q_ref=ref)
-        cur = arm.solve(cur, "right", pR, nR, w_ori=0.5, q_ref=ref)
+        if elbow_out:   # 팔꿈치를 굽혀 바깥으로 벌린 자세 쪽으로 당긴다 — 손을 몸 가까이 둬도 팔이 몸통에 안 닿게(2026-10-16)
+            ref = standby_row.copy()
+            ref[7 + CSV_JOINTS.index("left_shoulder_roll_joint")] += a * elbow_out
+            ref[7 + CSV_JOINTS.index("right_shoulder_roll_joint")] -= a * elbow_out
+        else:
+            ref = standby_row if a < 1e-3 else cur      # 밖으로 나갈 땐 대기자세 쪽으로, 박수 중엔 직전 프레임 쪽으로
+        bl = None if wrist_lock is None else wrist_bounds("left", wrist_lock)
+        br = None if wrist_lock is None else wrist_bounds("right", wrist_lock)
+        cur = arm.solve(cur, "left", pL, nL, w_ori=0.5, q_ref=ref, bounds=bl)
+        cur = arm.solve(cur, "right", pR, nR, w_ori=0.5, q_ref=ref, bounds=br)
+        rows[k] = cur
+    return rows
+
+
+def point_forward(standby_row, arm: Arm, side="right", reach=0.55, down_deg=35.0, out=0.08, t_up=1.2, t_hold=2.5,
+                  t_down=1.2, up_frac=0.85, wrist_lock=0.2, roll_out=0.25):
+    """IK 로 처음부터 만든 가리키기: 어깨에서 정면 아래(down_deg) 로 reach 만큼 손을 뻗어 손바닥을 위로(up_frac) 들고
+    t_hold 동안 멈췄다가 내린다. 2026-10-16: 모캡 가리키기를 고친 판은 팔이 몸을 가로지르고 손목이 꺾여 어색했다."""
+    arm.set(standby_row)
+    sh = arm.d.xpos[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, f"{side}_shoulder_pitch_link")].copy()
+    R = arm.d.xmat[mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, "pelvis")].reshape(3, 3)
+    fwdv, leftv = R[:, 0], R[:, 1]
+    sgn = -1.0 if side == "right" else 1.0
+    a = np.radians(down_deg)
+    tgt = sh + reach * (np.cos(a) * fwdv - np.sin(a) * np.array([0, 0, 1.0])) + sgn * out * leftv
+    p0, n0 = arm.palm(side)
+    up = np.array([0, 0, 1.0])
+    T = t_up + t_hold + t_down
+    N = int(T * FPS)
+    rows = np.repeat(standby_row[None], N, 0)
+    ref = standby_row.copy()
+    ref[7 + CSV_JOINTS.index(f"{side}_shoulder_roll_joint")] += sgn * roll_out * -1.0   # 팔꿈치 살짝 바깥
+    cur = standby_row.copy()
+    for k in range(N):
+        t = k / FPS
+        w = min(smooth_step(t / t_up), smooth_step((T - t) / t_down))
+        p = p0 + w * (tgt - p0)
+        nt = n0 + w * up_frac * (up - n0); nt /= np.linalg.norm(nt)
+        r_ = standby_row + w * (ref - standby_row)
+        cur = arm.solve(cur, side, p, nt, w_ori=0.5, q_ref=r_, bounds=wrist_bounds(side, wrist_lock))
         rows[k] = cur
     return rows
 
@@ -188,7 +233,7 @@ def report(rows, arm: Arm, sides):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["palm_up", "clap_stack"])
+    ap.add_argument("mode", choices=["palm_up", "clap_stack", "point_fwd"])
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--side", default="right")
     ap.add_argument("--claps", type=int, default=4)
@@ -201,14 +246,28 @@ if __name__ == "__main__":
     ap.add_argument("--ramp", type=float, default=0.6, help="palm_up: 손바닥 돌리는 시간(s)")
     ap.add_argument("--inside", action="store_true", help="palm_up: 팔을 다 든 뒤에 돌리기 시작")
     ap.add_argument("--up_frac", type=float, default=1.0, help="palm_up: 손바닥을 위로 돌리는 비율(1 = 완전히 위)")
+    ap.add_argument("--reach", type=float, default=0.58, help="point_fwd: 어깨→손 거리(m)")
+    ap.add_argument("--down", type=float, default=30.0, help="point_fwd: 수평 아래 각(도)")
+    ap.add_argument("--out", type=float, default=0.12, help="point_fwd: 바깥(오른손이면 오른쪽) 치우침(m)")
+    ap.add_argument("--elbow_out", type=float, default=0.0, help="clap_stack: 팔꿈치 바깥 벌림 정규화(rad, 어깨 roll)")
+    ap.add_argument("--wrist_lock", type=float, default=None, help="손목 pitch·yaw 를 ±값(rad)으로 제한 (곧은 손목)")
     ap.add_argument("--yaw_dir", type=int, default=0, help="palm_up: 어깨 yaw 를 원본에서 +1(증가만)/−1(감소만) 으로 제한")
     a = ap.parse_args()
     arm = Arm()
     if a.mode == "palm_up":
         rows = np.loadtxt(a.paths[0], delimiter=",")
-        out, _ = palm_up(rows, a.side, arm, ramp_s=a.ramp, yaw_dir=a.yaw_dir, inside=a.inside, up_frac=a.up_frac)
+        out, _ = palm_up(rows, a.side, arm, ramp_s=a.ramp, yaw_dir=a.yaw_dir, inside=a.inside, up_frac=a.up_frac, wrist_lock=a.wrist_lock)
         np.savetxt(a.paths[1], out, delimiter=",", fmt="%.9f")
         print(a.paths[1], report(out, arm, [a.side]))
+    elif a.mode == "point_fwd":
+        import json
+        meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")))
+        sb = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
+        row = np.zeros(36); row[2] = 0.76; row[6] = 1.0
+        row[7:] = [sb[n] for n in CSV_JOINTS]
+        out = point_forward(row, arm, a.side, a.reach, a.down, a.out, wrist_lock=0.2 if a.wrist_lock is None else a.wrist_lock)
+        np.savetxt(a.paths[0], out, delimiter=",", fmt="%.9f")
+        print(a.paths[0], f"{len(out)} 프레임 {len(out)/FPS:.2f}s", report(out, arm, [a.side]))
     else:
         idle = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "g1_tracking_policy_meta.json")
         import json
@@ -216,7 +275,7 @@ if __name__ == "__main__":
         sb = dict(zip(meta["joint_names"], meta["default_joint_pos"]))
         row = np.zeros(36); row[2] = 0.76; row[6] = 1.0
         row[7:] = [sb[n] for n in CSV_JOINTS]
-        out = clap_stack(row, arm, a.claps, a.hz, a.lift, a.fwd, a.left, a.gap, a.up)
+        out = clap_stack(row, arm, a.claps, a.hz, a.lift, a.fwd, a.left, a.gap, a.up, a.elbow_out, a.wrist_lock)
         np.savetxt(a.paths[0], out, delimiter=",", fmt="%.9f")
         print(a.paths[0], f"{len(out)} 프레임 {len(out)/FPS:.2f}s", report(out, arm, ["left", "right"]))
 
