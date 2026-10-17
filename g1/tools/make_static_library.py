@@ -1,0 +1,44 @@
+"""학습 전 서버 스모크용 정지 라이브러리: 참조 0번 프레임(서 있는 자세)을 반복하고 속도 0.
+
+로봇은 계속 서 있기만 한다. 세그먼트 전환·yaw 재정렬·UDP·이벤트 표 경로를 정책 학습 전에
+확인하는 용도다. 실제로 돌지 않으므로 이벤트 표의 heading 오차는 -(계획 회전 bin) 이 나와야 정상이다
+(예: bearing 150 -> turn_l135+wave -> -135, RUNBOOK 5-0).
+
+    python3 make_static_library.py --motion ~/g1_dance_deploy/motion_final.npz --out /tmp/g1_static
+"""
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--motion", default=os.path.expanduser("~/g1_dance_deploy/motion_final.npz"))
+ap.add_argument("--out", default="/tmp/g1_static")
+ap.add_argument("--frame", type=int, default=0, help="정지 자세로 쓸 참조 프레임. 춤 첫 프레임은 편하게 선 자세가 아닐 수 있다")
+args = ap.parse_args()
+os.makedirs(args.out, exist_ok=True)
+
+M = dict(np.load(args.motion))
+L0 = M["joint_pos"].shape[0]
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from g1_protocol import TURN_BINS  # noqa: E402
+segs = ([("idle", 150)] + [(f"turn_l{b}" if b > 0 else f"turn_r{-b}", 100) for b in TURN_BINS if b != 0]
+        + [("wave", 120), ("handshake", 120)])
+N = sum(n for _, n in segs)
+out = {}
+for k, v in M.items():
+    v = np.asarray(v)
+    if v.ndim >= 1 and v.shape[0] == L0:
+        out[k] = np.zeros((N,) + v.shape[1:], v.dtype) if "vel" in k else np.repeat(v[args.frame:args.frame + 1], N, axis=0)
+    else:
+        out[k] = v
+np.savez(os.path.join(args.out, "static_library.npz"), **out)
+meta = {"fps_csv": 30, "fps_npz": 50, "segments": {}, "turn_bins": {}}
+s = 0
+for n, l in segs:
+    meta["segments"][n] = [s, s + l]
+    s += l
+json.dump(meta, open(os.path.join(args.out, "static_library_meta.json"), "w"), indent=1)
+print(f"{N} 프레임, 세그먼트 {len(segs)}개 -> {args.out}")
