@@ -125,7 +125,9 @@ class Dialog:
                       f"{'키 있음' if self.env['CLOVA_STUDIO_API_KEY'] else 'CLOVA 키 없음 → 미리 쓴 문장'})")
             opening = self.gen("HCX-005", f"오늘은 {today.year}년 {today.month}월 {today.day}일 "
                                f"{'월화수목금토일'[today.weekday()]}요일입니다. 다가오는 일정: {day.month}월 {day.day}일"
-                               f"({n}일 뒤) {what}. 어르신께 이 일정을 반갑게 알려 주는 첫 마디를 하세요.", "opening")
+                               f"({n}일 뒤) {what}. 어르신께 이 일정을 반갑게 알려 주는 첫 마디를 하세요. 날짜({day.month}월 {day.day}일)와 "
+                               f"남은 날({n}일)을 꼭 넣으세요. 지원이는 가족이 아니므로 '저희 집'·'우리 가족' 같은 말은 쓰지 마세요. "
+                               f"예) '어르신, {day.month}월 {day.day}일이 {what}이에요. 이제 {n}일 남았네요.'", "opening")
             if with_attend and self.attend_fn is not None and self.attend_fn(opening):
                 self._log(f"[1 {'대체' if self.fell else '생성'}·같이 보기 박수에 맞춤] {opening}")
                 t0 = time.time()
