@@ -758,6 +758,28 @@ if bridge.ok and not args.damp_only and not args.probe:
         print("스피커 준비 — UDP {cmd: say, path} 로 WAV 재생")
     except Exception as e:
         print(f"[경고] 스피커 준비 실패({type(e).__name__}: {e}) — 말하기 명령은 무시한다")
+pend_say = None                      # (세그먼트 이름, wav 경로) — 그 세그먼트가 시작될 때 말한다
+_sim_speak_until = [0.0]
+
+
+def say_now(path):
+    if speaker is not None:
+        speaker.say(path)
+        return
+    try:                             # 시뮬/dry-run: 재생은 못 하지만 길이만큼 "말하는 중"으로 보고(패널·대화 모듈 시험용)
+        import wave
+        with wave.open(path, "rb") as w:
+            _sim_speak_until[0] = time.time() + w.getnframes() / w.getframerate()
+    except Exception:
+        pass
+    print(f"  [say] (스피커 없음 — 시뮬/dry-run) {path}", flush=True)
+
+
+def speaking():
+    """지금 말하는 중인가 — 대화 모듈이 이 동안 음성 인식을 꺼서 로봇 자기 목소리를 듣지 않게 한다."""
+    if speaker is not None:
+        return speaker.speaking()
+    return time.time() < _sim_speak_until[0]
 
 if args.damp_only:
     # 위 관문(--arm 이면 고수준이 살아 있을 때 거부)을 지난 뒤에만 온다
@@ -919,13 +941,17 @@ for t in itertools.count():
         fake_next = t + int(6.0 / CTRL_DT)
     for m in msgs:
         if isinstance(m, dict) and m.get("cmd") == "say" and isinstance(m.get("path"), str):
-            if speaker is not None:
-                speaker.say(m["path"])
-            else:
-                print(f"  [say] (스피커 없음 — 시뮬/dry-run) {m['path']}")
+            say_now(m["path"])
             continue
         if player.command(m):
             segs = plan_msg(m)
+            # 동작에 붙은 말: say_at = "start"(바로) 또는 세그먼트 이름(그 세그먼트 첫 프레임에). 예: 박수 시작에 "축하해요"
+            if isinstance(m.get("say_path"), str):
+                at = m.get("say_at", "start")
+                if at in segs:
+                    pend_say = (at, m["say_path"])
+                else:
+                    say_now(m["say_path"])
             if m["cmd"] == "attend":
                 part, b = "attend", m["user_bearing_deg"]
                 print(f"  [attend] seq {m['seq']} 물체 {m['obj_bearing_deg']} 착용자 {b} -> {' + '.join(segs)}")
@@ -943,6 +969,11 @@ for t in itertools.count():
     # IMU 는 pelvis 자세인데 anchor 는 torso 다 — 두 링크의 yaw 는 waist_yaw 만큼 다르므로
     # 반드시 FK 로 torso 를 구한 뒤 torso 끼리 비교해야 한다(이걸 틀려서 로봇이 넘어졌다).
     if first:
+        if pend_say is not None and player.segment == pend_say[0]:
+            say_now(pend_say[1])
+            pend_say = None
+        elif player.segment == "idle":
+            pend_say = None          # 동작이 그 세그먼트까지 못 가고 끝났으면 버린다
         yaw_off = yaw_of(REF_BQ[k, B_ANCHOR]) - yaw_of_mat(torso_rot_world(imu, q))
         ev = events[-1] if events else None
         if ev is not None and ev["lat_ms"] is None and player.segment != "idle":
@@ -975,7 +1006,7 @@ for t in itertools.count():
     csv_row(player.segment, t/FPS, k, sent, q, _tq, imu, gyro)
     if t % 10 == 0:                  # 5 Hz 상태 보고. 데스크탑이 없어도 제어는 계속한다
         try:
-            state_sock.sendto(encode({"state": player.state, "seq": player.last_seq}),
+            state_sock.sendto(encode({"state": player.state, "seq": player.last_seq, "speaking": speaking()}),
                               (args.state_host, args.state_port))
         except OSError:
             pass
