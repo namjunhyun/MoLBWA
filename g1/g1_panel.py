@@ -197,7 +197,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <button class="shake" onclick="act('g1_hand')">🤝 악수</button></div>
 <h3 style="margin:18px 0 4px">같이 보기 <small style="color:#888">(물체 쪽으로 돌아 가리킨 뒤 착용자 쪽으로 돌아와 축하)</small></h3>
 <div>물체 방위 <b id="odeg">60</b>° <input id="o" type="range" min="-180" max="180" step="15" value="60"></div>
-<div style="color:#888;font-size:13px">착용자 방위 = 위 원의 주황 점(슬라이더). ⚠ 가리키기·축하 동작은 학습 전 — 그 전엔 로봇이 이 명령을 거부하고 서 있기만 한다</div>
+<div style="color:#888;font-size:13px">착용자 방위 = 위 원의 주황 점(슬라이더). 젯슨에 정책 v16 22900 + 라이브러리 v12 가 올라가 있어야 한다(그 전 라이브러리는 가리키기·박수가 없어 로봇이 거부하고 서 있기만 함)</div>
 <div class="row"><button class="wave" style="background:#d97706" onclick="attend('celebrate')">🎉 같이 보고 축하</button>
 <button class="wave" style="background:#0891b2" onclick="attend('wave')">👀 같이 보고 손 흔들기</button></div>
 <h3 style="margin:18px 0 4px">말하기 <small style="color:#888">(edge-tts → 지원이 스피커)</small></h3>
@@ -248,7 +248,7 @@ async function act(p){const r=await fetch('/act',{method:'POST',body:JSON.string
 document.getElementById('msg').textContent=(await r.json()).msg}
 setInterval(async()=>{const s=await(await fetch('/state')).json(),busy=s.state!=='idle';
 document.getElementById('st').textContent='상태: '+(s.stale?'서버 응답 없음':({idle:'서 있는 중',turning:'도는 중',acting:'동작 중'}[s.state]||s.state));
-if(s.dlg_log&&s.dlg_log.length)document.getElementById('dlog').textContent=(s.dlg_running?'● 대화 중\n':'')+s.dlg_log.join('\n');
+if(s.dlg_log&&s.dlg_log.length)document.getElementById('dlog').textContent=(s.dlg_running?'● 대화 중\\n':'')+s.dlg_log.join('\\n');
 document.getElementById('spk').textContent=s.speaking?'🔊 말하는 중 (이 동안 음성 인식은 끄기)':'🔇 조용'+(s.say_last?' · '+s.say_last:'');
 document.querySelectorAll('.wave,.shake').forEach(x=>{if(x.textContent.indexOf('말하기')<0&&x.textContent.indexOf('대화')<0)x.disabled=busy&&!s.stale})},300);
 </script>"""
