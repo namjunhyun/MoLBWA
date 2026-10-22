@@ -63,7 +63,9 @@ class PanelState:
     tip_label: str = ""               # 두 팔일 때 팔 이름 ("A")
     other_arms: list = field(default_factory=list)
     object_info: list = field(default_factory=list)
-    reach_arcs: dict = field(default_factory=dict)    # 2026-10-14: id(homography) -> 손으로 그린 띠 (pan/r_min/r_max)   # 2026-10-14: [(글자, 집기 가능?)] objects 순서  # 2026-10-14: [(호모그래피, tcp, 이름)] 다른 팔들
+    reach_arcs: dict = field(default_factory=dict)
+    pour_spot: tuple = None           # 2026-10-22: 따르기 자리 (첫 팔 기준 xy)
+    modes: list = field(default_factory=list)          # 켜진 보정 모드 이름    # 2026-10-14: id(homography) -> 손으로 그린 띠 (pan/r_min/r_max)   # 2026-10-14: [(글자, 집기 가능?)] objects 순서  # 2026-10-14: [(호모그래피, tcp, 이름)] 다른 팔들
     has_fixation: bool = False
     detect_on: bool = True
     calibrated: bool = False
@@ -86,6 +88,15 @@ def render(frame, st, hud, homography):
         _draw_reach_band(view, st, homography)
         for homo_o, _, _ in st.other_arms:
             _draw_reach_band(view, st, homo_o)
+        if st.pour_spot and len(st.pour_spot) == 2:
+            px = homography.to_pixel(*st.pour_spot)
+            if px:
+                hud.marker(view, px, H.PLACE, radius=16, thickness=1, dashed=True)
+                hud.chip(view, (px[0], px[1] - 22), hud.label("따르기 자리", "pour spot"),
+                         H.PLACE, 11, anchor="cb", alpha=0.6)
+        if st.modes:
+            hud.chip(view, (8, view.shape[0] - 8), " · ".join(st.modes) + " 모드",
+                     H.BUSY, 13, bold=True, anchor="lb", alpha=0.85)
         _draw_objects(view, st, hud)
         _draw_targets(view, st, hud, homography)
         _draw_arm_tip(view, st, hud, homography)
@@ -94,6 +105,12 @@ def render(frame, st, hud, homography):
         _draw_pointer(view, st, hud, homography)
         if not st.calibrated:
             _draw_needs_calibration(view, hud)
+        if not st.detect_on:
+            # 2026-10-22: d 로 검출이 꺼진 줄 모르고 쓰다가 컵 클릭이 화면 위치 그대로 들어가 못 집었다
+            hud.chip(view, (view.shape[1] / 2, 14),
+                     hud.label("물체 검출 꺼짐 — d 를 눌러 켜세요 (지금은 클릭한 화면 위치를 그대로 씀)",
+                               "Detection OFF — press d"),
+                     H.WARN, 14, bold=True, anchor="ct", alpha=0.9)
 
     vh, vw = view.shape[:2]
     canvas = np.full((HEADER_H + vh + FOOTER_H, vw + st.sidebar_w, 3), BG, np.uint8)
@@ -340,7 +357,7 @@ def _draw_footer(canvas, y, st, hud):
             "click=gripper tip   u=undo   c=abort   q=quit"), H.MUTED, 12)
     else:
         hud.text(canvas, (18, y + 8), hud.label(
-            "좌클릭 선택  c 취소  space 비상정지  p 따르기 보정  8/4/2/6(화살표) 입구 1cm  +/- 기울기 5°  r 확정  "
+            "좌클릭 선택  c 취소  space 비상정지  p 따르기 보정  g 집기 보정  8/4/2/6(화살표) 1cm  +/- 기울기 5°  r 확정  "
             "d 검출  q 종료",
             "L=select  c=cancel  space=E-STOP  p=pour calib  8/4/2/6 nudge  +/- tilt  r=confirm  "
             "d=detect  q=quit"), H.MUTED, 12)

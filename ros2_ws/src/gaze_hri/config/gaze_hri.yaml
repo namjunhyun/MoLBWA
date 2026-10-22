@@ -72,6 +72,9 @@ target_resolver:
 
 task_manager:
   ros__parameters:
+    # 2026-10-22: 컵만 4cm 높이에서 잡는다 (지름 6cm, 그리퍼 7.5cm -> 한쪽 여유 7mm). 물병은 6cm.
+    grasp_height_labels: ["cup"]
+    grasp_height_values: [0.04]
     min_separation: 0.10       # 집을 곳과 놓을 곳의 최소 거리
     select_timeout: 30.0       # 2026-09-29: 15 -> 30. dwell 2초로 늘린 뒤 놓을 곳 고르다 시간 초과
     min_confidence: 0.35

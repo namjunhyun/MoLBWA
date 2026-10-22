@@ -198,6 +198,10 @@ class ControlPanel(Node):
         self.pub_teleop = self.create_publisher(String, "/teleop/cmd", 10)
         self.pub_pour_calib = self.create_publisher(Bool, "/task/pour_calib", 10)
         self.pour_calib = False
+        # 2026-10-22: g = 집기 보정 모드, 따르기 자리 표시 (task_manager pour_spot 과 같은 값)
+        self.pub_grasp_calib = self.create_publisher(Bool, "/task/grasp_calib", 10)
+        self.grasp_calib = False
+        self.declare_parameter("pour_spot", [0.33, -0.205])
         self.declare_parameter("snapshot_dir", "~/MoLBWA-gaze-hri/notes/pour_calib/snap")
         self.pub_cancel = self.create_publisher(Empty, "/task/cancel", 10)
         # 캘리브레이션 때 팔을 기준 자세로 보낸다
@@ -463,6 +467,11 @@ class ControlPanel(Node):
             d = -1 if key == ord("-") else 1
             self.pub_teleop.publish(String(data=f"tilt:{d}"))
             self.say("더 기울임 +5°" if d > 0 else "덜 기울임 -5°", f"tilt {d * 5:+d} deg", 1.0)
+        elif key == ord("g"):
+            self.grasp_calib = not self.grasp_calib
+            self.say("집기 보정 모드 켬 — 집기 직전에 멈춥니다 (8/4/2/6 로 맞추고 r)"
+                     if self.grasp_calib else "집기 보정 모드 끔",
+                     "Grasp calibration ON" if self.grasp_calib else "Grasp calibration OFF", 4.0)
         elif key == ord("r"):
             path = self.save_snapshot()
             self.pub_teleop.publish(String(data=f"record:{path or ''}"))
@@ -637,6 +646,7 @@ class ControlPanel(Node):
             pa.poses.append(p)
         self.pub_objects.publish(pa)
         self.pub_pour_calib.publish(Bool(data=self.pour_calib))
+        self.pub_grasp_calib.publish(Bool(data=self.grasp_calib))
         labels = list(getattr(self.detector, "last_labels", []))
         if len(labels) != len(pa.poses):
             labels = ["object"] * len(pa.poses)
@@ -698,6 +708,8 @@ class ControlPanel(Node):
             tip_label=self.get_parameter("arm_label").value,
             other_arms=[(h, tcp if self.show_tip else None, n) for n, h, tcp in self.other_arms],
             object_info=self._object_info(),
+            pour_spot=tuple(self.get_parameter("pour_spot").value),
+            modes=(["따르기 보정"] if self.pour_calib else []) + (["집기 보정"] if self.grasp_calib else []),
             reach_arcs={id(h): a for h, a in
                         [(self.homography, self._reach_arc(self.get_parameter("arm_label").value))]
                         + [(h, self._reach_arc(n)) for n, h, _ in self.other_arms] if a},

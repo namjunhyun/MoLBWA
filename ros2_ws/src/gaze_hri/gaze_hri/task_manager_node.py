@@ -88,6 +88,18 @@ class TaskManager(Node):
         # 실제보다 좁아 "선택 안 되는 곳이 너무 많다" — 사용자)
         self.declare_parameter("hard_min_r", 0.25)
         self.declare_parameter("hard_max_r", 0.44)        # 수평 집기 IK 한계 (= arm_server workspace_radius)
+        # 2026-10-22: 따르기는 컵을 늘 가운데 한 자리(두 팔 다 닿는 곳)에 두고 한다 (사용자 —
+        # 위치가 매번 다르면 보정이 안 맞는다). 컵이 거기 없으면 먼저 옮긴 다음 따른다.
+        # 첫 팔(a) 기준 컵 기준점(박스 아래 변) 좌표. 두 팔 모두 받침대 38.8cm, 컵 축 36cm.
+        self.declare_parameter("pour_spot", [0.33, -0.205])
+        self.declare_parameter("pour_spot_tol", 0.03)
+        # 2026-10-22: 물체 종류별 잡는 높이 (그리퍼 중심, 책상 기준). 컵은 아래로 갈수록 좁아
+        # 4cm 에서 지름 ~6cm -> 그리퍼 벌림 7.5cm 와 한쪽 여유 2.5mm -> 7mm (6cm 높이는 지름 7cm 라
+        # 3mm 만 옆으로 틀려도 손가락이 컵을 밀어 빈손). 물병은 굵기 일정 + 따르기 계산이 6cm 전제.
+        # 없는 종류는 target_resolver grasp_height 그대로.
+        self.declare_parameter("grasp_height_labels", ["cup"])
+        self.declare_parameter("grasp_height_values", [0.04])
+        self.declare_parameter("place_clearance", 0.005)
         self.declare_parameter("pour_snap_r", 0.06)     # 놓을 곳이 물체에서 이만큼 안이면 따르기
         # 검출 점은 박스 아래 변 = 컵 바닥의 카메라 쪽 가장자리다 (집기는 이걸로 맞춰져 있다).
         # 따를 곳은 컵 축(맨 위 원의 중심)이라 카메라 반대쪽으로 바닥 반지름만큼 민다.
@@ -142,10 +154,37 @@ class TaskManager(Node):
         self.pour_calib = False       # GUI p: 따르기 대신 보정 기록 (task "pour_calib")
         self.create_subscription(Bool, "/task/pour_calib",
                                  lambda m: setattr(self, "pour_calib", bool(m.data)), 10)
+        self.grasp_calib = False      # GUI g: 집기 직전 멈춰 보정 (task "grasp_calib")
+        self.create_subscription(Bool, "/task/grasp_calib",
+                                 lambda m: setattr(self, "grasp_calib", bool(m.data)), 10)
+        self.queue = []               # 여러 단계 태스크 (컵을 따르기 자리로 -> 따르기)
 
         self.create_timer(0.2, self.tick)
         self.set_state(IDLE)
         self.get_logger().info("task_manager 시작 — 컵을 응시하세요.")
+
+    def _say(self, m):
+        self.get_logger().info(m)
+        self.pub_msg.publish(String(data=m))
+
+    def _next_step(self):
+        """queue 의 다음 단계를 보낸다. 없으면 False."""
+        if not self.queue:
+            return False
+        st = self.queue.pop(0)
+        self.pick_point, self.pick_label, self.task = st["pick"], st["label"], st["task"]
+        if self.task == "" and self.grasp_calib:
+            self.task = "grasp_calib"
+        self.try_order = self.order_for(st["target"], st["what"])
+        if not self.try_order:
+            self.queue = []
+            self.pick_point = None
+            self.set_state(IDLE)
+            return True
+        self.try_target, self.try_reasons = st["target"], []
+        self.pick_arm = self.try_order.pop(0)
+        self.send_goal_dual(self.pick_point, st["target"])
+        return True
 
     def _warn(self, m):
         self.get_logger().warn(m)
@@ -182,6 +221,7 @@ class TaskManager(Node):
 
     # ------------------------------------------------------------------
     def on_cancel(self, _msg):
+        self.queue = []
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
         self.pick_point = None
@@ -235,11 +275,27 @@ class TaskManager(Node):
                         + (" (물병을 고른 뒤 컵을 고르면 따르기)" if self.pick_label != "bottle" else ""))
                     return
                 if kind == "pour":
-                    self.task = "pour_calib" if self.pour_calib else "pour"
-                    target, what = cup, "컵"
-                else:
-                    self.task = ""
-                    target, what = p, "놓을 곳"
+                    spot = np.array(self.get_parameter("pour_spot").value, float)
+                    anchor = self._cup_anchor
+                    pour_task = "pour_calib" if self.pour_calib else "pour"
+                    bottle = (self.pick_point, self.pick_label)
+                    axis = self._away_from_camera(
+                        spot, float(self.get_parameter("pour_cup_center_shift").value))
+                    pour_step = {"pick": bottle[0], "label": "bottle", "task": pour_task,
+                                 "target": np.array([axis[0], axis[1], 0.0]), "what": "컵"}
+                    if np.linalg.norm(anchor - spot) > float(self.get_parameter("pour_spot_tol").value):
+                        # 먼저 컵을 따르기 자리로
+                        self.queue = [{"pick": np.array([anchor[0], anchor[1], 0.06]), "label": "cup",
+                                       "task": "", "target": np.array([spot[0], spot[1], 0.065]),
+                                       "what": "따르기 자리"}, pour_step]
+                        self._say(f"컵을 가운데 따르기 자리로 먼저 옮긴 뒤 따릅니다 "
+                                  f"(컵이 자리에서 {np.linalg.norm(anchor - spot) * 100:.0f}cm 떨어짐)")
+                    else:
+                        self.queue = [pour_step]
+                    self._next_step()
+                    return
+                self.task = "grasp_calib" if self.grasp_calib else ""
+                target, what = p, "놓을 곳"
                 self.try_order = self.order_for(target, what)
                 if not self.try_order:
                     return            # 집기 선택은 유지 — 다른 놓을 곳을 보면 된다
@@ -387,6 +443,7 @@ class TaskManager(Node):
         o, lab = self.objects[best[1]], self._label(best[1])
         if not (self.pick_label == "bottle" and lab == "cup"):
             return "blocked", lab or "물체"
+        self._cup_anchor = np.array(o[:2], float)
         c = self._away_from_camera(o, float(self.get_parameter("pour_cup_center_shift").value))
         self.get_logger().info(
             f"물병 -> 컵: 따르기. 컵 축 ({c[0]:.3f}, {c[1]:.3f}) "
@@ -426,6 +483,12 @@ class TaskManager(Node):
             return
         pk = self.to_arm(i, pick)
         pl = self.to_arm(i, place)        # 거리 보정 안 함 — 되는지는 arm_server 가 판단
+        gh = dict(zip(self.get_parameter("grasp_height_labels").value,
+                      self.get_parameter("grasp_height_values").value)).get(self.pick_label)
+        if gh is not None:
+            pk[2] = float(gh)
+            if self.task not in ("pour", "pour_calib"):          # 따르기면 place 는 컵 축(높이 무관)
+                pl[2] = float(gh) + float(self.get_parameter("place_clearance").value)
         goal = PickPlace.Goal()
         goal.pick = Point(x=float(pk[0]), y=float(pk[1]), z=float(pk[2]))
         goal.place = Point(x=float(pl[0]), y=float(pl[1]), z=float(pl[2]))
@@ -469,6 +532,7 @@ class TaskManager(Node):
             # 모든 팔이 움직이기 전에 거부 -> 집기 선택은 유지, 다른 놓을 곳을 고르게
             reasons = getattr(self, "try_reasons", []) + [
                 f"팔 {self.arms[self.pick_arm][0]}: {result.message[5:]}"]
+            self.queue = []          # 여러 단계 중이었으면 남은 단계도 취소
             pick_bad = all("집을 위치" in r or "병 위치" in r for r in reasons)
             if pick_bad:
                 # 집을 물체 자체가 어느 팔로도 안 잡힘 -> 놓을 곳을 바꿔도 소용없다 (2026-10-14)
@@ -484,8 +548,14 @@ class TaskManager(Node):
             return
         if result.success:
             self.get_logger().info(f"완료: {result.message}")
+            if self.queue:
+                self._goal_handle = None
+                self._say("다음 단계: " + self.queue[0]["what"] + " 쪽 작업")
+                self._next_step()
+                return
         else:
             self._err(f"실패: {result.message}")
+            self.queue = []
         self._goal_handle = None
         self.pick_point = None
         self.set_state(IDLE)

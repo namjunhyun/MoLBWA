@@ -46,6 +46,10 @@ PARAMS = os.path.join(PKG, "config", "gaze_hri.yaml")
 # (그 전) [(0.18,0.14),(0.18,-0.14),(0.24,0.20),(0.24,-0.20),(0.30,0.10),(0.30,-0.10),(0.22,0),(0.29,0)]
 CALIB_XY = [(0.27, 0.14), (0.27, -0.14), (0.33, 0.20), (0.33, -0.20),
             (0.40, 0.12), (0.40, -0.12), (0.30, 0.00), (0.42, 0.00)]
+# 2026-10-22: 높은 점 4개 추가 (손가락 끝 높이 --high-z, 기본 15cm = 컵 입구 높이). 책상 높이 8점은 그대로
+# 호모그래피(책상 면 -> 화면)에만 쓰고, 12점 전체(높이가 두 가지)로 카메라 투영 행렬 P 를 푼다
+# -> 카메라 위치·각도를 알면 컵 중심을 '박스 아래 변 + 고정 3cm' 대신 기하학으로 구할 수 있다.
+CALIB_XY_HIGH = [(0.28, 0.13), (0.28, -0.13), (0.34, 0.05), (0.34, -0.05)]   # 15cm+들기 6cm 에서 닿는 곳
 
 
 def geometry():
@@ -73,21 +77,64 @@ def lowest_tip(q0, q1, tip, n=40):
                                          for a, b in zip(q0, q1)], tip)[2]) for i in range(n + 1))
 
 
-def plan(tip_now_q, tip, tip_z, lift):
-    """지점마다 [위, 아래] 관절각과 목표 XY. 경로 검사 포함."""
+def plan(tip_now_q, tip, tip_z, lift, high_z=None):
+    """지점마다 [위, 아래] 관절각과 목표 XYZ. 경로 검사 포함."""
     legs, prev = [], tip_now_q
-    for (x, y) in CALIB_XY:
+    pts = [(x, y, tip_z) for x, y in CALIB_XY]
+    if high_z:
+        pts += [(x, y, high_z) for x, y in CALIB_XY_HIGH]
+    for (x, y, z) in pts:
         try:
-            q_up, _ = solve_tip([x, y, tip_z + lift], tip)
-            q_dn, _ = solve_tip([x, y, tip_z], tip)
+            q_up, _ = solve_tip([x, y, z + lift], tip)
+            q_dn, _ = solve_tip([x, y, z], tip)
         except IKError as e:
             print(f"  ({x:.2f},{y:+.2f}) 건너뜀: {e}")
             continue
         low1 = lowest_tip(prev, q_up, tip)          # 이전 -> 위
         low2 = lowest_tip(q_up, q_dn, tip)          # 위 -> 아래
-        legs.append(((x, y), q_up, q_dn, min(low1, tip_z + lift - 0.005), low2))
+        legs.append(((x, y, z), q_up, q_dn, min(low1, tip_z + lift - 0.005), low2))
         prev = q_up
     return legs
+
+
+def solve_camera(pix, xyz):
+    """3D 점(높이 두 가지) <-> 화면 점으로 카메라 투영 행렬 P (정규화 DLT). 렌즈 왜곡은 무시.
+    돌려주는 것: P, K, 카메라 위치(팔 기준), 재투영 오차(px). 점이 6개 미만이거나 한 평면이면 빈 dict."""
+    pix, xyz = np.asarray(pix, float), np.asarray(xyz, float)
+    if len(pix) < 6 or np.ptp(xyz[:, 2]) < 0.03:
+        print("카메라 자세: 높이가 다른 점이 부족해 건너뜀")
+        return {}
+
+    def norm(pts):
+        c = pts.mean(axis=0)
+        sc = math.sqrt(pts.shape[1]) / np.mean(np.linalg.norm(pts - c, axis=1))
+        T = np.eye(pts.shape[1] + 1)
+        T[:-1, :-1] *= sc
+        T[:-1, -1] = -sc * c
+        return T
+    T2, T3 = norm(pix), norm(xyz)
+    p2 = (T2 @ np.c_[pix, np.ones(len(pix))].T).T
+    p3 = (T3 @ np.c_[xyz, np.ones(len(xyz))].T).T
+    rows = []
+    for (u, v, w), X in zip(p2, p3):
+        rows.append(np.r_[np.zeros(4), -w * X, v * X])
+        rows.append(np.r_[w * X, np.zeros(4), -u * X])
+    _, _, vt = np.linalg.svd(np.array(rows))
+    P = np.linalg.inv(T2) @ vt[-1].reshape(3, 4) @ T3
+    P /= np.linalg.norm(P[2, :3])
+    proj = (P @ np.c_[xyz, np.ones(len(xyz))].T).T
+    proj = proj[:, :2] / proj[:, 2:3]
+    err = np.linalg.norm(proj - pix, axis=1)
+    K, R, C, *_ = cv2.decomposeProjectionMatrix(P)
+    K = K / K[2, 2]
+    C = (C[:3] / C[3]).ravel()
+    print(f"카메라 자세: 위치(팔 기준) {np.round(C, 3).tolist()} m, 초점 fx {K[0, 0]:.0f} fy {K[1, 1]:.0f}, "
+          f"중심 ({K[0, 2]:.0f}, {K[1, 2]:.0f}) | 재투영 오차 평균 {err.mean():.1f}px 최대 {err.max():.1f}px")
+    if err.max() > 6.0:
+        print("  ★ 재투영 오차가 큼 — 렌즈 왜곡/클릭 실수 가능. 체커보드 렌즈 캘리브를 고려할 것")
+    return {"P": P.tolist(), "K": K.tolist(), "camera_center": C.tolist(),
+            "cam_reproj_px_mean": float(err.mean()), "cam_reproj_px_max": float(err.max()),
+            "points3d": xyz.tolist(), "pixels3d": pix.astype(int).tolist()}
 
 
 def main():
@@ -98,6 +145,8 @@ def main():
     ap.add_argument("--min-tip-z", type=float, default=0.008)
     ap.add_argument("--speed", type=float, default=15.0)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--high-z", type=float, default=0.15,
+                    help="높은 점 손가락 끝 높이 (0 이면 높은 점 안 찍음)")
     ap.add_argument("--arm", required=True, choices=sorted(arms.ARMS))
     a = ap.parse_args()
 
@@ -109,7 +158,7 @@ def main():
     bus = So101Bus(cfg["port"], cfg["servo_ids"])
     try:
         q_now = m.to_rad(bus.ticks())
-        legs = plan(q_now[:4], tip, a.tip_z, a.lift)
+        legs = plan(q_now[:4], tip, a.tip_z, a.lift, a.high_z or None)
         bad = [(xy, l1, l2) for xy, _, _, l1, l2 in legs if min(l1, l2) < a.min_tip_z]
         print(f"캘리브 지점 {len(legs)}개, 손가락 끝 책상 위 {a.tip_z * 100:.1f}cm")
         for xy, l1, l2 in bad:
@@ -133,7 +182,8 @@ def main():
         bus.enable()
         grip = cfg["zero_ticks"][5] + int(0.8 / (2 * math.pi / 4096)) * cfg["signs"][5]
         pix, world = [], []
-        for i, ((x, y), q_up, q_dn, _, _) in enumerate(legs):
+        pix_all, xyz_all = [], []
+        for i, ((x, y, z), q_up, q_dn, _, _) in enumerate(legs):
             for q in (q_up, q_dn):
                 target = m.to_ticks(list(q) + [0.0, 0.0])
                 target[4] = bus.last_goal[4]                     # 롤은 그대로
@@ -144,7 +194,8 @@ def main():
             settle_ticks(bus, target)
             time.sleep(0.8)                                      # 흔들림 가라앉기
             click["p"] = None
-            print(f"[{i + 1}/{len(legs)}] 손가락 끝 = 로봇 ({x:.2f}, {y:+.2f}) — 화면에서 **두 손가락 끝의 가운데** 클릭")
+            print(f"[{i + 1}/{len(legs)}] 손가락 끝 = 로봇 ({x:.2f}, {y:+.2f}, 높이 {z * 100:.0f}cm) — "
+                  "화면에서 **두 손가락 끝의 가운데** 클릭")
             while True:
                 ok, f = cap.read()
                 if not ok:
@@ -163,8 +214,11 @@ def main():
                 if k == ord("s"):
                     break
                 if click["p"]:
-                    pix.append(click["p"])
-                    world.append((x, y))
+                    if abs(z - a.tip_z) < 1e-6:          # 책상 높이 점만 호모그래피에
+                        pix.append(click["p"])
+                        world.append((x, y))
+                    pix_all.append(click["p"])
+                    xyz_all.append((x, y, z))
                     print(f"    픽셀 {click['p']}")
                     break
             # 다음 지점으로 가기 전에 위로
@@ -194,7 +248,9 @@ def main():
             bak = OUT.replace(".yaml", time.strftime("_bak_%Y%m%d_%H%M%S.yaml"))
             os.rename(OUT, bak)
             print(f"기존 파일 백업: {bak}")
-        yaml.safe_dump({"H": H.tolist(), "reproj_error_mm": float(per.mean()), "loo_error_mm": float(np.mean(loo)),
+        cam = solve_camera(pix_all, xyz_all)
+        yaml.safe_dump({**cam,
+                        "H": H.tolist(), "reproj_error_mm": float(per.mean()), "loo_error_mm": float(np.mean(loo)),
                         "num_points": len(pix), "reference": "midpoint of finger tips",
                         "tip_z_m": a.tip_z, "camera_index": a.cam,
                         "pixels": [list(map(int, p)) for p in pix], "world_xy": [list(w) for w in world]},

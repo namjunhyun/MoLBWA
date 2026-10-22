@@ -384,6 +384,9 @@ class ArmServer(Node):
         # latest = 가장 최근 보정 세션만 (같은 자리에서 다듬은 값이 옛 값과 평균되지 않게 — 사용자)
         # all    = 전부 (3개 이상이면 컵 위치에 대한 1차식)
         self.declare_parameter("pour_calib_use", "latest")
+        # 2026-10-22: 집기 보정 — 닫기 직전에 멈춰 8/4/2/6 으로 손가락 가운데에 컵을 맞춘 차이를
+        # 기록해서 이 팔의 집기·놓기에 더한다 (팔 A 가 컵을 옆으로 미세하게 빗나가 3번 빈손)
+        self.declare_parameter("grasp_correction", True)
         self.declare_parameter("homography_file", "")            # 이 팔의 탑다운 호모그래피 (입구 조정 방향)
         self.declare_parameter("pour_calib_deg", 80.0)           # 보정 멈춤 각도 (실제 따르는 자세)
         self.declare_parameter("nudge_step", 0.01)               # 8/4/2/6(화살표) 한 번 = 1cm
@@ -1118,7 +1121,8 @@ class ArmServer(Node):
                 return self._execute_pour(pick, place, fb, goal_handle, result,
                                           calib=g.task == "pour_calib")
             if self.get_parameter("grasp_mode").value == "side":
-                return self._execute_side(pick, place, fb, goal_handle, result)
+                return self._execute_side(pick, place, fb, goal_handle, result,
+                                          grasp_calib=getattr(g, "task", "") == "grasp_calib")
 
             approach = float(self.get_parameter("approach_height").value)
             lift = float(self.get_parameter("lift_height").value)
@@ -1321,8 +1325,10 @@ class ArmServer(Node):
                 self.set_gripper(g_open, settle=0.4)
                 self.move_to(above, 0.0, g_open, strict=True)
             return False
-        # 재시도마다: 그대로 / 조금 더 깊이 / 조금 위 / 조금 아래
-        nudges = [np.zeros(3), u * off, z * off, -z * off]
+        # 재시도마다: 그대로 / 옆(왼) / 옆(오른) / 조금 더 깊이 — 2026-10-22: 빗나감은 대개 옆으로
+        # (팔 A 가 깊이·위·아래 재시도로도 못 잡음)
+        t = np.array([-u[1], u[0], 0.0])
+        nudges = [np.zeros(3), t * off, -t * off, u * off]
         for attempt in range(int(self.get_parameter("max_grasp_retries").value)):
             if self._cancel:
                 return False
@@ -1338,6 +1344,9 @@ class ArmServer(Node):
                 self.move_to(pre_low + (target - pick), pp, g_open, strict=True)
             fb("INSERT", 0.3)
             self.move_to(target, pp, g_open, strict=True)
+            if attempt == 0 and getattr(self, "_grasp_calib", False):
+                if not self._grasp_calib_stage(target, pp):
+                    return False
             fb("GRASP", 0.4)
             if self.close_and_verify():
                 return True
@@ -1345,7 +1354,14 @@ class ArmServer(Node):
             self.move_to(pre_low + (target - pick), pp, g_open, strict=True)
         return False
 
-    def _execute_side(self, pick, place, fb, goal_handle, result):
+    def _execute_side(self, pick, place, fb, goal_handle, result, grasp_calib=False):
+        go = self._grasp_offset()
+        if go is not None and np.linalg.norm(go) > 1e-6:
+            self.get_logger().info(f"  집기 보정 적용: {np.round(go * 100, 1).tolist()} cm (집기·놓기)")
+            pick = pick + np.array([go[0], go[1], 0.0])
+            place = place + np.array([go[0], go[1], 0.0])
+        self._grasp_calib = grasp_calib
+        self._grasp_cam_pick = pick - (np.array([go[0], go[1], 0.0]) if go is not None else 0.0)
         g_open = float(self.get_parameter("gripper_open").value)
         g_close = float(self.get_parameter("gripper_closed").value)
         _, _, _, pick_above = self._side_points(pick, "집을")
@@ -1795,6 +1811,9 @@ class ArmServer(Node):
 
     def _execute_pour(self, bottle, cup, fb, goal_handle, result, calib=False):
         g_open = float(self.get_parameter("gripper_open").value)
+        go = self._grasp_offset()          # 2026-10-22: 집기 보정은 물병 집기/내려놓기에도
+        if go is not None and np.linalg.norm(go) > 1e-6:
+            bottle = np.asarray(bottle, float) + np.array([go[0], go[1], 0.0])
         # 2026-10-14: 보정 때도 지금까지의 보정을 적용해서 시작한다 (적용 안 하면 먼 컵이 IK 로 거부됐다).
         # 기록은 '카메라 컵 기준 누적 오프셋' 이라 적용한 보정 + 이번에 옮긴 양으로 남긴다.
         plan = self._pour_plan(bottle, cup)   # 움직이기 전에 전부 검사
@@ -1956,6 +1975,75 @@ class ArmServer(Node):
             goal_handle.canceled()
         else:
             goal_handle.abort()
+
+    def _grasp_file(self):
+        return os.path.join(os.path.expanduser(str(self.get_parameter("pour_calib_dir").value)),
+                            f"{self.get_parameter('arm_name').value or 'arm'}_grasp.jsonl")
+
+    def _grasp_offset(self):
+        """최신 집기 보정 (xy, m). 없으면 None."""
+        if not self.get_parameter("grasp_correction").value or not os.path.exists(self._grasp_file()):
+            return None
+        last = None
+        for line in open(self._grasp_file()):
+            try:
+                last = json.loads(line)
+            except ValueError:
+                continue
+        return None if last is None else np.array(last["offset_cm"][:2]) / 100.0
+
+    def _grasp_calib_stage(self, target, pitch):
+        """닫기 직전 멈춤: GUI 8/4/2/6 로 그리퍼를 1cm 씩 (화면 방향) -> r. 보정 기록 후 True."""
+        from gaze_hri.table_view import TableHomography
+        hom = TableHomography()
+        ok, why = hom.load(os.path.expanduser(str(self.get_parameter("homography_file").value)))
+        if not ok:
+            self.get_logger().warn(f"[집기 보정] 호모그래피 없음 ({why}) — 건너뜀")
+            return True
+        step = float(self.get_parameter("nudge_step").value)
+        g = self.q[5]
+        offset = np.zeros(2)
+        self._teleop_cmd = None
+        self.pub_phase.publish(String(data="ADJUST_GRASP"))
+        self.get_logger().info("[집기 보정] 멈춤 — 8/4/2/6(화살표) 로 컵이 두 손가락 가운데 오게 (1cm 씩), 맞으면 r")
+        base = np.asarray(target, float)
+        while True:
+            if self._cancel:
+                return False
+            cmd, self._teleop_cmd = self._teleop_cmd, None
+            if not cmd:
+                time.sleep(0.05)
+                continue
+            if cmd.startswith("record"):
+                break
+            if not cmd.startswith("nudge:"):
+                continue
+            _, dx, dy = cmd.split(":")
+            px = hom.to_pixel(base[0], base[1])
+            p2 = hom.to_robot(px[0] + 20.0 * float(dx), px[1] + 20.0 * float(dy)) if px else None
+            if p2 is None:
+                continue
+            d = np.array(p2) - base[:2]
+            new = offset + d / max(float(np.linalg.norm(d)), 1e-9) * step
+            try:
+                self.move_to(base + np.array([new[0], new[1], 0.0]), pitch, g, strict=True)
+            except IKError:
+                self.get_logger().warn("[집기 보정] 그쪽으로는 더 못 갑니다 (IK)")
+                continue
+            offset = new
+            self.get_logger().info(f"[집기 보정] 오프셋 {np.round(offset * 100, 1).tolist()} cm")
+        prev = self._grasp_offset()
+        total = offset + (prev if prev is not None else 0.0)
+        rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm": self.get_parameter("arm_name").value,
+               "pick_cam": np.asarray(self._grasp_cam_pick, float), "offset_this_cm": offset * 100,
+               "offset_cm": total * 100, "snapshot": cmd.partition(":")[2] or None}
+        os.makedirs(os.path.dirname(self._grasp_file()), exist_ok=True)
+        with open(self._grasp_file(), "a") as f:
+            f.write(json.dumps(rec, default=lambda v: v.tolist() if hasattr(v, "tolist") else str(v),
+                               ensure_ascii=False) + "\n")
+        self.get_logger().info(f"[집기 보정] 기록: 이번 {np.round(offset * 100, 1).tolist()} cm, "
+                               f"누적 {np.round(total * 100, 1).tolist()} cm -> {self._grasp_file()}")
+        return True
 
     def _side_retreat_home(self, p, g_open):
         """실패 후 복귀: 컵을 쓸지 않게 뒤로 빠졌다가 위로 올라간 다음 home."""
