@@ -166,6 +166,10 @@ AP.add_argument("--sim_ho_gap", type=float, default=0.0,
 AP.add_argument("--handback_fsm", default="4,500",
                 help="정책 → 고수준 반납(SIGUSR1) 때 고수준이 올라온 뒤 보낼 SetFsmId 순서. 4 = 잠금 서기, 500 = 시작(균형·보행)")
 AP.add_argument("--handback_wait", type=float, default=1.5, help="반납 FSM 사이 대기(초)")
+AP.add_argument("--shutdown_fsm", default="4,3,0",
+                help="종료(SIGUSR2): 고수준이 올라온 뒤 SetFsmId 순서. 4 = 잠금 서기, 3 = 앉기, 0 = 제로토크")
+AP.add_argument("--settle", default="4:2.0,3:6.0,500:1.0,706:4.0",
+                help="FSM 이 바뀐 뒤 그 동작이 끝나기를 기다리는 시간(초). '번호:초,…'")
 AP.add_argument("--ho_blend", type=float, default=1.5,
                 help="--handover: 넘겨받은 뒤 이 시간(초) 동안 정책에 주는 목표 자세를 '인계 순간 자세 → 서 있기 참조'로 "
                      "천천히 옮긴다. 정책은 처음부터 켜져 있다. 0 이면 바로 참조(2026-10-23 실기: 팔꿈치 16° 차이가 "
@@ -718,11 +722,15 @@ def _sig_term(*_):
     print("\n[비상] 즉시 댐핑으로 풀고 종료한다.")
 HB = {"req": False, "state": None}   # 정책 → 고수준 반납: None → selecting → up / failed
 def _sig_usr1(*_):
-    HB["req"] = True
+    HB["req"], HB["seq"], HB["kind"] = True, args.handback_fsm, "반납"
     print("\n[반납] 요청 받음 — 서 있는 중이면 고수준을 켜고 넘긴다", flush=True)
+def _sig_usr2(*_):
+    HB["req"], HB["seq"], HB["kind"] = True, args.shutdown_fsm, "종료"
+    print("\n[종료] 요청 받음 — 고수준에 넘긴 뒤 서기 → 앉기 → 제로토크", flush=True)
 signal.signal(signal.SIGINT, _sig_int)
 signal.signal(signal.SIGTERM, _sig_term)
 signal.signal(signal.SIGUSR1, _sig_usr1)
+signal.signal(signal.SIGUSR2, _sig_usr2)
 
 def read_state():
     """(Isaac 순서 관절각, 관절속도, IMU 쿼터니언, 자이로)"""
@@ -1027,6 +1035,8 @@ def _hb_select():
         HB["state"] = "up"
         return
     try:
+        _msc.SetTimeout(10.0)        # SelectMode 는 3 s 넘게 걸린다(실기 3.04 s) — 3 s 한도면 3104 시간초과
+        _msc.SetTimeout(10.0)        # SelectMode 는 3 s 넘게 걸린다(실기 3.04 s) — 3 s 한도면 3104 시간초과
         _r = _msc.SelectMode("ai")
         HB["sel_rc"] = _r[0] if isinstance(_r, tuple) else _r
     except Exception as e:
@@ -1091,7 +1101,7 @@ for t in itertools.count():
     if HB["req"] and HB["state"] is None:
         HB["req"] = False
         if player.state != "idle":
-            print(f"[반납] 거부 — 동작 중({player.segment}). 서 있을 때 다시", flush=True)
+            print(f"[{HB.get('kind', '반납')}] 거부 — 동작 중({player.segment}). 서 있을 때 다시", flush=True)
         elif sim is None and (_loco is None or "_msc" not in globals()):
             print("[반납] 거부 — 모드 전환/보행 클라이언트가 없다", flush=True)
         else:
@@ -1099,10 +1109,10 @@ for t in itertools.count():
             import threading as _th
             _th.Thread(target=_hb_select, daemon=True).start()
     if HB["state"] == "up":
-        print("[반납] 고수준이 올라왔다 — 정책 발행을 멈춘다", flush=True)
+        print(f"[{HB.get('kind', '반납')}] 고수준이 올라왔다 — 정책 발행을 멈춘다", flush=True)
         break
     if HB["state"] == "failed":
-        print("[반납] 실패 — 고수준이 올라오지 않았다. 정책을 계속 유지한다", flush=True)
+        print(f"[{HB.get('kind', '반납')}] 실패 — 고수준이 올라오지 않았다. 정책을 계속 유지한다", flush=True)
         HB["state"] = None
     if HB["state"] is not None:
         msgs = [m for m in msgs if isinstance(m, dict) and m.get("cmd") == "say"]   # 반납 중엔 동작 명령을 받지 않는다
@@ -1239,57 +1249,82 @@ if sim is not None:
     sim.push_idle = False   # 밀기 시험은 재생 루프의 idle 에서만 — 유지·카운트다운에서 밀면 측정이 오염된다
     sim.drift_end = getattr(sim, "max_drift", 0.0)
     sim.n_loop_log = len(log)
-# ---------------------------------------------------------------- 3.5) 정책 → 고수준 반납 마무리 (댐핑 보내지 않음)
+# ---------------------------------------------------------------- 3.5) 정책 → 고수준 반납/종료 마무리 (댐핑 보내지 않음)
+# 실기 2026-10-23 1차: SelectMode 3 s(3104 = 3 s 시간초과, 실제로는 3.04 s 에 올라옴). 올라온 고수준은 힘 빠진
+# 상태로 시작하고, 0.2 s 뒤 보낸 SetFsmId(4)·(500)은 코드 0 인데도 먹지 않아(GetFsmId 가 아직 응답 못 함 = 준비 전)
+# 로봇이 처진 채 FSM 0 으로 남았다. → 보행 컨트롤러가 GetFsmId 에 답할 때까지 기다렸다가 보내고, 바뀐 걸 확인한다.
 if HB["state"] == "up":
+    kind = HB.get("kind", "반납")
     t_stop = time.perf_counter()
     q_hb = read_state()[0].copy()
-    fsm_seq = [int(x) for x in args.handback_fsm.split(",") if x.strip()]
-    steps = []
+    KNEE = [I_JOINTS.index(n) for n in ("left_knee_joint", "right_knee_joint") if n in I_JOINTS]
+    SETTLE = {int(k): float(v) for k, v in (x.split(":") for x in args.settle.split(",") if x.strip())}
+    tl = []                          # 0.1 s 마다 (t, fsm, 기울기, 무릎 평균°)
+    mon = {"tilt": 0.0, "dev": 0.0, "fsm": None}
 
     def _fsm():
+        if _loco is None:
+            return "시뮬"
         try:
             _r = _loco.GetFsmId()
-            return _r[1] if isinstance(_r, tuple) else _r
-        except Exception as e:
-            return f"?{type(e).__name__}"
-    fsm0 = _fsm() if _loco is not None else "시뮬"
-    mon = {"tilt": 0.0, "dev": 0.0}
+            return _r[1] if isinstance(_r, tuple) and _r[0] == 0 else None
+        except Exception:
+            return None
 
-    def _watch(sec):
+    def _sample():
+        r_ = read_state()
+        if r_ is None:
+            return
+        q_, _, imu_, _ = r_
+        tilt_ = float(np.degrees(np.arccos(np.clip(torso_rot_world(imu_, q_)[2, 2], -1, 1))))
+        mon["tilt"] = max(mon["tilt"], tilt_)
+        mon["dev"] = max(mon["dev"], float(np.abs(q_ - q_hb).max()))
+        tl.append((time.perf_counter() - t_stop, mon["fsm"], tilt_, float(np.degrees(np.mean(q_[KNEE]))) if KNEE else 0.0))
+
+    def _wait(cond, sec):
+        """cond() 가 참이 될 때까지 0.1 s 마다 기록하며 기다린다. 참 True / 시간초과 None / 비상정지 False."""
         t_end = time.perf_counter() + sec
         while time.perf_counter() < t_end:
-            if stop["hard"] and _loco is not None:   # 비상정지 = 이제 고수준이 모터를 잡고 있으니 고수준 댐핑
-                _loco.Damp(); print("[반납] 비상정지 → 고수준 댐핑", flush=True); return False
-            r_ = read_state()
-            if r_ is not None:
-                q_, _, imu_, _ = r_
-                mon["tilt"] = max(mon["tilt"], float(np.degrees(np.arccos(np.clip(torso_rot_world(imu_, q_)[2, 2], -1, 1)))))
-                mon["dev"] = max(mon["dev"], float(np.abs(q_ - q_hb).max()))
-            time.sleep(CTRL_DT)
-        return True
-    ok = True
-    for i, f in enumerate(fsm_seq):
-        t_ = time.perf_counter()
-        if _loco is not None:
-            try:
-                _r = _loco.SetFsmId(f)
-                rc = _r[0] if isinstance(_r, tuple) else _r
-            except Exception as e:
-                rc = f"{type(e).__name__}"
-        else:
-            rc = "시뮬"
-        steps.append(f"SetFsmId({f})→{rc} @{(t_ - t_stop) * 1000:.0f}ms")
-        if not _watch(args.handback_wait if i < len(fsm_seq) - 1 else 2.0):
+            if stop["hard"]:
+                if _loco is not None:
+                    _loco.Damp()
+                print(f"[{kind}] 비상정지 → 고수준 댐핑", flush=True)
+                return False
+            mon["fsm"] = _fsm()
+            _sample()
+            if cond():
+                return True
+            time.sleep(0.1)
+        return None
+
+    steps, ok = [], True
+    seq = [int(x) for x in str(HB.get("seq", args.handback_fsm)).split(",") if x.strip()]
+    r_ready = _wait(lambda: mon["fsm"] is not None, 5.0)          # 보행 컨트롤러 준비
+    steps.append(f"준비 {tl[-1][0]:.2f}s(FSM {mon['fsm']})" if r_ready else f"준비 안 됨({r_ready})")
+    ok = r_ready is not False
+    for i, f in enumerate(seq if r_ready else []):
+        t_ = time.perf_counter() - t_stop
+        rc = _loco.SetFsmId(f) if _loco is not None else "시뮬"
+        rc = rc[0] if isinstance(rc, tuple) else rc
+        got = _wait(lambda: mon["fsm"] == f or _loco is None, 3.0)
+        if got:
+            got = _wait(lambda: False, SETTLE.get(f, 1.0) if i < len(seq) - 1 else 2.0) is not False
+        steps.append(f"SetFsmId({f})→{rc} @{t_:.2f}s → FSM {mon['fsm']}" + ("" if mon["fsm"] == f else " (안 바뀜)"))
+        if got is False:
             ok = False
+            break
+        if mon["fsm"] != f and _loco is not None:
+            steps.append("다음 단계 중단(상태가 안 바뀜)")
             break
     sel = f"{(HB['t_sel'] - HB['t0']):.2f}s" if "t_sel" in HB else "?"
     up = f"{(HB['t_up'] - HB['t0']):.2f}s" if "t_up" in HB else "?"
-    print(f"[반납] SelectMode {sel}(코드 {HB.get('sel_rc', '-')}) · 고수준 확인 {up}({HB.get('mode', '')}) · "
-          f"발행 멈춤→첫 FSM {(steps and steps[0].split('@')[1]) or '-'} · 반납 직후 FSM {fsm0}", flush=True)
-    print(f"[반납] {' · '.join(steps)} · 이후 FSM {_fsm() if _loco is not None else '시뮬'}", flush=True)
-    print(f"[반납] 넘긴 뒤 최대 기울기 {mon['tilt']:.1f}° · 관절 최대 변화 {np.degrees(mon['dev']):.1f}° "
-          f"({'완료 — 이제 고수준이 잡고 있다' if ok else '비상정지로 중단'})", flush=True)
-    print_summary() if "print_summary" in globals() else None
+    sag = [x for x in tl if x[1] is None]
+    print(f"[{kind}] SelectMode {sel}(코드 {HB.get('sel_rc', '-')}) · 고수준 확인 {up}({HB.get('mode', '')}) · "
+          f"발행 멈춘 뒤 고수준 준비까지 {sag[-1][0] if sag else 0:.2f}s (이 동안 무릎 {sag[0][3] if sag else 0:.0f}→{sag[-1][3] if sag else 0:.0f}°)", flush=True)
+    print(f"[{kind}] {' · '.join(steps)}", flush=True)
+    print(f"[{kind}] 최대 기울기 {mon['tilt']:.1f}° · 관절 최대 변화 {np.degrees(mon['dev']):.1f}° · 마지막 FSM {mon['fsm']} "
+          f"({'끝' if ok else '비상정지로 중단'})", flush=True)
+    print(f"[{kind}] 시간표(초 FSM 기울기° 무릎°): " + " | ".join(f"{t_:.1f} {f_} {ti:.0f} {kn:.0f}" for t_, f_, ti, kn in tl[::3]), flush=True)
     sys.exit(0)
 
 # ---------------------------------------------------------------- 4) 복귀

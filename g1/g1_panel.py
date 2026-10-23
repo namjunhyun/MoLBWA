@@ -45,7 +45,7 @@ def listen_state():
 
 
 threading.Thread(target=listen_state, daemon=True).start()
-CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "status"}
+CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "shutdown", "status"}
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
        "-o", "ControlPath=/tmp/g1_panel_%r@%h", "-o", "ControlPersist=600"]
 
@@ -188,6 +188,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <button onclick="c('start_dry')">dry-run 20초</button></div>
 <div class="row ctl"><button style="background:#b45309!important" onclick="c('handover','고수준으로 서 있는 상태에서 바로 우리 정책으로 넘깁니다(실기 미검증). 하네스를 걸었나요? 비상정지 담당과 주변 2m 확인했나요? 로봇이 가만히 서 있나요?')">⇄ 고수준 → 정책 인계 (하네스 필수)</button>
 <button style="background:#0e7490!important" onclick="c('handback','우리 정책에서 고수준(보행 컨트롤러)으로 넘깁니다(실기 미검증). 로봇이 가만히 서 있나요? 하네스·비상정지 담당 확인했나요?')">⇄ 정책 → 고수준 반납 (하네스 필수)</button></div>
+<div class="row ctl"><button style="background:#4d7c0f!important" onclick="c('shutdown','고수준에 넘긴 뒤 서기 → 앉기 → 제로토크로 끕니다(실기 미검증). 하네스는 앉을 만큼 길게 걸었나요? 주변 2m 확인했나요?')">🏠 종료: 반납 → 앉기 → 제로토크 (하네스 필수)</button></div>
 <div id="robot">로봇: ?</div>
 <svg width="200" height="200" viewBox="-100 -100 200 200"><circle r="90" fill="none" stroke="#444"/>
 <path d="M-8 6 L0 -14 L8 6 Z" fill="#aaa"/><text y="30" fill="#888" font-size="11" text-anchor="middle">지원이(정면=위)</text>
