@@ -166,6 +166,17 @@ AP.add_argument("--sim_ho_gap", type=float, default=0.0,
 AP.add_argument("--handback_fsm", default="4,500",
                 help="정책 → 고수준 반납(SIGUSR1) 때 고수준이 올라온 뒤 보낼 SetFsmId 순서. 4 = 잠금 서기, 500 = 시작(균형·보행)")
 AP.add_argument("--handback_wait", type=float, default=1.5, help="반납 FSM 사이 대기(초)")
+AP.add_argument("--ho_blend", type=float, default=1.5,
+                help="--handover: 넘겨받은 뒤 이 시간(초) 동안 정책에 주는 목표 자세를 '인계 순간 자세 → 서 있기 참조'로 "
+                     "천천히 옮긴다. 정책은 처음부터 켜져 있다. 0 이면 바로 참조(2026-10-23 실기: 팔꿈치 16° 차이가 "
+                     "0.1 s 만에 움직여 박수처럼 보였다)")
+AP.add_argument("--ho_out_blend", type=float, default=1.0,
+                help="--handover: 넘겨받은 뒤 이 시간(초) 동안 **모터로 보내는 팔 목표**를 인계 순간 팔 자세에서 정책 출력으로 "
+                     "천천히 옮긴다(다리는 정책 그대로). 정책이 첫 출력부터 팔을 익숙한 자세로 바로 보내는 것을 누그러뜨린다")
+AP.add_argument("--ho_blend_joints", choices=["arms", "all", "none"], default="none",
+                help="섞을 관절: arms = 어깨·팔꿈치·손목만, all = 전신")
+AP.add_argument("--sim_start_csv", default="",
+                help="mujoco 전용: 실기 로그 csv 첫 줄의 실제 관절(act_*)로 시작 — 실기 인계 순간 자세 재현용")
 AP.add_argument("--handover", action="store_true",
                 help="--arm 과 함께: **고수준이 서 있는 상태에서** 시작해, 모든 준비를 끝낸 뒤 서버가 직접 "
                      "ReleaseMode 를 부르고 바로 다음 주기에 정책을 발행한다(고수준→정책 인계, 공백 최소화). "
@@ -521,6 +532,15 @@ class MujocoBackend:
         self.d.qpos[self.qadr] = REF_Q[0] if args.start_pose == "ref" else QDEF.copy()
         self.d.qvel[:] = 0.0
         mj.mj_forward(self.m, self.d)
+        if args.sim_start_csv:       # 실기 기록 자세로 시작 — 발바닥 높이를 참조 자세와 같게 맞춘다
+            import csv as _csv
+            _r0 = next(_csv.DictReader(open(args.sim_start_csv)))
+            z_ref = float(min(self.d.xpos[b][2] for b in self.b_feet))
+            self.d.qpos[self.qadr] = [float(_r0["act_" + n]) for n in I_JOINTS]
+            mj.mj_forward(self.m, self.d)
+            self.d.qpos[2] += z_ref - float(min(self.d.xpos[b][2] for b in self.b_feet))
+            mj.mj_forward(self.m, self.d)
+            print(f"[sim] 실기 기록 자세로 시작 ({args.sim_start_csv})")
         if args.start_pose == "slack":
             # 하네스에 매달린 상태: 골반을 공중에 고정하고 토크 0 으로 두면 중력이 관절을 늘어뜨린다.
             pel_hold = self.d.qpos[:7].copy()
@@ -987,6 +1007,17 @@ if args.handover:
               + (f" → 공백 끝 골반 {sim.height():.3f} m" if n_gap else ""))
 
 
+ARM_J = np.array([i for i, n in enumerate(I_JOINTS) if any(w in n for w in ("shoulder", "elbow", "wrist"))], dtype=int)
+N_OUT = int(round(args.ho_out_blend / CTRL_DT))
+N_BLEND = int(round(args.ho_blend / CTRL_DT)) if args.ho_blend_joints != "none" else 0
+BLEND_J = np.array([i for i, n in enumerate(I_JOINTS)
+                    if args.ho_blend_joints == "all" or any(w in n for w in ("shoulder", "elbow", "wrist"))], dtype=int)
+if HO is not None and N_OUT:
+    print(f"[인계] 팔 출력 섞기 {args.ho_out_blend:.1f}s — 인계 순간 팔 자세에서 정책 출력으로 (실기 2026-10-23 팔이 0.1 s 만에 휙 움직임 → 시뮬 팔 최대 속도 3.70→0.94 rad/s)")
+if HO is not None and N_BLEND:
+    print(f"[인계] 목표 섞기 {args.ho_blend:.1f}s · {args.ho_blend_joints}({len(BLEND_J)}관절) — 인계 순간 자세에서 서 있기 참조로")
+
+
 def _hb_select():
     """정책이 균형을 잡는 동안 고수준을 켠다. 올라오면 HB['state']='up' — 메인 루프가 발행을 멈춘다."""
     HB["t0"] = time.perf_counter()
@@ -1023,7 +1054,8 @@ def ho_report():
     gap = (HO["t_first"] - HO["t1"]) * 1000
     mt = f"{(HO['mode_t'] - HO['t0']) * 1000:.0f} ms" if HO["mode_t"] else "3초 안에 확인 못 함"
     print(f"[인계] 해제 요청 {rel:.0f} ms · 해제 응답→첫 발행 {gap:.0f} ms · 모드 '' 확인 {mt} · "
-          f"첫 2초 최대 기울기 {HO['tilt']:.1f}° · 관절 최대 변화 {np.degrees(HO['dev']):.1f}°", flush=True)
+          f"첫 2초 최대 기울기 {HO['tilt']:.1f}° · 관절 최대 변화 {np.degrees(HO['dev']):.1f}° · "
+          f"팔 최대 속도 {HO.get('varm', 0.0):.2f} rad/s", flush=True)
 
 
 for t in itertools.count():
@@ -1128,18 +1160,32 @@ for t in itertools.count():
         break
     ori_b = (R_rob.T @ quat_to_mat(REF_BQ[k, B_ANCHOR]))[:, :2].reshape(-1)
 
-    obs = np.concatenate([REF_Q[k], REF_QD[k], ori_b, gyro, q - QDEF, dq, last_action])
+    rq, rqd = REF_Q[k], REF_QD[k]
+    if HO is not None and t < N_BLEND:
+        # 인계 직후: 목표를 '인계 순간 자세 → 참조'로 cos 곡선으로 옮긴다 (정책은 켜진 채 균형을 잡는다)
+        _x = np.pi * (t + 1) / N_BLEND
+        _a, _da = 0.5 - 0.5 * np.cos(_x), 0.5 * np.pi / (N_BLEND * CTRL_DT) * np.sin(_x)
+        rq, rqd = rq.copy(), rqd.copy()
+        _d = REF_Q[k][BLEND_J] - HO["q"][BLEND_J]
+        rq[BLEND_J] = HO["q"][BLEND_J] + _a * _d
+        rqd[BLEND_J] = _a * REF_QD[k][BLEND_J] + _da * _d
+    obs = np.concatenate([rq, rqd, ori_b, gyro, q - QDEF, dq, last_action])
     assert obs.shape[0] == 154, obs.shape
 
     action = policy(obs)
     last_action = action.copy()
     target = QDEF + ASCALE * action
+    if HO is not None and t < N_OUT:
+        _b = 0.5 - 0.5 * np.cos(np.pi * (t + 1) / N_OUT)
+        target = target.copy()
+        target[ARM_J] = HO["q"][ARM_J] + _b * (target[ARM_J] - HO["q"][ARM_J])
     sent = publish_target(target)
     if HO is not None and t < 100:
         if HO["t_first"] is None:
             HO["t_first"] = time.perf_counter()
         HO["tilt"] = max(HO["tilt"], tilt_deg)
         HO["dev"] = max(HO["dev"], float(np.abs(q - HO["q"]).max()))
+        HO["varm"] = max(HO.get("varm", 0.0), float(np.abs(dq[ARM_J]).max()))
         if t == 99:
             ho_report()
     _tq = torque_now()
