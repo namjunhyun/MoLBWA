@@ -226,10 +226,11 @@ function draw(){const v=+b.value,r=v*Math.PI/180;document.getElementById('deg').
 document.getElementById('side').textContent=v>0?'왼쪽':v<0?'오른쪽':'정면';
 const u=document.getElementById('u');u.setAttribute('cx',-80*Math.sin(r));u.setAttribute('cy',-80*Math.cos(r))}
 b.oninput=draw;draw();
-async function c(cmd,warn){if(warn&&!confirm(warn))return;document.getElementById('robot').textContent='로봇: '+cmd+' 보내는 중…';
-const r=await fetch('/ctl/'+cmd,{method:'POST'});document.getElementById('robot').textContent='로봇: '+(await r.json()).msg}
+let ctlUntil=0;
+async function c(cmd,warn){if(warn&&!confirm(warn))return;ctlUntil=Date.now()+60000;document.getElementById('robot').textContent='로봇: '+cmd+' 보내는 중…';
+const r=await fetch('/ctl/'+cmd,{method:'POST'});ctlUntil=Date.now()+10000;document.getElementById('robot').textContent='로봇: '+(await r.json()).msg}
 setInterval(async()=>{const r=await(await fetch('/robot')).json();if(r.log)document.getElementById('log').textContent=r.log;
-if(r.status&&!document.getElementById('robot').textContent.includes('보내는 중'))document.getElementById('robot').textContent='로봇: '+r.status},2000);
+if(r.status&&Date.now()>ctlUntil)document.getElementById('robot').textContent='로봇: '+r.status},2000);
 const o=document.getElementById('o');o.oninput=()=>document.getElementById('odeg').textContent=o.value;
 const txt=document.getElementById('txt'),phr=document.getElementById('phr');
 ['안녕하세요, 저는 지원이에요.','저기 보세요!','다음 주에 손녀 생일이에요. 축하해요!','오늘 이야기 나눠서 즐거웠어요.'].forEach(v=>{const e=document.createElement('button');e.textContent=v;e.onclick=()=>{txt.value=v};phr.appendChild(e)});
@@ -281,7 +282,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_error(400)
                 return
             msg = ctl(cmd)
-            print(f"[ctl] {cmd}: {msg}")
+            print(f"[ctl] {cmd}: {msg}", flush=True)
             self._send(json.dumps({"msg": msg}))
             return
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
