@@ -6,6 +6,8 @@ status    : 모드 이름('ai' = 고수준, '' = 디벨롭/R&D) + 정책 서버 
 release   : 디벨롭 모드 (MotionSwitcher.ReleaseMode) — 이후 로봇은 스스로 못 선다(하네스)
 handover  : 고수준으로 서 있는 상태에서 정책 서버를 --arm --handover 로 띄운다 — 서버가 준비를 끝낸 뒤 직접 해제하고
             바로 발행(공백 최소). 실기 미검증, 하네스 필수
+handback  : 정책 → 고수준 반납. 정책 서버에 SIGUSR1 만 보낸다(DDS 를 새로 열지 않음) — 서버가 균형을 잡는 채로
+            고수준을 켜고, 올라오면 발행을 멈추고 SetFsmId 4(잠금 서기) → 500(시작). 실기 미검증, 하네스 필수
 highlevel : 고수준 모드 — SelectMode 를 ai → normal → advanced 로 시도(각 2초 뒤 확인), 성공하면 곧바로 Damp. 정책 서버가 돌면 거부
             (console.py 와 같은 순서. 셋 다 실패하면 로봇 재부팅)
 damp      : 비상정지 — 정책 서버가 돌면 SIGTERM(kp0·kd2 댐핑 3초), 디벨롭 모드면 서버 --damp_only(같은 댐핑),
@@ -65,6 +67,11 @@ def main(cmd):
     if cmd in ("damp", "stop") and pid:            # 정책 서버가 돌면 DDS 를 열지 않고 신호만 (가장 빠른 경로)
         os.kill(pid, signal.SIGTERM if cmd == "damp" else signal.SIGINT)
         return f"정책 서버 {pid} 에 {'SIGTERM(댐핑)' if cmd == 'damp' else 'SIGINT(기본자세 유지 후 종료)'}"
+    if cmd == "handback":
+        if not pid:
+            return "정책 서버가 없다 — 반납할 것이 없다 (지금 모드는 상태 표시 참고)"
+        os.kill(pid, signal.SIGUSR1)
+        return f"정책 서버 {pid} 에 반납 요청 — 서 있는 중이면 고수준을 켜고 넘긴다(약 2~4초). 로그에서 [반납] 확인"
     if cmd == "status" and pid:
         # 정책 중엔 DDS 를 새로 열지 않는다 — 참여자 생성·탐색이 정책 루프 주기를 깨뜨렸다
         # (2026-10-12 실기: 3초마다 status → p99 62.9 ms, 5회 연속 놓쳐 정책 중단). 정책은 디벨롭 모드에서만 돈다.

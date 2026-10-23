@@ -163,6 +163,9 @@ AP.add_argument("--arm", action="store_true", help="실제로 DDS 에 발행한�
 AP.add_argument("--sim_ho_gap", type=float, default=0.0,
                 help="mujoco 전용 --handover 시험: 해제 후 정책이 받기 전 공백(초)을 흉내 낸다 — 그동안 kp=0·kd=2 "
                      "(힘 빠진 모터). 실기에서 ReleaseMode 가 얼마나 걸려도 버티는지 가늠용")
+AP.add_argument("--handback_fsm", default="4,500",
+                help="정책 → 고수준 반납(SIGUSR1) 때 고수준이 올라온 뒤 보낼 SetFsmId 순서. 4 = 잠금 서기, 500 = 시작(균형·보행)")
+AP.add_argument("--handback_wait", type=float, default=1.5, help="반납 FSM 사이 대기(초)")
 AP.add_argument("--handover", action="store_true",
                 help="--arm 과 함께: **고수준이 서 있는 상태에서** 시작해, 모든 준비를 끝낸 뒤 서버가 직접 "
                      "ReleaseMode 를 부르고 바로 다음 주기에 정책을 발행한다(고수준→정책 인계, 공백 최소화). "
@@ -693,8 +696,13 @@ def _sig_term(*_):
     stop["v"] = True
     stop["hard"] = True
     print("\n[비상] 즉시 댐핑으로 풀고 종료한다.")
+HB = {"req": False, "state": None}   # 정책 → 고수준 반납: None → selecting → up / failed
+def _sig_usr1(*_):
+    HB["req"] = True
+    print("\n[반납] 요청 받음 — 서 있는 중이면 고수준을 켜고 넘긴다", flush=True)
 signal.signal(signal.SIGINT, _sig_int)
 signal.signal(signal.SIGTERM, _sig_term)
+signal.signal(signal.SIGUSR1, _sig_usr1)
 
 def read_state():
     """(Isaac 순서 관절각, 관절속도, IMU 쿼터니언, 자이로)"""
@@ -760,6 +768,15 @@ if bridge.ok:
     elif args.arm and _mode != "":
         sys.exit("[거부] 고수준 컨트롤러가 살아 있다(또는 확인 불가). 'R&D 진입' 후 다시 발행하라 — "
                  "그대로 쏘면 두 컨트롤러가 싸워 정책이 발산한다.")
+
+# 반납용 보행 클라이언트: 이미 연 DDS 위에 미리 만든다(반납 순간에 만들면 그만큼 늦다)
+_loco = None
+if bridge.ok and args.arm and not args.damp_only and not args.probe:
+    try:
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+        _loco = LocoClient(); _loco.SetTimeout(3.0); _loco.Init()
+    except Exception as e:
+        print(f"[경고] 보행 클라이언트 준비 실패({type(e).__name__}: {e}) — 정책→고수준 반납은 거부한다")
 
 # 스피커: 이미 연 DDS 를 같이 쓴다(새 프로세스가 DDS 를 열면 제어주기가 깨진다). 실패해도 정책은 계속.
 speaker = None
@@ -970,6 +987,35 @@ if args.handover:
               + (f" → 공백 끝 골반 {sim.height():.3f} m" if n_gap else ""))
 
 
+def _hb_select():
+    """정책이 균형을 잡는 동안 고수준을 켠다. 올라오면 HB['state']='up' — 메인 루프가 발행을 멈춘다."""
+    HB["t0"] = time.perf_counter()
+    if sim is not None:              # 시뮬: 고수준이 없다 — 2초 뒤 올라온 것으로 흉내 (경로 시험용)
+        time.sleep(2.0)
+        HB["t_sel"] = HB["t_up"] = time.perf_counter()
+        HB["state"] = "up"
+        return
+    try:
+        _r = _msc.SelectMode("ai")
+        HB["sel_rc"] = _r[0] if isinstance(_r, tuple) else _r
+    except Exception as e:
+        HB["sel_rc"] = f"{type(e).__name__}"
+    HB["t_sel"] = time.perf_counter()
+    t_end = time.perf_counter() + 10.0
+    while time.perf_counter() < t_end:
+        try:
+            _r = _msc.CheckMode()[1]
+            if isinstance(_r, dict) and _r.get("name", "") not in ("",):
+                HB["mode"] = _r.get("name")
+                HB["t_up"] = time.perf_counter()
+                HB["state"] = "up"
+                return
+        except Exception:
+            pass
+        time.sleep(0.05)
+    HB["state"] = "failed"
+
+
 def ho_report():
     if HO is None or HO["t_first"] is None:
         return
@@ -1010,6 +1056,24 @@ for t in itertools.count():
                          "bearing_deg": args.fake_bearing if args.fake_bearing is not None
                          else (None if fake_rng.random() < 0.1 else int(fake_rng.integers(-180, 181)))})
         fake_next = t + int(6.0 / CTRL_DT)
+    if HB["req"] and HB["state"] is None:
+        HB["req"] = False
+        if player.state != "idle":
+            print(f"[반납] 거부 — 동작 중({player.segment}). 서 있을 때 다시", flush=True)
+        elif sim is None and (_loco is None or "_msc" not in globals()):
+            print("[반납] 거부 — 모드 전환/보행 클라이언트가 없다", flush=True)
+        else:
+            HB["state"] = "selecting"
+            import threading as _th
+            _th.Thread(target=_hb_select, daemon=True).start()
+    if HB["state"] == "up":
+        print("[반납] 고수준이 올라왔다 — 정책 발행을 멈춘다", flush=True)
+        break
+    if HB["state"] == "failed":
+        print("[반납] 실패 — 고수준이 올라오지 않았다. 정책을 계속 유지한다", flush=True)
+        HB["state"] = None
+    if HB["state"] is not None:
+        msgs = [m for m in msgs if isinstance(m, dict) and m.get("cmd") == "say"]   # 반납 중엔 동작 명령을 받지 않는다
     for m in msgs:
         if isinstance(m, dict) and m.get("cmd") == "say" and isinstance(m.get("path"), str):
             say_now(m["path"])
@@ -1129,6 +1193,59 @@ if sim is not None:
     sim.push_idle = False   # 밀기 시험은 재생 루프의 idle 에서만 — 유지·카운트다운에서 밀면 측정이 오염된다
     sim.drift_end = getattr(sim, "max_drift", 0.0)
     sim.n_loop_log = len(log)
+# ---------------------------------------------------------------- 3.5) 정책 → 고수준 반납 마무리 (댐핑 보내지 않음)
+if HB["state"] == "up":
+    t_stop = time.perf_counter()
+    q_hb = read_state()[0].copy()
+    fsm_seq = [int(x) for x in args.handback_fsm.split(",") if x.strip()]
+    steps = []
+
+    def _fsm():
+        try:
+            _r = _loco.GetFsmId()
+            return _r[1] if isinstance(_r, tuple) else _r
+        except Exception as e:
+            return f"?{type(e).__name__}"
+    fsm0 = _fsm() if _loco is not None else "시뮬"
+    mon = {"tilt": 0.0, "dev": 0.0}
+
+    def _watch(sec):
+        t_end = time.perf_counter() + sec
+        while time.perf_counter() < t_end:
+            if stop["hard"] and _loco is not None:   # 비상정지 = 이제 고수준이 모터를 잡고 있으니 고수준 댐핑
+                _loco.Damp(); print("[반납] 비상정지 → 고수준 댐핑", flush=True); return False
+            r_ = read_state()
+            if r_ is not None:
+                q_, _, imu_, _ = r_
+                mon["tilt"] = max(mon["tilt"], float(np.degrees(np.arccos(np.clip(torso_rot_world(imu_, q_)[2, 2], -1, 1)))))
+                mon["dev"] = max(mon["dev"], float(np.abs(q_ - q_hb).max()))
+            time.sleep(CTRL_DT)
+        return True
+    ok = True
+    for i, f in enumerate(fsm_seq):
+        t_ = time.perf_counter()
+        if _loco is not None:
+            try:
+                _r = _loco.SetFsmId(f)
+                rc = _r[0] if isinstance(_r, tuple) else _r
+            except Exception as e:
+                rc = f"{type(e).__name__}"
+        else:
+            rc = "시뮬"
+        steps.append(f"SetFsmId({f})→{rc} @{(t_ - t_stop) * 1000:.0f}ms")
+        if not _watch(args.handback_wait if i < len(fsm_seq) - 1 else 2.0):
+            ok = False
+            break
+    sel = f"{(HB['t_sel'] - HB['t0']):.2f}s" if "t_sel" in HB else "?"
+    up = f"{(HB['t_up'] - HB['t0']):.2f}s" if "t_up" in HB else "?"
+    print(f"[반납] SelectMode {sel}(코드 {HB.get('sel_rc', '-')}) · 고수준 확인 {up}({HB.get('mode', '')}) · "
+          f"발행 멈춤→첫 FSM {(steps and steps[0].split('@')[1]) or '-'} · 반납 직후 FSM {fsm0}", flush=True)
+    print(f"[반납] {' · '.join(steps)} · 이후 FSM {_fsm() if _loco is not None else '시뮬'}", flush=True)
+    print(f"[반납] 넘긴 뒤 최대 기울기 {mon['tilt']:.1f}° · 관절 최대 변화 {np.degrees(mon['dev']):.1f}° "
+          f"({'완료 — 이제 고수준이 잡고 있다' if ok else '비상정지로 중단'})", flush=True)
+    print_summary() if "print_summary" in globals() else None
+    sys.exit(0)
+
 # ---------------------------------------------------------------- 4) 복귀
 if stop["hard"]:
     send_damp()
