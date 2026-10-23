@@ -45,7 +45,7 @@ def listen_state():
 
 
 threading.Thread(target=listen_state, daemon=True).start()
-CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "status"}
+CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "status"}
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
        "-o", "ControlPath=/tmp/g1_panel_%r@%h", "-o", "ControlPersist=600"]
 
@@ -186,6 +186,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <button onclick="c('highlevel','고수준(기본 보행) 모드로 올립니다. 계속할까요?')">고수준 모드</button></div>
 <div class="row ctl"><button class="on" onclick="c('start','균형 정책을 켭니다(발행). 하네스·비상정지 담당·주변 2m 확인했나요?')">▶ 정책 ON (균형 + 인사)</button>
 <button onclick="c('start_dry')">dry-run 20초</button></div>
+<div class="row ctl"><button style="background:#b45309!important" onclick="c('handover','고수준으로 서 있는 상태에서 바로 우리 정책으로 넘깁니다(실기 미검증). 하네스를 걸었나요? 비상정지 담당과 주변 2m 확인했나요? 로봇이 가만히 서 있나요?')">⇄ 고수준 → 정책 인계 (하네스 필수)</button></div>
 <div id="robot">로봇: ?</div>
 <svg width="200" height="200" viewBox="-100 -100 200 200"><circle r="90" fill="none" stroke="#444"/>
 <path d="M-8 6 L0 -14 L8 6 Z" fill="#aaa"/><text y="30" fill="#888" font-size="11" text-anchor="middle">지원이(정면=위)</text>

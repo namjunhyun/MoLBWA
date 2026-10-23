@@ -4,6 +4,8 @@
 
 status    : 모드 이름('ai' = 고수준, '' = 디벨롭/R&D) + 정책 서버 실행 여부
 release   : 디벨롭 모드 (MotionSwitcher.ReleaseMode) — 이후 로봇은 스스로 못 선다(하네스)
+handover  : 고수준으로 서 있는 상태에서 정책 서버를 --arm --handover 로 띄운다 — 서버가 준비를 끝낸 뒤 직접 해제하고
+            바로 발행(공백 최소). 실기 미검증, 하네스 필수
 highlevel : 고수준 모드 — SelectMode 를 ai → normal → advanced 로 시도(각 2초 뒤 확인), 성공하면 곧바로 Damp. 정책 서버가 돌면 거부
             (console.py 와 같은 순서. 셋 다 실패하면 로봇 재부팅)
 damp      : 비상정지 — 정책 서버가 돌면 SIGTERM(kp0·kd2 댐핑 3초), 디벨롭 모드면 서버 --damp_only(같은 댐핑),
@@ -102,6 +104,20 @@ def main(cmd):
             return "고수준 댐핑 SetFsmId(1)"
         c.StopMove()
         return "고수준 StopMove (제자리 정지)"
+    if cmd == "handover":
+        if pid:
+            return f"이미 실행 중 ({pid})"
+        if name in ("", "?"):
+            return f"거부: 인계는 고수준이 서 있을 때만 — 지금 모드 {name!r}. 디벨롭이면 평소 '정책 ON'"
+        args = ["python3", os.path.join(HERE, "g1_motion_server.py")] + SERVER_ARGS + ["--arm", "--handover"]
+        run_log = os.path.join(HERE, "logs", time.strftime("server_%m%d_%H%M%S_handover.log"))
+        os.makedirs(os.path.dirname(run_log), exist_ok=True)
+        args += ["--log_csv", run_log[:-4] + ".csv"]
+        subprocess.Popen(args, cwd=HERE, stdout=open(run_log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+        if os.path.lexists(LOG):
+            os.remove(LOG)
+        os.symlink(run_log, LOG)
+        return f"인계 시작 ({name!r} → 정책) — 서버가 준비 후 직접 해제·발행. 로그 {run_log}"
     if cmd in ("start", "start_dry"):
         if pid:
             return f"이미 실행 중 ({pid})"

@@ -160,6 +160,13 @@ AP.add_argument("--damp_only", action="store_true",
 AP.add_argument("--sim_realtime", action="store_true",
                 help="mujoco 전용: 뷰어 없이도 실시간 속도로 돈다 (조작 패널로 명령을 보낼 때)")
 AP.add_argument("--arm", action="store_true", help="실제로 DDS 에 발행한다 (없으면 dry-run)")
+AP.add_argument("--sim_ho_gap", type=float, default=0.0,
+                help="mujoco 전용 --handover 시험: 해제 후 정책이 받기 전 공백(초)을 흉내 낸다 — 그동안 kp=0·kd=2 "
+                     "(힘 빠진 모터). 실기에서 ReleaseMode 가 얼마나 걸려도 버티는지 가늠용")
+AP.add_argument("--handover", action="store_true",
+                help="--arm 과 함께: **고수준이 서 있는 상태에서** 시작해, 모든 준비를 끝낸 뒤 서버가 직접 "
+                     "ReleaseMode 를 부르고 바로 다음 주기에 정책을 발행한다(고수준→정책 인계, 공백 최소화). "
+                     "평소와 반대로 고수준이 살아 있어야만 시작한다. 실기 미검증 — 하네스를 걸고 시험할 것")
 AP.add_argument("--probe", type=float, default=0.0,
                 help="DDS 를 열어 lowstate 만 이 시간(초) 받아보고 끝낸다. **발행하지 않는다.** "
                      "dry-run 은 DDS 를 아예 열지 않으므로 인터페이스가 맞는지·lowstate 가 오는지를 "
@@ -745,7 +752,12 @@ if bridge.ok:
     except Exception as e:
         _mode = f"?({type(e).__name__})"
     print(f"  고수준 모드 = {_mode!r} ({'R&D — 발행 가능' if _mode == '' else '살아 있음'})")
-    if args.arm and _mode != "":
+    if args.handover:
+        # 인계: 고수준이 서 있어야 한다. 이미 디벨롭이면 로봇은 늘어져 있다 → 평소 '정책 ON' 을 쓸 것
+        if _mode == "" or _mode.startswith("?"):
+            sys.exit(f"[거부] 인계는 고수준이 살아 있을 때만 — 지금 모드 {_mode!r}. "
+                     "디벨롭 모드면 하네스를 확인하고 평소 '정책 ON' 을 쓰라.")
+    elif args.arm and _mode != "":
         sys.exit("[거부] 고수준 컨트롤러가 살아 있다(또는 확인 불가). 'R&D 진입' 후 다시 발행하라 — "
                  "그대로 쏘면 두 컨트롤러가 싸워 정책이 발산한다.")
 
@@ -909,6 +921,65 @@ def wrap_deg(a):
 def turn_deg(segs):
     """계획한 회전 bin 합(+ = 왼쪽). [turn_l135, wave] -> 135, [turn_l60, point, turn_r90, celebrate] -> -30."""
     return sum(int(n[6:]) * (1 if n[5] == "l" else -1) for n in segs if n.startswith("turn_"))
+# ---------------------------------------------------------------- 2.5) 고수준 → 정책 인계 (--handover)
+HO = None
+if args.handover:
+    if args.enter_sec > 0:
+        sys.exit("--handover 는 --enter_sec 0 에서만 (보간 진입 동안은 아무도 균형을 안 잡는다)")
+    q_ho, dq_ho, imu_ho, _ = read_state()
+    tilt_ho = float(np.degrees(np.arccos(np.clip(torso_rot_world(imu_ho, q_ho)[2, 2], -1.0, 1.0))))
+    if tilt_ho > 10.0 or float(np.abs(dq_ho).max()) > 0.5:
+        sys.exit(f"[거부] 인계 전 점검 실패 — 기울기 {tilt_ho:.1f}° (≤ 10), 관절속도 최대 {np.abs(dq_ho).max():.2f} rad/s "
+                 "(≤ 0.5). 고수준으로 가만히 선 상태에서 다시. 고수준은 그대로 두었다.")
+    # 직전 출력 = 지금 자세를 그대로 잡는 값. 0 이면 첫 주기에 기본 자세 쪽으로 튄다
+    last_action = np.where(np.abs(ASCALE) > 1e-6, (q_ho - QDEF) / np.where(np.abs(ASCALE) > 1e-6, ASCALE, 1.0), 0.0)
+    for _ in range(5):               # 첫 계산 지연(메모리·캐시) 제거
+        policy(np.zeros(OBS_DIM))
+    HO = {"q": q_ho.copy(), "tilt": 0.0, "dev": 0.0, "t_first": None, "t_dev": None, "mode_t": None}
+    print(f"[인계] 점검 통과 — 기울기 {tilt_ho:.1f}°, 관절속도 최대 {np.abs(dq_ho).max():.2f} rad/s. "
+          "고수준을 해제하고 바로 발행한다", flush=True)
+    if sim is None:
+        HO["t0"] = time.perf_counter()
+        _rc = _msc.ReleaseMode()
+        HO["t1"] = time.perf_counter()
+        _rc = _rc[0] if isinstance(_rc, tuple) else _rc
+        if _rc != 0:
+            sys.exit(f"[중단] ReleaseMode 실패(코드 {_rc}) — 발행하지 않는다. 고수준이 그대로 서 있어야 한다")
+
+        def _watch_mode():           # 해제가 실제로 언제 끝났나 (기록용, 3초만)
+            t_end = time.perf_counter() + 3.0
+            while time.perf_counter() < t_end and HO["mode_t"] is None:
+                try:
+                    _r = _msc.CheckMode()[1]
+                    if isinstance(_r, dict) and _r.get("name", "?") == "":
+                        HO["mode_t"] = time.perf_counter()
+                except Exception:
+                    pass
+                time.sleep(0.05)
+        import threading as _th
+        _th.Thread(target=_watch_mode, daemon=True).start()
+    else:
+        HO["t0"] = time.perf_counter()
+        n_gap = int(round(args.sim_ho_gap / CTRL_DT))
+        for _ in range(n_gap * DEC):                  # 해제 공백: 아무도 균형을 안 잡는다
+            sim.d.ctrl[sim.act] = -2.0 * sim.d.qvel[sim.vadr]
+            mj.mj_step(sim.m, sim.d)
+        HO["t1"] = time.perf_counter()
+        HO["mode_t"] = HO["t1"]
+        print(f"[인계] 시뮬 — 고수준 컨트롤러가 없어 해제 대신 공백 {args.sim_ho_gap * 1000:.0f} ms (kp0·kd2) 를 흉내 낸다"
+              + (f" → 공백 끝 골반 {sim.height():.3f} m" if n_gap else ""))
+
+
+def ho_report():
+    if HO is None or HO["t_first"] is None:
+        return
+    rel = (HO["t1"] - HO["t0"]) * 1000
+    gap = (HO["t_first"] - HO["t1"]) * 1000
+    mt = f"{(HO['mode_t'] - HO['t0']) * 1000:.0f} ms" if HO["mode_t"] else "3초 안에 확인 못 함"
+    print(f"[인계] 해제 요청 {rel:.0f} ms · 해제 응답→첫 발행 {gap:.0f} ms · 모드 '' 확인 {mt} · "
+          f"첫 2초 최대 기울기 {HO['tilt']:.1f}° · 관절 최대 변화 {np.degrees(HO['dev']):.1f}°", flush=True)
+
+
 for t in itertools.count():
     if stop["v"] or (n_run is not None and t >= n_run):
         break
@@ -1000,6 +1071,13 @@ for t in itertools.count():
     last_action = action.copy()
     target = QDEF + ASCALE * action
     sent = publish_target(target)
+    if HO is not None and t < 100:
+        if HO["t_first"] is None:
+            HO["t_first"] = time.perf_counter()
+        HO["tilt"] = max(HO["tilt"], tilt_deg)
+        HO["dev"] = max(HO["dev"], float(np.abs(q - HO["q"]).max()))
+        if t == 99:
+            ho_report()
     _tq = torque_now()
     log.append((t/FPS, float(np.abs(sent - q).max()), float(np.abs(dq).max())))
     tq_log.append(float(np.abs(_tq / ELIM_A).max()) if _tq is not None else 0.0)
@@ -1059,6 +1137,8 @@ if stop["hard"]:
 
 def print_summary():
     """어느 종료 경로(유지·복귀·비상)에서도 같은 요약을 찍는다."""
+    if HO is not None and HO["t_first"] is not None:
+        ho_report()                  # 2초 전에 끝났어도 인계 기록은 남긴다
     if args.sim_pose_log and pose_log:
         np.savez(args.sim_pose_log, segment=np.array([p[0] for p in pose_log]), pos=np.stack([p[1] for p in pose_log]))
     if motor_health():
