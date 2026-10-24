@@ -26,7 +26,10 @@ import numpy as np
 import cv2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(HERE, "..", "ros2_ws", "src", "ocams_ros2", "config")
+# 장면 카메라 선택: SCENE_CAM=ov9281 이면 OV9281 USB 두 대(UNO Q 중계, ros2_ws/src/uvc_stereo) 캘리브레이션을 읽는다.
+# 기본은 지금까지의 oCamS. 두 카메라 모두 같은 형식({left,right}_opencv.yaml)·같은 계약(정렬된 640x480)이다.
+SCENE_CAM = os.environ.get("SCENE_CAM", "ocams").lower()
+CONFIG_DIR = os.path.join(HERE, "..", "ros2_ws", "src", "uvc_stereo" if SCENE_CAM == "ov9281" else "ocams_ros2", "config")
 
 IMAGE_WIDTH = 640
 IMAGE_HEIGHT = 480
@@ -61,7 +64,8 @@ RECTIFIED_K = LEFT.P[:3, :3]
 # P_right의 값은 rectification/SLAM 기하를 보존하기 위해 그대로 둔다. 그러나 2026-09-22
 # 실측에서 이 값(17.16cm)을 SGBM 깊이 공식에 직접 쓰면 거리가 크게 나왔다.
 GEOMETRIC_BASELINE_M = -RIGHT.P[0, 3] / RIGHT.P[0, 0]
-DEPTH_BASELINE_M = 0.105
+# 0.105 는 oCamS 실측 보정값이다. OV9281 은 아직 실측 전이라 기하 baseline 을 그대로 쓴다(실측 후 바꿀 것).
+DEPTH_BASELINE_M = float(os.environ.get("DEPTH_BASELINE_M", 0.105 if SCENE_CAM != "ov9281" else GEOMETRIC_BASELINE_M))
 
 # 기존 외부 코드 호환용. 새 깊이 코드는 DEPTH_BASELINE_M을 명시적으로 사용해야 한다.
 BASELINE_M = GEOMETRIC_BASELINE_M

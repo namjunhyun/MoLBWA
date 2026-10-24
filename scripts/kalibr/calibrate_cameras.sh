@@ -64,8 +64,14 @@ echo "   target: /data/target.yaml"
 # yes's write fails with SIGPIPE once docker's stdin closes at exit; that's
 # expected, so check docker's own exit code (PIPESTATUS[1]) rather than the
 # pipeline's overall status.
+# 카메라마다 초점 추정값이 다르다: oCamS 640x480 ≈ 400px, OV9281(105°) 640x480 ≈ 300px.
+# 렌즈 모델·토픽도 바꿀 수 있다 (광각이라 가장자리 잔차가 크면 MODELS="pinhole-equi pinhole-equi").
+FOCAL_GUESS="${FOCAL_GUESS:-400}"
+MODELS="${MODELS:-pinhole-radtan pinhole-radtan}"
+TOPICS="${TOPICS:-/camera/left /camera/right}"
+echo "   focal guess: ${FOCAL_GUESS} · models: ${MODELS} · topics: ${TOPICS}"
 set +o pipefail
-yes 400 | docker run -i --rm \
+yes "${FOCAL_GUESS}" | docker run -i --rm \
   --entrypoint bash \
   -e KALIBR_MANUAL_FOCAL_LENGTH_INIT=1 \
   -v "${DATA_DIR}:/data" \
@@ -75,8 +81,8 @@ yes 400 | docker run -i --rm \
       --bag '${BAG_IN_CONTAINER}' \
       --bag-freq 4.0 \
       --target /data/target.yaml \
-      --models pinhole-radtan pinhole-radtan \
-      --topics /camera/left /camera/right \
+      --models ${MODELS} \
+      --topics ${TOPICS} \
       --dont-show-report"
 DOCKER_STATUS=${PIPESTATUS[1]}
 set -o pipefail

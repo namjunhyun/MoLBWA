@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>uvc_stereo</name>
+  <version>0.1.0</version>
+  <description>OV9281 USB 카메라 두 대(UNO Q 중계, TCP) → 정렬된 스테레오 토픽 (oCamS 대체)</description>
+  <maintainer email="skawnsgus03@gmail.com">Junhyun Nam</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

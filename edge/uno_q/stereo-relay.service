@@ -1,0 +1,19 @@
+# UNO Q 부팅 시 스테레오 중계 자동 시작 (선택). 장치 경로는 `python3 stereo_relay.py --list` 결과로 바꿀 것.
+#   sudo cp stereo-relay.service /etc/systemd/system/ && sudo systemctl enable --now stereo-relay
+#   로그: journalctl -u stereo-relay -f
+[Unit]
+Description=OV9281 stereo relay (UNO Q -> PC, TCP 55100)
+After=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/stereo
+ExecStart=/usr/bin/python3 /home/arduino/stereo/stereo_relay.py \
+  --left  /dev/v4l/by-path/CHANGE_ME_LEFT-video-index0 \
+  --right /dev/v4l/by-path/CHANGE_ME_RIGHT-video-index0 \
+  --width 640 --height 480 --fps 30
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

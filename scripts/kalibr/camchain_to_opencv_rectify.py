@@ -59,7 +59,7 @@ def main():
     K1, D1 = load_cam(camchain, "cam1")
     T_cn_cnm1 = np.array(camchain["cam1"]["T_cn_cnm1"], dtype=np.float64)
     R = T_cn_cnm1[:3, :3]
-    T = T_cn_cnm1[:3, 3]
+    T = T_cn_cnm1[:3, 3].reshape(3, 1)   # OpenCV 5 는 (3,1) 만 받는다 (4.x 도 동일하게 동작)
     baseline_m = float(np.linalg.norm(T))
     print(f"[convert] Kalibr baseline |T| = {baseline_m*100:.3f} cm")
 
