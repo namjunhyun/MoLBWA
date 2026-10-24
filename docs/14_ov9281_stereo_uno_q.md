@@ -80,7 +80,7 @@ bash ros2_ws/src/uvc_stereo/test/run_calib_chain_test.sh  # 가짜 Kalibr 결과
 ## 5. 캘리브레이션 (내부 파라미터 + 좌우 위치) — Kalibr, oCamS 때와 같은 절차
 
 ### 5-0. 준비 (한 번)
-- **도커 저장 위치를 /mnt/data 로** (루트가 99% 참): `sudo bash scripts/move_docker_to_mnt_data.sh`
+- **도커 저장 위치를 /mnt/data 로** (루트가 99% 참): `sudo bash scripts/move_docker_to_mnt_data.sh` 다음 `sudo bash scripts/move_containerd_to_mnt_data.sh` — 도커 29 는 이미지를 containerd 쪽(`/var/lib/containerd`)에 두므로 **둘 다** 옮겨야 한다. 확인 뒤 `sudo bash scripts/remove_docker_bak.sh`. (2026-10-24 이 PC 에서 완료: 루트 9.7 → 49 GB 여유)
 - **Kalibr 도커 이미지**: `scripts/kalibr/build_kalibr_docker.sh` (`external/kalibr` 클론 + 빌드, 시간 꽤 걸림)
 - **타깃**: `calibration/apriltag_grid.pdf` (AprilGrid 6×6) 를 **배율 100%** 로 인쇄해 판판한 판에 붙인다.
   **태그 한 변을 자로 재서** `calibration/target.yaml` 의 `tagSize` 를 그 값(m)으로. (oCamS 때 이 값이 틀려 baseline 이 25% 틀렸던 적 있음)
