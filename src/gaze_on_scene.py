@@ -802,6 +802,13 @@ def main():
     # docs/12 R,p_eye 캘리브용 — arm/eye_scene_calib_helper.py 가 보내는 3D점 수신.
     # 스테레오 깊이(검증 실패) 대신 태그+로봇팔 FK로 구한 점을 쓴다.
     arm_point_receiver = ArmPointReceiver()
+    # 2026-10-22: 씬 창 클릭 대신 arm/goto_sequence.py --gui 의 SPACE 로 점을 찍는다 (UDP "record").
+    # 창이 여러 개라 클릭이 엉뚱한 창에 들어가 두 바퀴(20점)가 통째로 날아갔다.
+    import socket as _socket
+    record_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    record_sock.bind(("127.0.0.1", 55060))
+    record_sock.setblocking(False)
+    record_req = None
     print(f"[R,p_eye] 팔 기반 3D점 수신 대기: {ArmPointReceiver.DEFAULT_PORT} "
           "(arm/eye_scene_calib_helper.py 필요)")
 
@@ -1121,24 +1128,77 @@ def main():
                     print(f"[depth] ({du},{dv}) = {measured_depth:.3f}m "
                           f"(유효 disparity {valid_n}개)")
 
+            try:
+                while True:
+                    _msg, _ = record_sock.recvfrom(64)
+                    if _msg.strip() == b"record":
+                        # 'e' 키가 한글 입력/창 포커스 때문에 안 먹어 20점이 통째로 날아갔다 -> 요청이 오면 켠다
+                        if not extrinsic_mode:
+                            extrinsic_mode, depth_mode, multi_mode = True, False, False
+                            print("[R,p_eye] 기록 요청으로 캘리브 모드 자동 ON")
+                        if tracker.eye_sphere_adjustment_enabled:
+                            print("[R,p_eye][주의] 안구 모델이 고정 안 됨 — 'f' 로 고정할 것")
+                        # SPACE 누르는 순간엔 키보드/모니터를 힐끗 본다 -> 0.8~1.8초 뒤 구간의 시선만 평균
+                        _now = time.monotonic()
+                        record_req = {"t0": _now + 0.8, "t1": _now + 1.8, "dirs": [], "pts": []}
+                        print("[R,p_eye] 기록 중 — 그리퍼를 계속 보세요 (1.8초)")
+                    elif _msg.strip() == b"drift":
+                        # 'o' 와 같다 — 키가 안 먹는 일이 잦아 goto 창(arm/goto_sequence.py --drift)에서 보낸다
+                        if extrinsic_R is None or extrinsic_p_eye is None:
+                            print("[R,p_eye-보정] R,p_eye 캘리브가 없다 — 먼저 e 로 찍거나 불러올 것.")
+                        else:
+                            _t0 = time.time()
+                            drift_capture = {"start": _t0 + 2.0, "end": _t0 + 3.0, "dirs": [], "pts": []}
+                            print("[R,p_eye-보정] 2초 뒤 1초간 측정 — 지금 그리퍼를 보세요.")
+                    elif _msg.strip() == b"reset":
+                        extrinsic_dirs.clear()
+                        extrinsic_points.clear()
+                        print("[R,p_eye] 새 캘리브 시작 — 이번 세션 점 비움 (저장 파일은 다음 6점째에 교체)")
+            except BlockingIOError:
+                pass
+            if record_req is not None:
+                _now = time.monotonic()
+                if record_req["t0"] <= _now <= record_req["t1"]:
+                    if smooth_dir is not None:
+                        record_req["dirs"].append(smooth_dir.copy())
+                    _pt = arm_point_receiver.latest_valid()
+                    if _pt is not None:
+                        record_req["pts"].append(_pt)
+                elif _now > record_req["t1"]:
+                    _dirs, _pts = np.asarray(record_req["dirs"]), np.asarray(record_req["pts"])
+                    record_req = None
+                    if len(_dirs) < 5 or len(_pts) < 3:
+                        print(f"[R,p_eye] 기록 실패 — 시선 {len(_dirs)}개 / 팔 3D점 {len(_pts)}개 "
+                              "(태그 3장 이상 보이게, 눈이 잡히게) — 다시 SPACE")
+                    else:
+                        _m = _dirs.mean(axis=0)
+                        _m /= np.linalg.norm(_m)
+                        _spread = float(np.degrees(np.arccos(np.clip(_dirs @ _m / np.linalg.norm(_dirs, axis=1), -1, 1))).max())
+                        if _spread > 2.0:
+                            print(f"[R,p_eye] 기록 실패 — 그 사이 시선이 {_spread:.1f}° 흔들림 (2° 이하여야) — 그리퍼만 보고 다시 SPACE")
+                        else:
+                            click_state["extrinsic_pending"] = (-1, -1)
+                            click_state["override"] = (_m, tuple(np.median(_pts, axis=0)), _spread)
             if click_state["extrinsic_pending"] is not None:
                 eu, ev = click_state["extrinsic_pending"]
                 click_state["extrinsic_pending"] = None
-                if smooth_dir is None:
+                _ov = click_state.pop("override", None)
+                if _ov is None and smooth_dir is None:
                     print("[R,p_eye] 아직 시선벡터가 없다 — 눈을 굴려 모델을 세우고 다시.")
                 else:
                     # 2026-09-27: 스테레오 깊이(검증 실패, docs/12) 대신 태그+로봇팔 FK로
                     # 구한 3D점을 쓴다. 클릭한 화면 픽셀(eu,ev)은 이제 X 계산에 안 쓰이고,
                     # "지금 응시 중"이라는 트리거로만 쓴다 — 그리퍼를 직접 응시할 것.
-                    arm_pt = arm_point_receiver.latest_valid()
+                    arm_pt = _ov[1] if _ov is not None else arm_point_receiver.latest_valid()
                     if arm_pt is None:
                         print("[R,p_eye] 팔 기반 3D점 없음 — arm/eye_scene_calib_helper.py 떠있는지, "
                               "태그가 보이는지 확인.")
                     else:
                         X = np.array(arm_pt, dtype=np.float64)
-                        extrinsic_dirs.append(smooth_dir.copy())
+                        extrinsic_dirs.append(_ov[0] if _ov is not None else smooth_dir.copy())
                         extrinsic_points.append(X)
-                        print(f"[R,p_eye] 포인트 추가 #{len(extrinsic_dirs)}: X={np.round(X, 3)}")
+                        print(f"[R,p_eye] 포인트 추가 #{len(extrinsic_dirs)}: X={np.round(X, 3)}"
+                              + (f" (1초 평균, 흔들림 {_ov[2]:.1f}°)" if _ov is not None else ""))
                         if len(extrinsic_dirs) >= 6:
                             try:
                                 extrinsic_R, extrinsic_p_eye, extrinsic_residuals = \

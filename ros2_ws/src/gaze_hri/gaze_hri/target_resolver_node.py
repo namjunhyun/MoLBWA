@@ -49,7 +49,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 import tf2_ros
 from gaze_hri_msgs.msg import Fixation, GazeTarget
-from geometry_msgs.msg import PoseArray
+from geometry_msgs.msg import PointStamped, PoseArray
 from rclpy.node import Node
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -140,6 +140,15 @@ class TargetResolver(Node):
         self.create_subscription(Fixation, "/gaze/fixation", self.on_fixation, 10)
         self.create_subscription(String, "/task/expected_role", self.on_role, 10)
         self.create_subscription(PoseArray, "/objects/poses", self.on_objects, 10)
+        # 2026-10-22: gaze_bridge 가 광선을 물체에 붙여(ray_snap) 보내면 응시점 = 물체 중심이라
+        # "광선 -> 물체" 보정(놓을 때 씀)이 0 으로 배워진다. 붙이기 전 광선 점을 따로 받아 그걸로 배운다.
+        self._ray_raw = None
+        self._last_pick_xy = None
+        self.declare_parameter("place_snap_objects", False)
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        self.create_subscription(PointStamped, "/gaze/ray_point",       # gaze_bridge 가 BEST_EFFORT 로 낸다
+                                 lambda m: setattr(self, "_ray_raw", (m, time.time())),
+                                 QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
 
         self.pub_target = self.create_publisher(GazeTarget, "/gaze/target", 10)
         self.pub_marker = self.create_publisher(MarkerArray, "/gaze/target_markers", 10)
@@ -276,7 +285,13 @@ class TargetResolver(Node):
             # 그대로 수직 투영한다. 스냅에 실패해 응시점을 쓰는 경우에만 광선을 쓴다.
             if target.snapped:
                 on_plane = project_onto_plane(base, self.plane)
-                self._store_pick_correction(p, origin_base, on_plane + n * self.grasp_height)
+                p_corr = p
+                if self._ray_raw is not None and time.time() - self._ray_raw[1] < 0.5:
+                    m = self._ray_raw[0]
+                    q = self.to_base([m.point.x, m.point.y, m.point.z], m.header.frame_id)
+                    if q is not None:
+                        p_corr = np.asarray(q, dtype=float)
+                self._store_pick_correction(p_corr, origin_base, on_plane + n * self.grasp_height)
             else:
                 on_plane = self._gaze_to_table(p, origin_base)
             pull = float(self.get_parameter("pick_pull_in_m").value)
@@ -287,7 +302,23 @@ class TargetResolver(Node):
             final = on_plane + n * self.grasp_height
 
         else:  # place
-            if self.place_slots:
+            # 2026-10-22: 놓을 곳도 광선이 지나는 물체(= 컵 -> 따르기)면 그 물체 위치 그대로. 머리가 낮아
+            # 광선-책상 교점은 컵보다 18~26cm 뒤에 찍혀 "팔이 안 닿는 빈 곳"이 됐다. 집기로 고른 물체는 뺀다.
+            obj = None
+            if bool(self.get_parameter("place_snap_objects").value) and self.objects:
+                keep = self.objects
+                if self._last_pick_xy is not None:
+                    self.objects = [o for o in keep
+                                    if float(np.hypot(o[0] - self._last_pick_xy[0], o[1] - self._last_pick_xy[1])) > 0.05]
+                try:
+                    obj = self._snap_to_object(p, origin_base) if self.objects else None
+                finally:
+                    self.objects = keep
+            if obj is not None:
+                on_plane = project_onto_plane(obj, self.plane)
+                target.snapped = True
+                target.label = "object"
+            elif self.place_slots:
                 slot = self._snap_to_slot(p, origin_base)
                 if slot is None:
                     return
@@ -303,6 +334,8 @@ class TargetResolver(Node):
             final = on_plane + n * (self.grasp_height + self.place_clearance)
 
         target.point.x, target.point.y, target.point.z = map(float, final)
+        if self.expected_role == "pick":
+            self._last_pick_xy = (float(final[0]), float(final[1]))
         self.pub_target.publish(target)
         self._publish_marker(final, self.expected_role)
 

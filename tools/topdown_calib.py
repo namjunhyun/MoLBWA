@@ -158,7 +158,12 @@ def main():
     bus = So101Bus(cfg["port"], cfg["servo_ids"])
     try:
         q_now = m.to_rad(bus.ticks())
-        legs = plan(q_now[:4], tip, a.tip_z, a.lift, a.high_z or None)
+        # 2026-10-22: 휴식자세(접힘)는 모델상 손가락 끝이 책상 아래라 첫 경로가 검사에 걸린다
+        # -> 먼저 home 으로 펴고 거기서 계획 (arm_server 와 같은 처리)
+        HOME_Q = [0.0, 1.83, -2.121, 0.291]
+        start_from_home = float(forward_kinematics(q_now[:4], tip)[2]) < a.min_tip_z
+        legs = plan(HOME_Q if start_from_home else q_now[:4], tip, a.tip_z, a.lift,
+                    a.high_z or None)
         bad = [(xy, l1, l2) for xy, _, _, l1, l2 in legs if min(l1, l2) < a.min_tip_z]
         print(f"캘리브 지점 {len(legs)}개, 손가락 끝 책상 위 {a.tip_z * 100:.1f}cm")
         for xy, l1, l2 in bad:
@@ -169,9 +174,11 @@ def main():
         if a.check:
             return 0
 
+        # 2026-10-22: GUI(control_panel)와 같은 1280x720 MJPG — 해상도가 다르면 화각이 달라 H 가 안 맞는다
         cap = cv2.VideoCapture(a.cam, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         if not cap.isOpened():
             sys.exit(f"카메라 {a.cam} 열기 실패")
         win = "topdown calib - click midpoint of finger tips"
@@ -181,6 +188,11 @@ def main():
 
         bus.enable()
         grip = cfg["zero_ticks"][5] + int(0.8 / (2 * math.pi / 4096)) * cfg["signs"][5]
+        if start_from_home:
+            print("휴식자세에서 시작 — 먼저 home 으로 폅니다")
+            t = m.to_ticks(HOME_Q + [0.0, 0.0])
+            t[4], t[5] = bus.last_goal[4], grip
+            move_smooth(bus, t, max_deg_s=a.speed)
         pix, world = [], []
         pix_all, xyz_all = [], []
         for i, ((x, y, z), q_up, q_dn, _, _) in enumerate(legs):
@@ -249,7 +261,7 @@ def main():
             os.rename(OUT, bak)
             print(f"기존 파일 백업: {bak}")
         cam = solve_camera(pix_all, xyz_all)
-        yaml.safe_dump({**cam,
+        yaml.safe_dump({**cam, "image_size": [1280, 720],
                         "H": H.tolist(), "reproj_error_mm": float(per.mean()), "loo_error_mm": float(np.mean(loo)),
                         "num_points": len(pix), "reference": "midpoint of finger tips",
                         "tip_z_m": a.tip_z, "camera_index": a.cam,

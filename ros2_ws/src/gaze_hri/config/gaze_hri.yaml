@@ -205,8 +205,10 @@ control_panel:
     # topdown_click 과 동시에 띄우면 카메라를 두 번 열게 된다.
     input_source: "mouse"      # mouse | gaze
     camera_index: 0
-    width: 640
-    height: 480
+    width: 1280                # 2026-10-22: 640x480 -> 1280x720 MJPG (1.5배 해상도, 좌우 더 넓음). 호모그래피는 tools/topdown_to_720p.py 로 환산
+    height: 720
+    fourcc: "MJPG"             # YUYV 1280x720 은 10fps
+    yolo_imgsz: 1280           # 2026-10-22: 화면(1280x720) 그대로 검출. 640 이면 컵이 대부분 프레임에서 빠졌다
     sidebar_width: 320
     table_z: 0.0
     base_frame: "base_link"

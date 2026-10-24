@@ -51,6 +51,8 @@ class PanelState:
     source: str = "mouse"
     objects: list = field(default_factory=list)   # [((u,v), (x,y), contour), ...]
     pointer_px: tuple = None          # 화면 위 시선/커서 픽셀
+    ray_px: list = None               # 2026-10-22 시선 광선 (책상 위 25cm, 0cm) 화면 두 점
+    snapped_index: int = -1           # 광선이 붙은 물체 (objects 순서), -1 = 없음
     pointer_holding: bool = False
     hold_frac: float = 0.0            # 마우스 클릭 고정 진행률
     dwell_progress: float = 0.0
@@ -102,6 +104,7 @@ def render(frame, st, hud, homography):
         _draw_arm_tip(view, st, hud, homography)
         for homo_o, tcp_o, name_o in st.other_arms:
             _draw_arm_tip(view, st, hud, homo_o, tcp_o, name_o)
+        _draw_ray(view, st, hud)
         _draw_pointer(view, st, hud, homography)
         if not st.calibrated:
             _draw_needs_calibration(view, hud)
@@ -276,6 +279,21 @@ def _draw_arm_tip(view, st, hud, homo, tcp=None, name=None):
     hud.chip(view, (u, v + 12), hud.label(f"팔 끝 {name}" if name else "팔 끝",
                                           f"TCP {name}" if name else "TCP"),
              (250, 250, 250), 11, anchor="cb", alpha=0.6)
+
+
+GAZE_RAY = (0, 140, 255)   # 주황 = 안경 시선 (10-01 탑다운 창과 같은 색)
+
+
+def _draw_ray(view, st, hud):
+    """시선 광선(머리 -> 책상)과 광선이 지나는 물체. 선택은 이 광선-물체 거리로 한다."""
+    if st.ray_px:
+        a, b = st.ray_px
+        cv2.line(view, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), GAZE_RAY, 2, cv2.LINE_AA)
+    k = st.snapped_index
+    if 0 <= k < len(st.objects):
+        u, v = st.objects[k][0]
+        cv2.circle(view, (int(u), int(v)), 34, GAZE_RAY, 3, cv2.LINE_AA)
+        hud.chip(view, (u, v + 38), hud.label("광선", "RAY"), GAZE_RAY, 12, bold=True, anchor="ct")
 
 
 def _draw_pointer(view, st, hud, homo):

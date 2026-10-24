@@ -54,6 +54,8 @@ def main():
     ap.add_argument("--size-mm", type=float, default=60.0,
                     help="검은 사각형 한 변(mm). 검출 시 tag_size 로 넘길 값과 같아야 한다.")
     ap.add_argument("--ids", type=int, nargs="+", default=[0, 1, 2, 3])
+    ap.add_argument("--quiet-cells", type=float, default=QUIET_CELLS,
+                    help="흰 여백(셀). 최소 1. A4 에 70mm x 4개를 넣으려면 1")
     ap.add_argument("--dpi", type=int, default=600)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -70,7 +72,7 @@ def main():
     draw = ImageDraw.Draw(page)
 
     cell_mm = args.size_mm / TAG_CELLS
-    quiet_mm = cell_mm * QUIET_CELLS
+    quiet_mm = cell_mm * max(1.0, args.quiet_cells)
     block_mm = args.size_mm + 2 * quiet_mm      # 태그 + 여백 한 덩어리
 
     n = len(args.ids)
@@ -111,8 +113,9 @@ def main():
     try:
         title_font = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", mm2px(5.0, dpi))
+        # 안내문이 한글이라 DejaVu 로는 네모로 깨진다
         small_font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", mm2px(3.5, dpi))
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", mm2px(3.5, dpi))
     except OSError:
         title_font = small_font = ImageFont.load_default()
 

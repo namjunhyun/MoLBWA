@@ -49,11 +49,11 @@ import cv2
 import numpy as np
 import rclpy
 from gaze_hri_msgs.msg import Fixation, GazeTarget
-from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Empty, Float32, String
+from std_msgs.msg import Bool, Empty, Float32, Int32, String
 
 from std_msgs.msg import Float64MultiArray
 
@@ -78,6 +78,12 @@ class ControlPanel(Node):
         self.declare_parameter("ocams", False)
         self.declare_parameter("width", 640)
         self.declare_parameter("height", 480)
+        self.declare_parameter("fourcc", "")
+        # 2026-10-22: 1280x720 화면을 640 으로 줄여 넣으니 컵이 75% 프레임에서 안 잡혔다 -> 화면 크기 그대로
+        self.declare_parameter("yolo_imgsz", 640)
+        # 2026-10-22: 화면 녹화. 폴더를 주면 GUI 화면(탑다운 + 광선·PICK/PLACE + 사이드바)을 15fps avi 로 남긴다
+        self.declare_parameter("record_dir", "")
+        self._rec, self._rec_t, self._rec_path = None, 0.0, None       # 2026-10-22: 탑다운 1280x720 은 "MJPG" (YUYV 는 10fps)
         self.declare_parameter("sidebar_width", 320)
         self.declare_parameter("table_z", 0.0)
         self.declare_parameter("base_frame", "base_link")
@@ -153,8 +159,9 @@ class ControlPanel(Node):
                 self.get_parameter("yolo_classes").value,
                 self.get_parameter("min_area").value,
                 logger=self.get_logger(),
+                imgsz=int(self.get_parameter("yolo_imgsz").value),
                 anchor_radius=self.get_parameter("object_radius").value)
-            self.get_logger().info("물체 검출: YOLO")
+            self.get_logger().info(f"물체 검출: YOLO (입력 {int(self.get_parameter('yolo_imgsz').value)})")
         else:
             self.detector = ObjectDetector(
                 self.get_parameter("hsv_lower").value,
@@ -182,8 +189,11 @@ class ControlPanel(Node):
             self.cap, cam_idx = find_camera(
                 self.get_parameter("camera_index").value,
                 self.get_parameter("width").value,
-                self.get_parameter("height").value)
+                self.get_parameter("height").value,
+                fourcc=self.get_parameter("fourcc").value)
             self.get_logger().info(f"카메라 {cam_idx} 사용")
+        self._check_image_size(self.homography, "A" if not self.get_parameter("arm_label").value
+                               else self.get_parameter("arm_label").value)
 
         # 캘리브레이션 (GUI 안에서 바로 한다 — 카메라를 두 프로그램이 다투지 않도록)
         self.calib = None
@@ -214,6 +224,12 @@ class ControlPanel(Node):
         else:
             self.create_subscription(PointStamped, "/gaze/point_raw",
                                      self.on_gaze_point, qos)
+            # 2026-10-22: 10-01 탑다운 창처럼 광선을 그린다 (머리 -> 스냅 전 응시점) + 광선이 붙은 물체
+            self.create_subscription(PoseStamped, "/head/pose", self.on_head, qos)
+            self.create_subscription(PointStamped, "/gaze/ray_point", self.on_ray_point, qos)
+            self.create_subscription(Int32, "/gaze/snapped", self.on_snapped, qos)
+        self._head = self._ray_pt = None
+        self._snapped = (-1, 0.0)
 
         self.create_subscription(Fixation, "/gaze/fixation", self.on_fixation, 10)
         self.create_subscription(Float32, "/gaze/dwell_progress", self.on_progress, qos)
@@ -235,6 +251,7 @@ class ControlPanel(Node):
             if not ok:
                 self.get_logger().error(f"팔 {name} 호모그래피를 못 읽었습니다 ({why})")
                 continue
+            self._check_image_size(h, name)
             entry = [name, h, None]
             self.other_arms.append(entry)
             self.create_subscription(JointState, topic,
@@ -274,6 +291,38 @@ class ControlPanel(Node):
     def on_gaze_point(self, msg: PointStamped):
         """시선 모드: 들어온 점을 화면 위치로 되돌려 표시한다."""
         self.gaze_px = self.homography.to_pixel(msg.point.x, msg.point.y)
+
+    def on_head(self, msg):
+        p = msg.pose.position
+        self._head = (np.array([p.x, p.y, p.z]), time.time())
+
+    def on_ray_point(self, msg):
+        self._ray_pt = (np.array([msg.point.x, msg.point.y, msg.point.z]), time.time())
+
+    def on_snapped(self, msg):
+        self._snapped = (int(msg.data), time.time())
+
+    def _ray_pixels(self, now):
+        """머리 -> 응시점 광선의 책상 위 25cm ~ 0cm 구간을 화면 픽셀 두 점으로."""
+        if self._head is None or self._ray_pt is None:
+            return None
+        if now - self._head[1] > 0.5 or now - self._ray_pt[1] > 0.5:
+            return None
+        o, d = self._head[0], self._ray_pt[0] - self._head[0]
+        if abs(d[2]) < 1e-6:
+            return None
+        tz = float(self.get_parameter("table_z").value)
+        seg = []
+        for z in (0.25, 0.0):
+            t = (tz + z - o[2]) / d[2]
+            if t <= 0:
+                return None
+            w = o + t * d
+            q = self.homography.to_pixel(float(w[0]), float(w[1]))
+            if q is None:
+                return None
+            seg.append((float(np.clip(q[0], -4000, 6000)), float(np.clip(q[1], -4000, 6000))))
+        return seg
 
     def on_progress(self, msg: Float32):
         self.dwell_progress = float(msg.data)
@@ -350,7 +399,7 @@ class ControlPanel(Node):
         lo, hi = band
         homs = [(self.get_parameter("arm_label").value or "", self.homography)] + \
                [(n, h) for n, h, _ in self.other_arms]
-        labels = list(getattr(self.detector, "last_labels", []))
+        labels = list(getattr(self, "_obj_labels", []))
 
         def dists(u, v):
             out_ = []
@@ -378,7 +427,7 @@ class ControlPanel(Node):
             ds = dists(u, v)
             txt = " ".join(f"{n}{r * 100:.0f}" for n, r in ds if r is not None) + "cm"
             if bottle_r is not None and i < len(labels) and labels[i] == "cup":
-                ok = any(r is not None and 0.23 <= r - 0.03 <= 0.40
+                ok = any(r is not None and 0.23 <= r <= 0.40
                          and bottle_r.get(n) is not None and bottle_r[n][1]
                          for n, r in ds)
                 out.append((txt + (" 따르기 OK" if ok else " 따르기 X"), ok))
@@ -569,6 +618,17 @@ class ControlPanel(Node):
         self.notice = self.hud.label(ko, en)
         self.notice_until = time.time() + seconds
 
+    def _check_image_size(self, h, name):
+        """호모그래피 해상도 != 카메라 해상도면 좌표가 조용히 틀린다 (2026-10-22, 720p 환산)."""
+        size = getattr(h, "image_size", None)
+        want = [int(self.get_parameter("width").value), int(self.get_parameter("height").value)]
+        if size is None:
+            self.get_logger().warn(f"팔 {name} 호모그래피에 image_size 가 없습니다 — {want} 로 캘리브한 건지 확인하세요")
+        elif list(size) != want:
+            raise RuntimeError(f"팔 {name} 호모그래피는 {size} 로 캘리브됐는데 카메라는 {want} 입니다. "
+                               "gaze_hri.yaml control_panel width/height 를 맞추거나 "
+                               "tools/topdown_to_720p.py 로 환산하세요.")
+
     # ==================================================================
     # 메인 루프
     # ==================================================================
@@ -593,15 +653,19 @@ class ControlPanel(Node):
         if self.mode == "calib":
             self.objects = []
         else:
-            self.objects = (self.detector.detect(frame, self.homography)
-                            if self.detect_on else [])
+            if self.detect_on:
+                dets = self.detector.detect(frame, self.homography)
+                self.objects = self._persist_objects(dets, list(getattr(self.detector, "last_labels", [])))
+            else:
+                self.objects, self._tracks, self._obj_labels = [], [], []
             if self.detect_on and self.homography.ready:
                 self.publish_objects()
             if self.source == "mouse":
                 self.publish_mouse_point(now)
 
-        cv2.imshow(WIN, render(frame, self.build_state(now), self.hud,
-                               self.homography))
+        view = render(frame, self.build_state(now), self.hud, self.homography)
+        cv2.imshow(WIN, view)
+        self._record(view, now)
         raw = cv2.waitKeyEx(1)
         if raw != -1:
             # 화살표 (GTK/Qt 코드) -> 따르기 보정 입구 조정. 일반 키는 아래 바이트로
@@ -626,7 +690,7 @@ class ControlPanel(Node):
         os.makedirs(d, exist_ok=True)
         base = os.path.join(d, time.strftime("snap_%m%d_%H%M%S"))
         cv2.imwrite(base + ".png", self.frame)
-        labels = list(getattr(self.detector, "last_labels", []))
+        labels = list(getattr(self, "_obj_labels", []))
         objs = [{"px": [float(u), float(v)], "xy": [float(x), float(y)],
                  "box": c.reshape(-1, 2).tolist() if c is not None else None,
                  "label": labels[i] if i < len(labels) else None}
@@ -647,10 +711,53 @@ class ControlPanel(Node):
         self.pub_objects.publish(pa)
         self.pub_pour_calib.publish(Bool(data=self.pour_calib))
         self.pub_grasp_calib.publish(Bool(data=self.grasp_calib))
-        labels = list(getattr(self.detector, "last_labels", []))
+        labels = list(getattr(self, "_obj_labels", []))
         if len(labels) != len(pa.poses):
             labels = ["object"] * len(pa.poses)
+        labels = self._vote_labels([(x, y) for (_, (x, y), _) in self.objects], labels)
         self.pub_labels.publish(String(data=json.dumps(labels)))
+
+    def _persist_objects(self, dets, labels, hold=1.5, radius=0.04):
+        """2026-10-22: 검출이 한두 프레임 끊겨도(물병 ~60% 프레임만 잡힘) 물체를 hold 초 유지한다.
+        2초 응시가 끝나는 순간 물병이 빠져 있으면 "물체 특정 못함"으로 선택이 거부됐다.
+        같은 자리(radius 안)에서 다시 잡히면 같은 물체로 잇는다. 순서도 고정돼 시선 스냅 번호가 안 바뀐다."""
+        now = time.time()
+        tracks = getattr(self, "_tracks", [])
+        if len(labels) != len(dets):
+            labels = ["object"] * len(dets)
+        used = set()
+        for (uv, xy, c), lab in zip(dets, labels):
+            best, bd = None, radius
+            for i, t in enumerate(tracks):
+                d = math.hypot(t["xy"][0] - xy[0], t["xy"][1] - xy[1])
+                if i not in used and d < bd:
+                    best, bd = i, d
+            if best is None:
+                tracks.append({"uv": uv, "xy": xy, "c": c, "lab": lab, "t": now})
+                used.add(len(tracks) - 1)
+            else:
+                tracks[best].update(uv=uv, xy=xy, c=c, lab=lab, t=now)
+                used.add(best)
+        self._tracks = [t for t in tracks if now - t["t"] <= hold]
+        self._obj_labels = [t["lab"] for t in self._tracks]
+        return [(t["uv"], t["xy"], t["c"]) for t in self._tracks]
+
+    def _vote_labels(self, xys, labels, window=1.0, radius=0.04):
+        """2026-10-22: 라벨 흔들림(cup <-> vase <-> bottle) 대비 — 최근 1초 동안 같은 자리(4cm 안)에서
+        나온 라벨 중 가장 많은 것으로. 클릭 순간 한 프레임 라벨로 따르기/거부가 갈리지 않게."""
+        now = time.time()
+        hist = getattr(self, "_label_hist", [])
+        hist = [h for h in hist if now - h[0] <= window]
+        hist += [(now, xy, lab) for xy, lab in zip(xys, labels)]
+        self._label_hist = hist
+        out = []
+        for xy in xys:
+            votes = {}
+            for _, hxy, lab in hist:
+                if math.hypot(hxy[0] - xy[0], hxy[1] - xy[1]) < radius:
+                    votes[lab] = votes.get(lab, 0) + 1
+            out.append(max(votes, key=votes.get) if votes else "object")
+        return out
 
     def publish_mouse_point(self, now):
         holding = now < self.held_until and self.held_px is not None
@@ -695,6 +802,9 @@ class ControlPanel(Node):
             source=self.source,
             objects=self.objects,
             pointer_px=px,
+            ray_px=self._ray_pixels(now) if self.source != "mouse" else None,
+            snapped_index=(self._snapped[0] if self.source != "mouse"
+                           and now - self._snapped[1] < 0.5 else -1),
             pointer_holding=holding,
             hold_frac=frac,
             dwell_progress=self.dwell_progress,
@@ -723,7 +833,25 @@ class ControlPanel(Node):
         )
 
     # ------------------------------------------------------------------
+    def _record(self, view, now):
+        d = str(self.get_parameter("record_dir").value)
+        if not d or now - self._rec_t < 1.0 / 15:
+            return
+        if self._rec is None:
+            d = os.path.expanduser(d)
+            os.makedirs(d, exist_ok=True)
+            # MJPG avi — GUI 를 강제로 꺼도 앞부분은 재생된다 (mp4 는 끝 정리가 안 되면 통째로 깨짐)
+            self._rec_path = os.path.join(d, time.strftime("topdown_%m%d_%H%M%S.avi"))
+            self._rec = cv2.VideoWriter(self._rec_path, cv2.VideoWriter_fourcc(*"MJPG"), 15.0,
+                                        (view.shape[1], view.shape[0]))
+            self.get_logger().info(f"화면 녹화 시작: {self._rec_path}")
+        self._rec.write(view)
+        self._rec_t = now
+
     def destroy_node(self):
+        if self._rec is not None:
+            self._rec.release()
+            self.get_logger().info(f"화면 녹화 저장: {self._rec_path}")
         if hasattr(self.detector, "close"):
             self.detector.close()
         try:

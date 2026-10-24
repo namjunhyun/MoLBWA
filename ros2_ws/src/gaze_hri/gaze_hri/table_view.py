@@ -47,6 +47,8 @@ class TableHomography:
             self.set(H)
             self.reproj_error_mm = data.get("reproj_error_mm")
             self.num_points = data.get("num_points")
+            # 2026-10-22: 캘리브한 해상도 [w, h]. 없으면 모름(None) — 옛 파일은 640x480
+            self.image_size = data.get("image_size")
         except Exception as exc:                        # noqa: BLE001
             return False, f"읽기 실패: {exc}"
         return True, None
@@ -432,22 +434,31 @@ def hsv_range_from_pixel(frame, u, v, window=5, h_margin=10,
     return lower, upper, (hue, sat, val)
 
 
-def find_camera(preferred=0, width=640, height=480, max_index=8):
+def find_camera(preferred=0, width=640, height=480, max_index=8, fourcc=""):
     """카메라를 연다. preferred 가 안 되면 다른 인덱스를 훑는다.
 
     실기에서 USB 를 다시 꽂으면 인덱스가 바뀌는 일이 잦다.
     preferred 가 음수면 처음부터 자동 탐색한다.
+    fourcc: 탑다운 1280x720 은 YUYV 면 10fps 라 "MJPG" 로 연다 (2026-10-22). 빈 값이면 기본.
     """
     candidates = ([] if preferred is None or int(preferred) < 0
                   else [int(preferred)])
     candidates += [i for i in range(max_index) if i not in candidates]
     tried = []
     for idx in candidates:
-        cap = cv2.VideoCapture(idx)
+        # fourcc 지정 시 V4L2 로 연다 — 기본(GStreamer) 백엔드는 FOURCC 를 무시해서 YUYV 10fps 로 열렸다
+        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2) if fourcc else cv2.VideoCapture(idx)
         if cap.isOpened():
+            if fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-            ok, _ = cap.read()
+            ok, frame = cap.read()
+            if ok and frame.shape[:2] != (int(height), int(width)):
+                # 호모그래피는 해상도(화각)마다 다르다 — 다른 크기로 열리면 좌표가 조용히 틀린다
+                cap.release()
+                tried.append(f"{idx}({frame.shape[1]}x{frame.shape[0]})")
+                continue
             if ok:
                 return cap, idx
         cap.release()

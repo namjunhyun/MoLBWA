@@ -330,7 +330,21 @@ class ArmServer(Node):
         # side 순서: 컵 뒤 standoff 지점 위(high_z) -> 그대로 내려감 -> 수평으로 밀고 들어감 ->
         # 잡기 -> 수직으로 들기(high_z) -> 놓을 곳 위 -> 내려놓기 -> 열기 -> 뒤로 빠짐 -> 위로.
         self.declare_parameter("grasp_mode", "top")
-        self.declare_parameter("side_standoff", 0.09)     # 컵 중심 -> 밀고 들어가기 시작점 [m]
+        self.declare_parameter("pour_wait_timeout", 150.0)   # 병 들고 컵 팔 기다리는 최대 시간 [s]
+        self.declare_parameter("side_standoff", 0.09)
+        # 2026-10-22: 내려갈 때만 이만큼 더 뒤에서 side_mid_z 까지 내려간 뒤 비스듬히 standoff 점으로.
+        # 9cm 뒤에서 곧장 내려가면 손가락 끝이 컵 테두리 0.5cm 옆을 지나 계속 쳤다 (팔 B, 사용자).
+        # standoff 자체를 11cm 로 늘리면 낮은 점이 받침대에 가까워 IK 불가(집기 37 -> 39cm~, 따르기 자리 못 감)
+        # 2026-10-22(2): 2cm 로도 쳤다 -> '닿는 데까지 최대한 뒤로' (사용자, 두 팔). 이 값은 최대치,
+        # 위치마다 pre_high·중간점 IK 가 풀리는 가장 먼 점을 1cm 단위로 고른다 (B: 37cm 컵 14cm, 44cm 21cm)
+        self.declare_parameter("side_descend_extra", 0.0)
+        # 2026-10-22: 컵은 밀면서 잡혀 손 안에서 기준점보다 ~6cm 앞에 있다 -> 놓으면 늘 6cm 바깥 (팔 A 6.0,
+        # 6.1, 5.8cm). 놓을 때 그만큼 안쪽을 목표로. 안쪽이라 놓은 뒤 9cm 뒤로는 못 빠져 2~5cm 중 닿는 만큼
+        self.declare_parameter("place_hold_offset", 0.0)
+        self.declare_parameter("place_hold_labels", ["cup"])
+        self.declare_parameter("place_retreat_max", 0.05)
+        self.declare_parameter("place_retreat_min", 0.02)
+        self.declare_parameter("side_mid_z", 0.10)     # 컵 중심 -> 밀고 들어가기 시작점 [m]
         self.declare_parameter("side_high_z", 0.20)       # 이동 높이 (TCP, 컵 높이 위) [m]
         self.declare_parameter("side_min_radius", 0.37)   # 이보다 가까우면 수평 자세 불가
         # 처짐 보정 (feetech 전용, FeetechBackend.settle)
@@ -387,6 +401,10 @@ class ArmServer(Node):
         # 2026-10-22: 집기 보정 — 닫기 직전에 멈춰 8/4/2/6 으로 손가락 가운데에 컵을 맞춘 차이를
         # 기록해서 이 팔의 집기·놓기에 더한다 (팔 A 가 컵을 옆으로 미세하게 빗나가 3번 빈손)
         self.declare_parameter("grasp_correction", True)
+        # 2026-10-22: 팔별 높이 보정 [m] — 집기·놓기 높이에 더한다. 팔 a 가 명령보다 ~2cm 낮게 다녀
+        # (탑다운 캘리브 때 손가락이 책상에 닿고, 4cm 집기에서 바닥에 닿을락 말락 — 사용자) +0.02.
+        # 임시값: 근본적으로는 높이를 재서 어깨 0점을 고칠 것.
+        self.declare_parameter("z_offset", 0.0)
         self.declare_parameter("homography_file", "")            # 이 팔의 탑다운 호모그래피 (입구 조정 방향)
         self.declare_parameter("pour_calib_deg", 80.0)           # 보정 멈춤 각도 (실제 따르는 자세)
         self.declare_parameter("nudge_step", 0.01)               # 8/4/2/6(화살표) 한 번 = 1cm
@@ -422,6 +440,8 @@ class ArmServer(Node):
         self.declare_parameter("grasp_margin", 0.08)      # rad
         self.declare_parameter("grasp_settle", 0.9)       # 닫고 나서 대기 [s]
         self.declare_parameter("min_grasp_load", 0)       # 0이면 부하 검사 안 함
+        self.declare_parameter("adaptive_held_gap", 0.02)    # 적응형 닫기 후 '물었음' 기준 (빈손 <= 0.009)
+        self.declare_parameter("adaptive_held_load", 100)    # 〃 그리퍼 부하 (빈손 <= 36, 가는 물병 116~) — 사용자 100
         self.declare_parameter("grasp_check", "gap")      # gap | load | none (2026-10-12)
         self.declare_parameter("max_grasp_retries", 3)
         self.declare_parameter("retry_offset", 0.006)     # 재시도 시 흔드는 폭 [m]
@@ -500,6 +520,12 @@ class ArmServer(Node):
 
         self._teleop_cmd = None
         self.create_subscription(String, "/teleop/cmd", self._on_teleop_cmd, 10,
+                                 callback_group=cb)
+        # 2026-10-22: 두 팔 동시 따르기 — 병 든 팔은 병을 들고 기다리다가, 컵 팔이 컵을 놓고 빠지기
+        # 시작하면 task_manager 가 "go[:x:y]"(컵 바닥 중심, 이 팔 base_link) 를 보낸다. "abort" 면 병 제자리.
+        self._gate = None
+        gate_topic = str(self.get_parameter("action_name").value).rsplit("/", 1)[0] + "/pour_gate"
+        self.create_subscription(String, gate_topic, lambda m: setattr(self, "_gate", m.data), 10,
                                  callback_group=cb)
 
         self._check_workspace_radius()
@@ -791,8 +817,13 @@ class ArmServer(Node):
         if adaptive and mode != "none":
             # 적응형: 무른 병은 눌려서 부하가 낮게 남을 수 있다 -> 명령보다 덜 닫혔거나(무언가
             # 끼었다) 부하가 있으면 물었음. 빈손이면 끝(gripper_full_close)까지 닫혀 둘 다 ~0.
+            # 2026-10-22: 가는 물병은 끝까지 닫혀 차이 0.040 / 부하 116 -> 기준(0.05, 120) 바로 밑이라 '빈손'
+            # 으로 보고 놓았다 다시 잡기를 반복 (팔 B). 오늘 실측: 빈손 15회 차이 <= 0.009, 부하 <= 36 /
+            # 물병 차이 >= 0.040, 부하 >= 116 -> 그 사이 기준
             mode = "adaptive"
-            held = gap > 0.05 or (load is not None and load >= min_load)
+            min_load = int(self.get_parameter("adaptive_held_load").value)
+            held = (gap > float(self.get_parameter("adaptive_held_gap").value)
+                    or (load is not None and load >= min_load))
         elif mode == "none":
             held = True
         elif mode == "load":
@@ -1055,7 +1086,12 @@ class ArmServer(Node):
     # ------------------------------------------------------------------
     def execute(self, goal_handle):
         self._cancel = False
+        self._gate = None
         g = goal_handle.request
+        # 2026-10-22: "pour_wait"/"pour_calib_wait" = 병을 들고 pour_gate 신호를 기다렸다가 따른다
+        task = getattr(g, "task", "") or ""
+        wait = task.endswith("_wait")
+        task = task[:-len("_wait")] if wait else task
         self._pick_label = getattr(g, "pick_label", "") or ""   # 물병이면 가까울 때 위에서 수직 접근
         result = PickPlace.Result()
 
@@ -1082,21 +1118,49 @@ class ArmServer(Node):
         self._moved = False          # 이번 목표에서 팔을 움직였나 (거부만 했으면 home 안 감)
         log_dir = os.path.expanduser(str(self.get_parameter("traj_log_dir").value))
         if log_dir and hasattr(self.backend, "start_log"):
-            path = os.path.join(log_dir, time.strftime("traj_%m%d_%H%M%S.csv"))
+            arm = self.get_parameter("arm_name").value or "arm"   # 두 팔이 같은 초에 시작하면 한 파일에 섞였다
+            path = os.path.join(log_dir, time.strftime(f"traj_%m%d_%H%M%S_{arm}.csv"))
             self.backend.start_log(path)
             self.get_logger().info(f"궤적 기록: {path}")
         try:
             pick = self.transform_to_base(g.pick, g.frame_id)
             place = self.transform_to_base(g.place, g.frame_id)
+            dz = float(self.get_parameter("z_offset").value)
+            if dz:
+                pick = pick + np.array([0.0, 0.0, dz])
+                if task not in ("pour", "pour_calib"):   # 따르기 place 는 컵 축(높이 무관)
+                    place = place + np.array([0.0, 0.0, dz])
+                self.get_logger().info(f"  팔별 높이 보정 {dz * 100:+.1f}cm")
+            # 2026-10-22: 집기 보정(xy)도 여기서 — 예전엔 _execute_side 안에서 더해서, 움직이기 전 검사는
+            # 보정 전 위치로 통과하고 보정 후 위치가 IK 불가라 home 까지 간 뒤 실패했다 (팔 B, 36.5cm)
+            go = self._grasp_offset()
+            self._grasp_cam_pick = np.array(pick, float)
+            if go is not None and np.linalg.norm(go) > 1e-6:
+                # 2026-10-22: 위치는 모두 물체 바닥 중심(카메라 검출점 + 이 팔 집기 보정)으로 통일 —
+                # 따르기의 컵 위치에도 같은 보정을 더한다 (예전엔 병에만 더해 컵과 기준이 달랐다)
+                pick = pick + np.array([go[0], go[1], 0.0])
+                place = place + np.array([go[0], go[1], 0.0])
+                self.get_logger().info(f"  집기 보정 적용: {np.round(go * 100, 1).tolist()} cm")
+            self._place_standoff = None
+            hold = float(self.get_parameter("place_hold_offset").value)
+            if (hold > 0.0 and task in ("", "grasp_calib")
+                    and self.get_parameter("grasp_mode").value == "side"
+                    and self._pick_label in list(self.get_parameter("place_hold_labels").value)):
+                u = np.array([place[0], place[1], 0.0]) / max(float(np.linalg.norm(place[:2])), 1e-9)
+                place = place - u * hold
+                self._place_standoff = self._place_retreat(place)
+                self.get_logger().info(
+                    f"  놓을 곳 {hold * 100:.0f}cm 안쪽으로 (손 안의 컵이 앞에 있음), 놓은 뒤 "
+                    f"{self._place_standoff * 100:.1f}cm 뒤로 빠짐")
             self.check_safe(pick, "집을")
             self.check_safe(place, "놓을")
-            if getattr(g, "task", "") in ("pour", "pour_calib"):
+            if task in ("pour", "pour_calib"):
                 self._pour_plan(pick, place)   # 안 되면 IKError (아직 안 움직임)
                 self._side_pitch(pick, "병", max_tilt_deg=POUR_MAX_GRASP_TILT)
             elif self.get_parameter("grasp_mode").value == "side":
                 # 2026-10-14: 움직이기 전에 집기/놓기 둘 다 닿는지 실제 IK 로 확인 (안 되면 다른 팔에게)
                 self._side_pitch(pick, "집을")
-                self._side_pitch(place, "놓을")
+                self._side_pitch(place, "놓을", standoff=self._place_standoff)
 
             self.get_logger().info(
                 f"base_link 기준 — 집기: {np.round(pick, 3)}, 놓기: {np.round(place, 3)}"
@@ -1117,12 +1181,12 @@ class ArmServer(Node):
                     result.message = "사용자 취소 — 그 자리에서 정지했습니다."
                     return result
 
-            if getattr(g, "task", "") in ("pour", "pour_calib"):
+            if task in ("pour", "pour_calib"):
                 return self._execute_pour(pick, place, fb, goal_handle, result,
-                                          calib=g.task == "pour_calib")
+                                          calib=task == "pour_calib", wait=wait)
             if self.get_parameter("grasp_mode").value == "side":
                 return self._execute_side(pick, place, fb, goal_handle, result,
-                                          grasp_calib=getattr(g, "task", "") == "grasp_calib")
+                                          grasp_calib=task == "grasp_calib")
 
             approach = float(self.get_parameter("approach_height").value)
             lift = float(self.get_parameter("lift_height").value)
@@ -1245,37 +1309,98 @@ class ArmServer(Node):
     # ------------------------------------------------------------------
     # 수평 옆 집기 (2026-10-12)
     # ------------------------------------------------------------------
-    def _side_points(self, p, label):
-        """p(파지점)의 반경 방향 u, 밀고 들어가기 시작점(낮은/높은), p 바로 위(높은)."""
+    def _side_points(self, p, label, standoff=None):
+        """p(파지점)의 반경 방향 u, 밀고 들어가기 시작점(낮은/높은), p 바로 위(높은).
+        standoff: 놓을 곳을 안쪽으로 당겼을 때 빠지는 거리 (그때는 집기 최소 거리 검사 안 함)."""
         r = float(np.linalg.norm(p[:2]))
         r_min = float(self.get_parameter(
             "vertical_min_radius" if self._vertical_ok() else "side_tilt_min_radius").value)
-        if r < r_min - 0.002:     # 판정은 task_manager 와 같은 값 (반올림 37.0 이 거부됐었다)
+        if standoff is None and r < r_min - 0.002:     # 판정은 task_manager 와 같은 값 (반올림 37.0 이 거부됐었다)
             raise IKError(f"{label} 위치가 받침대에서 {r * 100:.1f}cm — 옆 집기는 "
                           f"{r_min * 100:.0f}cm 이상이어야 한다 (그리퍼 20cm + 손목 한계)")
         u = np.array([p[0] / r, p[1] / r, 0.0])
-        d = float(self.get_parameter("side_standoff").value)
+        d = float(self.get_parameter("side_standoff").value) if standoff is None else standoff
         z_hi = float(self.get_parameter("side_high_z").value)
         pre_low = p - u * d
-        pre_high = np.array([pre_low[0], pre_low[1], z_hi])
+        far = pre_low - u * self._descend_extra(pre_low)
+        pre_high = np.array([far[0], far[1], z_hi])
         above = np.array([p[0], p[1], z_hi])
         return u, pre_low, pre_high, above
 
-    def _side_pitch(self, p, label="집을", max_tilt_deg=None):
+    def _descend_extra(self, pre_low):
+        """pre_low 에서 받침대 쪽으로 더 물러날 거리 — 높은 점(side_high_z)과 중간점(side_mid_z)이
+        둘 다 수평 그리퍼로 풀리는 가장 먼 거리 (최대 side_descend_extra, 1cm 단위)."""
+        e_max = float(self.get_parameter("side_descend_extra").value)
+        if e_max <= 0.0:
+            return 0.0
+        key = (self._key(pre_low), round(e_max, 3))
+        cache = self.__dict__.setdefault("_extra_cache", {})
+        if key in cache:
+            return cache[key]
+        r = float(np.linalg.norm(pre_low[:2]))
+        u = np.array([pre_low[0] / r, pre_low[1] / r, 0.0])
+        zs = (float(self.get_parameter("side_high_z").value),
+              max(float(self.get_parameter("side_mid_z").value), float(pre_low[2])))
+        best = 0.0
+        for k in range(int(round(e_max * 100)), 0, -1):
+            q = pre_low - u * (k / 100.0)
+            try:
+                for z in zs:
+                    solve_with_fallback([q[0], q[1], z], self.geo, pitch_candidates=[0.0])
+            except IKError:
+                continue
+            best = k / 100.0
+            break
+        cache[key] = best
+        return best
+
+    def _place_retreat(self, place):
+        """안쪽으로 당긴 놓을 곳에서 뒤로 빠질 거리: max~min 을 0.5cm 씩 줄이며 IK 가 풀리는 가장 큰 값."""
+        hi = float(self.get_parameter("place_retreat_max").value)
+        lo = float(self.get_parameter("place_retreat_min").value)
+        s = hi
+        while s >= lo - 1e-9:
+            try:
+                self._side_pitch(place, "놓을", standoff=s)
+                return s
+            except IKError:
+                s -= 0.005
+        raise IKError(f"놓을 위치 {np.round(place, 3).tolist()} 에서 뒤로 {lo * 100:.0f}cm 도 못 빠집니다")
+
+    def _side_mid(self, pre_low):
+        """테두리 높이를 지날 때 거치는 점 (더 뒤, side_mid_z). 더 물러날 수 없으면 None."""
+        e = self._descend_extra(pre_low)
+        if e <= 0.0:
+            return None
+        r = float(np.linalg.norm(pre_low[:2]))
+        m = pre_low - np.array([pre_low[0] / r, pre_low[1] / r, 0.0]) * e
+        m[2] = max(float(self.get_parameter("side_mid_z").value), pre_low[2])
+        return m
+
+    def _via_mid(self, pre_low, pitch, grip):
+        m = self._side_mid(pre_low)
+        if m is not None:
+            self.get_logger().info(
+                f"  물체 뒤 {(float(self.get_parameter('side_standoff').value) + self._descend_extra(pre_low)) * 100:.0f}cm, "
+                f"높이 {m[2] * 100:.0f}cm 을 거침")
+            self.move_to(m, pitch, grip, strict=True)
+
+    def _side_pitch(self, p, label="집을", max_tilt_deg=None, standoff=None):
         if not hasattr(self, "_vertical_at"):
             self._vertical_at = set()
         self._vertical_at.discard(self._key(p))
         """옆 집기 접근각. 수평(0)이 기본이고, 36cm 보다 가까워 수평으로 안 닿으면 10°, 20° 숙인다
         (2026-10-14: 수평 범위가 36~44cm 로 좁아 물병이 34.8cm 에서 계속 거부됐다).
         p, 뒤 접근점(낮은/높은) 셋 다 그 각도로 풀려야 한다."""
-        _, pre_low, pre_high, _ = self._side_points(p, label)
+        _, pre_low, pre_high, _ = self._side_points(p, label, standoff)
         for deg in self.get_parameter("side_pitch_options_deg").value:
             if max_tilt_deg is not None and abs(float(deg)) > max_tilt_deg + 1e-6:
                 continue
             pitch = math.radians(float(deg))
             try:
-                for q in (pre_high, pre_low, p):
-                    solve_with_fallback(list(q), self.geo, pitch_candidates=[pitch])
+                for q in (pre_high, self._side_mid(pre_low), pre_low, p):
+                    if q is not None:
+                        solve_with_fallback(list(q), self.geo, pitch_candidates=[pitch])
             except IKError:
                 continue
             if deg:
@@ -1336,7 +1461,16 @@ class ArmServer(Node):
             if attempt == 0:
                 fb("APPROACH_PICK", 0.1)
                 self.move_to(pre_high, pp, g_open, strict=True)
+                if getattr(self, "_grasp_calib", False):
+                    # 2026-10-22: 내려가기 **전에** 멈춰 맞춘다 — 내려가다 손가락이 컵 옆을 쳤다 (사용자)
+                    off = self._grasp_calib_stage(pre_high, pp)
+                    if off is None:
+                        return False
+                    d3 = np.array([off[0], off[1], 0.0])
+                    pick, pre_low, pre_high = pick + d3, pre_low + d3, pre_high + d3
+                    target = pick + nudges[0]
                 fb("DESCEND", 0.2)
+                self._via_mid(pre_low, pp, g_open)
                 self.move_to(pre_low, pp, g_open, strict=True)
             else:
                 self.get_logger().warn(f"파지 재시도 {attempt + 1}")
@@ -1344,9 +1478,6 @@ class ArmServer(Node):
                 self.move_to(pre_low + (target - pick), pp, g_open, strict=True)
             fb("INSERT", 0.3)
             self.move_to(target, pp, g_open, strict=True)
-            if attempt == 0 and getattr(self, "_grasp_calib", False):
-                if not self._grasp_calib_stage(target, pp):
-                    return False
             fb("GRASP", 0.4)
             if self.close_and_verify():
                 return True
@@ -1355,19 +1486,14 @@ class ArmServer(Node):
         return False
 
     def _execute_side(self, pick, place, fb, goal_handle, result, grasp_calib=False):
-        go = self._grasp_offset()
-        if go is not None and np.linalg.norm(go) > 1e-6:
-            self.get_logger().info(f"  집기 보정 적용: {np.round(go * 100, 1).tolist()} cm (집기·놓기)")
-            pick = pick + np.array([go[0], go[1], 0.0])
-            place = place + np.array([go[0], go[1], 0.0])
-        self._grasp_calib = grasp_calib
-        self._grasp_cam_pick = pick - (np.array([go[0], go[1], 0.0]) if go is not None else 0.0)
+        self._grasp_calib = grasp_calib          # 집기 보정은 execute 에서 이미 더함
         g_open = float(self.get_parameter("gripper_open").value)
         g_close = float(self.get_parameter("gripper_closed").value)
         _, _, _, pick_above = self._side_points(pick, "집을")
-        _, place_pre_low, place_pre_high, place_above = self._side_points(place, "놓을")
+        st = getattr(self, "_place_standoff", None)
+        _, place_pre_low, place_pre_high, place_above = self._side_points(place, "놓을", st)
         pp = self._side_pitch(pick)
-        lp = self._side_pitch(place, "놓을")
+        lp = self._side_pitch(place, "놓을", standoff=st)
 
         picked = self._side_pick(pick, fb)
         g_close = self.q[5]           # 실제로 쥔 명령을 유지 (적응형 닫기 — 물체마다 다르다)
@@ -1405,6 +1531,7 @@ class ArmServer(Node):
             self.move_to(place_above, 0.0, g_open, strict=True)     # 위에서 내려놨으면 위로 빠진다
         else:
             self.move_to(place_pre_low, lp, g_open, strict=True)
+            self._via_mid(place_pre_low, lp, g_open)
             self.move_to(place_pre_high, lp, g_open, strict=True)
         self.go_end()
 
@@ -1747,7 +1874,7 @@ class ArmServer(Node):
                 # 2026-10-14: 기울인 채 오래 멈추면 팔꿈치가 60°C 로 안전 정지했다 -> 55°C 부터 경고
                 t_hot = time.monotonic()
                 try:
-                    tmax = max(self.backend.bus.temps()) if hasattr(self.backend, "bus") else 0
+                    tmax = max([t for t in self.backend.bus.temps() if 0 < t <= 70] or [0]) if hasattr(self.backend, "bus") else 0   # 60 넘으면 드라이버가 안전 정지 -> 70 넘는 값은 통신 오류 (97, 150 이 떴다)
                 except Exception:
                     tmax = 0
                 if tmax >= 55:
@@ -1809,11 +1936,9 @@ class ArmServer(Node):
             self._stream_q_list([list(q[:4]) + [sign_s * theta]], g, 0.4)
             self.get_logger().info(f"[보정] 입구 오프셋 {np.round(offset * 100, 1).tolist()} cm")
 
-    def _execute_pour(self, bottle, cup, fb, goal_handle, result, calib=False):
+    def _execute_pour(self, bottle, cup, fb, goal_handle, result, calib=False, wait=False):
         g_open = float(self.get_parameter("gripper_open").value)
-        go = self._grasp_offset()          # 2026-10-22: 집기 보정은 물병 집기/내려놓기에도
-        if go is not None and np.linalg.norm(go) > 1e-6:
-            bottle = np.asarray(bottle, float) + np.array([go[0], go[1], 0.0])
+        # 집기 보정(xy)·높이 보정은 execute 에서 이미 병 위치에 더했다
         # 2026-10-14: 보정 때도 지금까지의 보정을 적용해서 시작한다 (적용 안 하면 먼 컵이 IK 로 거부됐다).
         # 기록은 '카메라 컵 기준 누적 오프셋' 이라 적용한 보정 + 이번에 옮긴 양으로 남긴다.
         plan = self._pour_plan(bottle, cup)   # 움직이기 전에 전부 검사
@@ -1862,6 +1987,38 @@ class ArmServer(Node):
             result.success, result.message = False, "들어 올리다 병을 놓쳤습니다."
             self.go_end()
             return result
+        if wait:
+            got = self._wait_gate(goal_handle, fb)
+            if got == "cancel":
+                self._end_cancel(goal_handle)
+                result.success, result.message = False, "사용자 취소 — 병을 든 채 정지했습니다."
+                return result
+            if got != "go":
+                self.get_logger().warn(f"따르기 대기 끝 ({got}) — 병을 제자리에 둡니다.")
+                self._put_bottle_back(bottle, up_here, above, g_hold, g_open, fb)
+                goal_handle.abort()
+                result.success, result.message = False, f"따르기 안 함 ({got}) — 병을 제자리에 두었습니다"
+                return result
+            if self._gate_cup is not None:
+                go = self._grasp_offset()
+                new = np.array([self._gate_cup[0], self._gate_cup[1], cup[2]])
+                if go is not None:
+                    new[:2] += go[:2]
+                self.get_logger().info(
+                    f"  컵 다시 검출: {np.round(new[:2], 3).tolist()} (계획 {np.round(cup[:2], 3).tolist()}, "
+                    f"{np.linalg.norm(new[:2] - np.asarray(cup[:2])) * 100:.1f}cm 차이) — 다시 계획")
+                try:
+                    plan = self._pour_plan(bottle, new)
+                    segs, cfg, cup = plan["qsegs"], plan["cfg"], new
+                    if calib:
+                        base["cup_cam"] = new
+                except IKError as exc:
+                    self.get_logger().warn(f"놓인 컵 위치로 따르기 계획 불가 ({exc}) — 병을 제자리에 둡니다.")
+                    self._put_bottle_back(bottle, up_here, above, g_hold, g_open, fb)
+                    goal_handle.abort()
+                    result.success, result.message = False, (
+                        "놓인 컵이 따르기 범위 밖입니다 — 병을 제자리에 두었습니다")
+                    return result
         fb("CARRY", 0.5)
         self.move_to(plan["carry"], 0.0, g_hold, strict=True)
         self.move_to(plan["start"], 0.0, g_hold, strict=True)
@@ -1945,6 +2102,41 @@ class ArmServer(Node):
             return result
         fb("RETURN", 0.85)
         self.move_to(plan["carry"], 0.0, g_hold, strict=True)
+        self._put_bottle_back(bottle, up_here, above, g_hold, g_open, fb)
+        if cancelled():
+            self._end_cancel(goal_handle)
+            result.success, result.message = False, "사용자 취소"
+            return result
+        goal_handle.succeed()
+        result.success, result.message = True, ("따르기 보정 기록 완료" if calib else
+                                                "따르기 시늉 완료 — 병을 제자리에 두었습니다")
+        return result
+
+    def _wait_gate(self, goal_handle, fb):
+        """병을 든 채 pour_gate 를 기다린다. "go" | "abort" | "timeout" | "cancel"."""
+        fb("WAIT", 0.45)
+        timeout = float(self.get_parameter("pour_wait_timeout").value)
+        t0, warned = time.monotonic(), False
+        self.get_logger().info(f"  병을 들고 대기 — 컵 팔이 컵을 놓고 빠지면 들어갑니다 (최대 {timeout:.0f}s)")
+        while True:
+            if self._cancel or goal_handle.is_cancel_requested:
+                return "cancel"
+            gate = self._gate
+            if gate:
+                parts = gate.split(":")
+                self._gate_cup = (float(parts[1]), float(parts[2])) if len(parts) == 3 else None
+                return "go" if parts[0] == "go" else parts[0]
+            if time.monotonic() - t0 > timeout:
+                return "timeout"
+            tmax = max([t for t in self.backend.bus.temps() if 0 < t <= 70] or [0]) if hasattr(self.backend, "bus") else 0   # 60 넘으면 드라이버가 안전 정지 -> 70 넘는 값은 통신 오류 (97, 150 이 떴다)
+            if tmax >= 55 and not warned:   # 가득 찬 병을 들고 오래 기다리면 어깨가 데워진다
+                warned = True
+                self.get_logger().warn(f"  대기 중 서보 {tmax}°C")
+                self.pub_phase.publish(String(data=f"HOT {tmax}C"))
+            time.sleep(0.1)
+
+    def _put_bottle_back(self, bottle, up_here, above, g_hold, g_open, fb):
+        """병 위(들어 올린 높이)에서 원래 자리에 내려놓고 빠져 휴식자세로."""
         self.move_to(up_here, 0.0, g_hold, strict=True)
         bp = self._side_pitch(bottle, "병", max_tilt_deg=POUR_MAX_GRASP_TILT)
         self.move_to(above, bp, g_hold, strict=True)
@@ -1956,16 +2148,9 @@ class ArmServer(Node):
             self.move_to(b_above, 0.0, g_open, strict=True)
         else:
             self.move_to(pre_low, bp, g_open, strict=True)
+            self._via_mid(pre_low, bp, g_open)
             self.move_to(pre_high, bp, g_open, strict=True)
         self.go_end()
-        if cancelled():
-            self._end_cancel(goal_handle)
-            result.success, result.message = False, "사용자 취소"
-            return result
-        goal_handle.succeed()
-        result.success, result.message = True, ("따르기 보정 기록 완료" if calib else
-                                                "따르기 시늉 완료 — 병을 제자리에 두었습니다")
-        return result
 
     @staticmethod
     def _end_cancel(goal_handle):
@@ -1993,23 +2178,25 @@ class ArmServer(Node):
         return None if last is None else np.array(last["offset_cm"][:2]) / 100.0
 
     def _grasp_calib_stage(self, target, pitch):
-        """닫기 직전 멈춤: GUI 8/4/2/6 로 그리퍼를 1cm 씩 (화면 방향) -> r. 보정 기록 후 True."""
+        """내려가기 전 멈춤 (컵 뒤 높은 곳): GUI 8/4/2/6 로 그리퍼를 1cm 씩 (화면 방향) -> r.
+        보정 기록 후 이번에 옮긴 양(xy, m)을 돌려준다. 취소면 None."""
         from gaze_hri.table_view import TableHomography
         hom = TableHomography()
         ok, why = hom.load(os.path.expanduser(str(self.get_parameter("homography_file").value)))
         if not ok:
             self.get_logger().warn(f"[집기 보정] 호모그래피 없음 ({why}) — 건너뜀")
-            return True
+            return np.zeros(2)
         step = float(self.get_parameter("nudge_step").value)
         g = self.q[5]
         offset = np.zeros(2)
         self._teleop_cmd = None
         self.pub_phase.publish(String(data="ADJUST_GRASP"))
-        self.get_logger().info("[집기 보정] 멈춤 — 8/4/2/6(화살표) 로 컵이 두 손가락 가운데 오게 (1cm 씩), 맞으면 r")
+        self.get_logger().info("[집기 보정] 내려가기 전 멈춤 — 8/4/2/6(화살표) 로 그리퍼 가운데 선이 컵 중심을 "
+                               "향하고 손가락 끝이 입구 뒤 ~2cm 가 되게 (1cm 씩), 맞으면 r")
         base = np.asarray(target, float)
         while True:
             if self._cancel:
-                return False
+                return None
             cmd, self._teleop_cmd = self._teleop_cmd, None
             if not cmd:
                 time.sleep(0.05)
@@ -2043,7 +2230,7 @@ class ArmServer(Node):
                                ensure_ascii=False) + "\n")
         self.get_logger().info(f"[집기 보정] 기록: 이번 {np.round(offset * 100, 1).tolist()} cm, "
                                f"누적 {np.round(total * 100, 1).tolist()} cm -> {self._grasp_file()}")
-        return True
+        return offset
 
     def _side_retreat_home(self, p, g_open):
         """실패 후 복귀: 컵을 쓸지 않게 뒤로 빠졌다가 위로 올라간 다음 home."""
@@ -2054,6 +2241,7 @@ class ArmServer(Node):
                 self.move_to(above, 0.0, g_open, strict=True)
             else:
                 self.move_to(pre_low, rp, g_open, strict=True)
+                self._via_mid(pre_low, rp, g_open)
                 self.move_to(pre_high, rp, g_open, strict=True)
         except IKError as exc:
             self.get_logger().warn(f"뒤로 빠지기 실패({exc}) — 바로 home")

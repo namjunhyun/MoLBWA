@@ -44,7 +44,8 @@ log = logging.getLogger(__name__)
 
 
 class Helper(Node):
-    def __init__(self, udp_port, scene_topic, min_consecutive, max_jump_m):
+    def __init__(self, udp_port, scene_topic, min_consecutive, max_jump_m,
+                 joint_topic="/joint_states", z_offset=0.0):
         super().__init__("eye_scene_calib_helper")
         cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config.yaml")))
         K = load_intrinsics()
@@ -58,11 +59,14 @@ class Helper(Node):
 
         qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(CompressedImage, scene_topic, self.on_scene, qos)
-        self.create_subscription(JointState, "/joint_states", self.on_joint, 10)
+        # 2026-10-22 양팔: /arm_a/joint_states. 팔 A 는 명령보다 ~2cm 낮게 다녀서(dual.launch Z_OFFSET)
+        # 실제 그리퍼 위치 = FK(명령 관절각) - z_offset
+        self.create_subscription(JointState, joint_topic, self.on_joint, 10)
+        self.z_offset = z_offset
 
         self.n = self.n_valid = 0
         self.create_timer(2.0, self.report)
-        log.info("씬 구독 %s, /joint_states 구독, 송신 %s:%d", scene_topic, *self.addr)
+        log.info("씬 구독 %s, %s 구독, 높이 보정 %.3f, 송신 %s:%d", scene_topic, joint_topic, z_offset, *self.addr)
 
     def on_joint(self, msg: JointState):
         if len(msg.position) >= 4:
@@ -99,7 +103,7 @@ class Helper(Node):
             self.n_out_of_range = getattr(self, "n_out_of_range", 0) + 1
             return
         p_B = forward_kinematics(self.joint_pos, self.geo)  # armbase 기준 그리퍼(TCP) 위치
-        p_B_h = np.array([p_B[0], p_B[1], p_B[2], 1.0])
+        p_B_h = np.array([p_B[0], p_B[1], p_B[2] - self.z_offset, 1.0])
         p_hc = T @ p_B_h  # 씬카메라(헤드캠) 기준
         payload = {"point": [float(p_hc[0]), float(p_hc[1]), float(p_hc[2])], "valid": True}
         self.sock.sendto(json.dumps(payload).encode(), self.addr)
@@ -118,10 +122,16 @@ def main():
     ap.add_argument("--scene-topic", default="/camera/left/compressed")
     ap.add_argument("--min-consecutive", type=int, default=3)
     ap.add_argument("--max-jump-m", type=float, default=0.05)
+    ap.add_argument("--arm", choices=["a", "b"], default=None,
+                    help="양팔: 이 팔의 joint_states 와 높이 보정 (기준 좌표가 팔 A 라 a 만 쓴다)")
     a = ap.parse_args()
 
     rclpy.init()
-    node = Helper(a.udp_port, a.scene_topic, a.min_consecutive, a.max_jump_m)
+    if a.arm and a.arm != "a":
+        sys.exit("태그 배치가 팔 A 기준이라 캘리브 점은 팔 A 로만 (2026-10-22 결정)")
+    node = Helper(a.udp_port, a.scene_topic, a.min_consecutive, a.max_jump_m,
+                  f"/arm_{a.arm}/joint_states" if a.arm else "/joint_states",
+                  0.02 if a.arm == "a" else 0.0)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

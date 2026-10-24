@@ -15,6 +15,7 @@ T_w_ab 가 latch 되어 있으면 팔 좌표계를 계속 알 수 있다.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -167,9 +168,11 @@ def build_bundle_obj_pts(anchor_cfg: dict):
         u = np.asarray(src.get("up", default_up), float)
         r = r / np.linalg.norm(r)
         u = u / np.linalg.norm(u)
-        if abs(float(r @ u)) > 1e-6:
+        # 2026-10-22: 등록 도구가 소수 4자리로 저장해 1e-6 검사에 걸렸다 -> 반올림 수준은 직교화로 흡수
+        if abs(float(r @ u)) > 1e-3:
             raise ValueError("tag_axes: right 와 up 은 직교해야 한다")
-        return r, u
+        u = u - float(r @ u) * r
+        return r, u / np.linalg.norm(u)
 
     axes = anchor_cfg.get("tag_axes", {})
     right, up = _axes(axes, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
@@ -225,13 +228,28 @@ class TagBundleDetector:
         from pupil_apriltags import Detector
 
         self.cv2 = cv2
-        a = cfg["anchor"]
+        a = dict(cfg["anchor"])
+        # 2026-10-22: 양팔 — 태그 배치는 등록 도구가 만든 파일(팔 A 기준)에서 읽는다
+        #   tools/register_table_tags.py, tools/register_board_topdown.py -> ~/.ros/dual_anchor.yaml
+        if a.get("bundle_file"):
+            import yaml
+            with open(os.path.expanduser(a["bundle_file"])) as f:
+                bf = yaml.safe_load(f)
+            a["bundle"] = list(bf.get("table_bundle", [])) + list(bf.get("board_bundle", []))
+            a["tag_size_m"] = float(bf["tag_size_m"])
+            log.info("태그 배치: %s (%d장, %.0fmm)", a["bundle_file"], len(a["bundle"]), a["tag_size_m"] * 1000)
+        # 2026-10-22: 평면 태그만 보일 때 거울상 해를 머리 위치로 거른다. 클립보드가 착용자 쪽으로
+        # 위를 보고 기울어 있어서 거울상 해는 머리를 로봇 위 1.3m 같은 곳에 놓는다 (실측 0.12 vs 0.81px).
+        # {x: [min, max], y: [...], z: [...]} armbase 기준. 없으면 예전처럼 평면 관측은 버린다.
+        self.head_box = a.get("head_box")
+        self.clahe = cv2.createCLAHE(3.0, (8, 8)) if a.get("clahe", False) else None
         self.det = Detector(families=a["tag_family"], nthreads=4,
                             quad_decimate=1.0, refine_edges=True)
         self.K = np.asarray(K, float)
         self.dist = np.zeros(5) if dist is None else np.asarray(dist, float)
         self.size = a["tag_size_m"]
         self.min_tags = a["min_tags_for_latch"]
+        self.min_tags_planar = int(a.get("min_tags_planar", 3))
         self.max_reproj_px = a.get("max_reproj_px", 3.0)
         self.ambiguity_max_m = a.get("ambiguity_max_m", 0.02)
         self.require_noncoplanar = bool(a.get("require_noncoplanar", True))
@@ -242,32 +260,41 @@ class TagBundleDetector:
         _warn_if_coplanar(np.concatenate(list(self.obj_pts.values())))
 
     def detect(self, gray: np.ndarray) -> np.ndarray | None:
+        if self.clahe is not None:      # 2026-10-22: 씬 영상이 어두워 margin 14 -> CLAHE 로 44
+            gray = self.clahe.apply(gray)
         dets = [d for d in self.det.detect(gray) if d.tag_id in self.obj_pts]
+        self.last_ids = sorted(d.tag_id for d in dets)
         if len(dets) < self.min_tags:
             return None
         # 2026-09-28: 윗줄(0,1)만 보이면 같은 평면이라 거울 자세가 재투영 1px 안쪽으로 똑같이
         # 맞는다. 아래 solvePnPGeneric(ITERATIVE)는 해를 1개만 돌려줘서 모호성 검사가 걸리지
         # 않았다 -> 머리 높이가 0.45 -> 0.28m 로 틀리고 'o' 보정이 23° 로 잘못 들어갔다.
         # 보이는 태그 중심들이 한 평면(깊이 차 < 1cm)이면 관측을 버린다.
-        if self.require_noncoplanar:
-            centers = np.array([self.obj_pts[d.tag_id].mean(axis=0) for d in dets])
-            depth = centers @ np.asarray(self.normal, float)
-            if float(depth.max() - depth.min()) < 0.01:
-                self.n_coplanar_rejects = getattr(self, "n_coplanar_rejects", 0) + 1
-                return None
         obj = np.concatenate([self.obj_pts[d.tag_id] for d in dets])
         img = np.concatenate([np.asarray(d.corners, float) for d in dets])
+        # 2026-10-22: 태그마다 면이 다를 수 있어(책상+클립보드) 전역 법선 대신 모서리들의 두께로 본다
+        planar = float(np.linalg.svd(obj - obj.mean(axis=0), compute_uv=False)[-1]) < 0.005
+        # 2026-10-22: 클립보드 같은 줄 두 장(19x7cm 띠)만 보이면 매 프레임 3~7cm 튀었다 -> 평면은 3장 이상
+        if planar and len(dets) < self.min_tags_planar:
+            self.n_planar_few = getattr(self, "n_planar_few", 0) + 1
+            return None
+        if planar and self.require_noncoplanar and not self.head_box:
+            self.n_coplanar_rejects = getattr(self, "n_coplanar_rejects", 0) + 1
+            return None
         # ★ 평면 모호성 검사 (2026-08-19).
         # 태그를 전부 한 평면에 붙이면, 태그판을 기준으로 **거울 반사된** 자세가 픽셀상
         # 똑같이 투영된다. 재투영 오차가 0 이어도 팔 베이스가 10cm 넘게 엉뚱한 데 찍힌다
         # (합성 검증에서 정확히 120mm = 2 x 태그판 깊이만큼 틀렸다).
         # solvePnPGeneric 으로 후보를 전부 받아, 서로 크게 다르면 관측을 버린다.
-        n_sol, rvecs, tvecs, _ = self.cv2.solvePnPGeneric(
-            obj, img, self.K, self.dist, flags=self.cv2.SOLVEPNP_ITERATIVE
+        # 평면이면 IPPE 로 두 해를 다 받는다 (ITERATIVE 는 해를 하나만 줘서 모호성이 안 보인다)
+        n_sol, rvecs, tvecs, errs = self.cv2.solvePnPGeneric(
+            obj, img, self.K, self.dist,
+            flags=self.cv2.SOLVEPNP_IPPE if planar else self.cv2.SOLVEPNP_ITERATIVE
         )
         if n_sol < 1:
             return None
-        cands = [(np.asarray(r), np.asarray(t)) for r, t in zip(rvecs, tvecs)]
+        errs = np.ravel(errs) if errs is not None else np.zeros(n_sol)
+        cands = [(np.asarray(r), np.asarray(t), float(e)) for r, t, e in zip(rvecs, tvecs, errs)]
         # cheirality: 태그가 카메라 **뒤**에 있는 해는 물리적으로 불가능하다.
         # 투영은 (x,y,z) -> (-x,-y,-z) 에 대해 불변이라 이런 해가 실제로 나온다
         # (합성 검증에서 t 가 정확히 부호만 뒤집힌 해가 재투영 0px 로 나왔다).
@@ -278,15 +305,30 @@ class TagBundleDetector:
         if not cands:
             log.warning("태그 PnP 해가 전부 카메라 뒤 — 관측 버림")
             return None
+        if self.head_box:
+            def _head_ok(c):
+                R, _ = self.cv2.Rodrigues(c[0])
+                C = -R.T @ np.asarray(c[1]).ravel()          # 씬카메라(머리) 위치, armbase
+                return all(lo <= v <= hi for v, (lo, hi) in
+                           zip(C, (self.head_box["x"], self.head_box["y"], self.head_box["z"])))
+            cands = [c for c in cands if _head_ok(c)]
+            if not cands:
+                self.n_head_rejects = getattr(self, "n_head_rejects", 0) + 1
+                return None
+        cands.sort(key=lambda c: c[2])
         if len(cands) > 1:
             spread = max(float(np.linalg.norm(a[1] - b[1]))
                          for i, a in enumerate(cands) for b in cands[i + 1:])
+            # 머리 범위 안에 둘 다 들어왔어도 재투영이 2배 넘게 차이 나면 작은 쪽
+            if spread > self.ambiguity_max_m and planar and self.head_box and \
+                    cands[1][2] > 2.0 * max(cands[0][2], 0.05):
+                spread = 0.0
             if spread > self.ambiguity_max_m:
                 log.error("태그 PnP 해가 %d개이고 서로 %.1fcm 떨어져 있다 — 동일평면 모호성. "
                           "관측 버림. 태그 하나를 깊이 방향으로 4~6cm 어긋나게 붙일 것.",
                           len(cands), spread * 100)
                 return None
-        rvec, tvec = cands[0]
+        rvec, tvec = cands[0][0], cands[0][1]
         rvec, tvec = self.cv2.solvePnPRefineLM(obj, img, self.K, self.dist, rvec, tvec)
 
         # ★ 재투영 오차 검사 — 코너 순서/축 방향이 틀리면 여기서 걸린다.

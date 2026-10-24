@@ -101,9 +101,16 @@ class TaskManager(Node):
         self.declare_parameter("grasp_height_values", [0.04])
         self.declare_parameter("place_clearance", 0.005)
         self.declare_parameter("pour_snap_r", 0.06)     # 놓을 곳이 물체에서 이만큼 안이면 따르기
-        # 검출 점은 박스 아래 변 = 컵 바닥의 카메라 쪽 가장자리다 (집기는 이걸로 맞춰져 있다).
-        # 따를 곳은 컵 축(맨 위 원의 중심)이라 카메라 반대쪽으로 바닥 반지름만큼 민다.
-        self.declare_parameter("pour_cup_center_shift", 0.03)
+        # 2026-10-22: 위치는 모두 '물체 바닥 중심' 하나로 쓴다 = 검출점(박스 아래 변) + 팔별 집기 보정
+        # (arm_server). 2026-10-12 실측으로 아래 변이 이미 컵 중심에 가까웠고(3.5cm 당기면 4cm 짧게
+        # 잡음), 남는 차이는 집기 보정이 맞춘다. 예전엔 따르기만 3cm 더 밀어(pour_cup_center_shift)
+        # 컵을 놓은 점과 따르는 점이 달랐다.
+        # 두 팔 동시 따르기: 컵 팔이 컵을 자리로 옮기는 동안 병 팔은 병을 들고 기다린다. 병이 따르기
+        # 자리에서 이보다 가까우면(공용 구역 안) 동시에 하지 않고 차례로.
+        self.declare_parameter("parallel_pour", True)
+        self.declare_parameter("parallel_min_bottle_dist", 0.15)
+        self.declare_parameter("redetect_r", 0.10)
+        self.declare_parameter("redetect_delay", 2.0)   # 컵 팔 RETREAT 후 이만큼 뒤에 컵을 찾고 go [s]      # 컵 놓은 뒤 이 반경 안의 컵을 다시 찾아 따른다
         self.declare_parameter("pour_min_r", 0.25)      # 컵 거리 (pour.py 계획 + 팔 B 서보 한계 IK 로 확인, 컵 15cm·입구 +5cm)
         self.declare_parameter("pour_max_r", 0.40)      # 입구 25cm 기준 (0.41 부터 105° 에서 IK 불가)
 
@@ -158,6 +165,9 @@ class TaskManager(Node):
         self.create_subscription(Bool, "/task/grasp_calib",
                                  lambda m: setattr(self, "grasp_calib", bool(m.data)), 10)
         self.queue = []               # 여러 단계 태스크 (컵을 따르기 자리로 -> 따르기)
+        self.par = None               # 두 팔 동시 따르기 진행 상태 (_start_parallel)
+        self.pub_gate = {n: self.create_publisher(String, a.rsplit("/", 1)[0] + "/pour_gate", 10)
+                         for n, a in zip(names, acts)} if self.arms else {}
 
         self.create_timer(0.2, self.tick)
         self.set_state(IDLE)
@@ -185,6 +195,137 @@ class TaskManager(Node):
         self.pick_arm = self.try_order.pop(0)
         self.send_goal_dual(self.pick_point, st["target"])
         return True
+
+    # ------------------------------------------------------------------
+    # 두 팔 동시 따르기 (2026-10-22)
+    #   컵 팔: 컵 -> 따르기 자리.  병 팔: 병을 들고 자기 쪽에서 대기("pour_wait").
+    #   공용 구역은 한 팔씩 — 컵 팔이 컵을 놓고 그리퍼를 열어 빠지기 시작하면(RETREAT) 병 팔에 go.
+    #   병 팔 목표는 컵 팔이 실제로 움직이기 시작한 뒤(첫 피드백) 보낸다 — 컵 팔이 [거부]되면
+    #   병을 괜히 들었다 내리지 않고 예전처럼 차례로 한다.
+    # ------------------------------------------------------------------
+    def _start_parallel(self, cup_step, pour_step):
+        if not self.get_parameter("parallel_pour").value or len(self.arms) < 2:
+            return False
+        spot = np.array(cup_step["target"][:2], float)
+        if np.linalg.norm(pour_step["pick"][:2] - spot) < float(
+                self.get_parameter("parallel_min_bottle_dist").value):
+            self.get_logger().info("물병이 공용 구역 안 — 동시에 하지 않고 차례로")
+            return False
+        cup_order = self.order_for(cup_step["target"], cup_step["what"], pick=cup_step["pick"],
+                                   pour=False, quiet=True)
+        bot_order = self.order_for(pour_step["target"], "컵", pick=pour_step["pick"],
+                                   pour=True, quiet=True)
+        pair = next(((i, j) for i in cup_order for j in bot_order if j != i), None)
+        if pair is None:
+            self.get_logger().info("컵 팔과 병 팔을 따로 고를 수 없음 — 차례로")
+            return False
+        ci, bi = pair
+        self.queue = []
+        self.par = {"cup": ci, "bot": bi, "cup_step": cup_step, "pour_step": pour_step,
+                    "cup_h": None, "bot_h": None, "bot_sent": False, "gate": False,
+                    "cup_res": None, "bot_res": None}
+        self._say(f"두 팔 동시: 팔 {self.arms[ci][0]} 컵 -> 따르기 자리, "
+                  f"팔 {self.arms[bi][0]} 물병 들고 대기 -> 컵 팔이 빠지면 따르기")
+        self.set_state(EXECUTING)
+        par = self.par
+        goal = self._build_goal(ci, cup_step["pick"], cup_step["target"], "cup", "")
+        fut = self.arms[ci][2].send_goal_async(
+            goal, feedback_callback=lambda f: self._par_feedback(par, "cup", f))
+        fut.add_done_callback(lambda f: self._par_accepted(par, "cup", f))
+        return True
+
+    def _par_send_bottle(self, par):
+        par["bot_sent"] = True
+        st = par["pour_step"]
+        goal = self._build_goal(par["bot"], st["pick"], st["target"], "bottle", st["task"] + "_wait")
+        fut = self.arms[par["bot"]][2].send_goal_async(
+            goal, feedback_callback=lambda f: self._par_feedback(par, "bot", f))
+        fut.add_done_callback(lambda f: self._par_accepted(par, "bot", f))
+
+    def _par_accepted(self, par, who, future):
+        h = future.result()
+        if not h.accepted:
+            self._par_done(par, who, False, "[거부] 액션 목표 거부")
+            return
+        par[who + "_h"] = h
+        h.get_result_async().add_done_callback(
+            lambda f: self._par_done(par, who, f.result().result.success, f.result().result.message))
+
+    def _par_feedback(self, par, who, fb):
+        f = fb.feedback
+        self.get_logger().info(f"  진행[{self.arms[par[who]][0]}]: {f.phase} ({f.progress * 100:.0f}%)")
+        if par is not self.par or who != "cup":
+            return
+        if not par["bot_sent"]:
+            self._par_send_bottle(par)          # 컵 팔이 움직이기 시작함 = 사전 검사 통과
+        if f.phase == "RETREAT" and not par["gate"] and not par.get("timer"):
+            # 빠지기 시작한 순간엔 그리퍼가 컵을 가려 재검출이 3번 연속 실패 -> 조금 빠진 뒤 찾는다
+            def fire():
+                par["timer"].cancel()
+                if par is self.par and not par["gate"]:
+                    self._par_gate(par, "go")
+            par["timer"] = self.create_timer(
+                float(self.get_parameter("redetect_delay").value), fire)
+
+    def _cup_near(self, spot):
+        """놓인 컵을 다시 찾는다 (첫 팔 기준 xy). 없으면 None."""
+        r = float(self.get_parameter("redetect_r").value)
+        best = None
+        for i, o in enumerate(self.objects):
+            d = float(np.linalg.norm(o - spot))
+            if self._label(i) == "cup" and d < r and (best is None or d < best[0]):
+                best = (d, o)
+        return None if best is None else np.array(best[1], float)
+
+    def _par_gate(self, par, what):
+        par["gate"] = True
+        name = self.arms[par["bot"]][0]
+        msg = what
+        if what == "go":
+            spot = np.array(par["pour_step"]["target"][:2], float)
+            cup = self._cup_near(spot)
+            if cup is None:
+                self._warn("놓인 컵이 안 보입니다 — 따르기 자리 기준으로 따릅니다")
+                cup = spot
+            else:
+                self.get_logger().info(
+                    f"놓인 컵 검출 ({cup[0]:.3f}, {cup[1]:.3f}) — 따르기 자리에서 "
+                    f"{np.linalg.norm(cup - spot) * 100:.1f}cm")
+            c = self.to_arm(par["bot"], np.array([cup[0], cup[1], 0.0]))
+            msg = f"go:{c[0]:.4f}:{c[1]:.4f}"
+        self.get_logger().info(f"팔 {name} 에 {msg}")
+        self.pub_gate[name].publish(String(data=msg))
+
+    def _par_done(self, par, who, ok, message):
+        if par is not self.par:
+            return
+        par[who + "_res"] = (ok, message)
+        name = self.arms[par[who]][0]
+        (self.get_logger().info if ok else self._warn)(f"결과[{name}]: {message}")
+        if who == "cup" and not ok:
+            if not par["bot_sent"]:
+                # 컵 팔이 움직이기 전에 거부 -> 예전처럼 차례로 (다른 팔로 재시도 포함)
+                self.par = None
+                self.queue = [par["cup_step"], par["pour_step"]]
+                self._next_step()
+                return
+            if not par["gate"]:
+                self._par_gate(par, "abort")      # 병 팔: 병 제자리
+        if who == "cup" and ok and not par["gate"]:
+            self._par_gate(par, "go")             # RETREAT 피드백을 못 받았어도
+        if who == "bot" and not ok and message.startswith("[거부]"):
+            par["retry_pour"] = True              # 병 팔이 움직이기 전에 거부 -> 컵 놓은 뒤 따르기만 차례로
+        if par["cup_res"] is None or (par["bot_sent"] and par["bot_res"] is None):
+            return
+        self.par = None
+        if par.get("retry_pour") and par["cup_res"][0]:
+            self.queue = [par["pour_step"]]
+            self._next_step()
+            return
+        self.pick_point = None
+        self.set_state(IDLE)
+        if par["cup_res"][0] and par["bot_res"] and par["bot_res"][0]:
+            self._say("두 팔 따르기 완료")
 
     def _warn(self, m):
         self.get_logger().warn(m)
@@ -224,6 +365,11 @@ class TaskManager(Node):
         self.queue = []
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
+        if self.par:
+            for h in (self.par["cup_h"], self.par["bot_h"]):
+                if h is not None:
+                    h.cancel_goal_async()
+            self.par = None
         self.pick_point = None
         self.set_state(IDLE)
         self._warn("사용자 취소")
@@ -279,18 +425,34 @@ class TaskManager(Node):
                     anchor = self._cup_anchor
                     pour_task = "pour_calib" if self.pour_calib else "pour"
                     bottle = (self.pick_point, self.pick_label)
-                    axis = self._away_from_camera(
-                        spot, float(self.get_parameter("pour_cup_center_shift").value))
                     pour_step = {"pick": bottle[0], "label": "bottle", "task": pour_task,
-                                 "target": np.array([axis[0], axis[1], 0.0]), "what": "컵"}
-                    if np.linalg.norm(anchor - spot) > float(self.get_parameter("pour_spot_tol").value):
+                                 "target": np.array([spot[0], spot[1], 0.0]), "what": "컵"}
+                    tol = float(self.get_parameter("pour_spot_tol").value)
+                    # 2026-10-22: 따르기 자리가 다른 물건(컵·물병 말고)으로 차 있으면 거부 — 자리를 자동으로
+                    # 옮기면 '늘 같은 자세로 따른다'는 장점이 사라진다 (사용자 결정)
+                    others = [o for o in self.objects
+                              if np.linalg.norm(o - anchor) > 0.03
+                              and np.linalg.norm(o - self.pick_point[:2]) > 0.03]
+                    blocking = [o for o in others if np.linalg.norm(o - spot) < 0.08]
+                    if blocking:
+                        self._warn("따르기 자리에 다른 물건이 있습니다 → 따르기 자리(점선 원)를 비우고 다시 고르세요")
+                        return
+                    if np.linalg.norm(self.pick_point[:2] - spot) < 0.08:
+                        self._warn("물병이 따르기 자리에 있습니다 → 물병을 옆으로 옮기고 다시 고르세요")
+                        return
+                    if np.linalg.norm(anchor - spot) > tol:
                         # 먼저 컵을 따르기 자리로
-                        self.queue = [{"pick": np.array([anchor[0], anchor[1], 0.06]), "label": "cup",
-                                       "task": "", "target": np.array([spot[0], spot[1], 0.065]),
-                                       "what": "따르기 자리"}, pour_step]
+                        cup_step = {"pick": np.array([anchor[0], anchor[1], 0.06]), "label": "cup",
+                                    "task": "", "target": np.array([spot[0], spot[1], 0.065]),
+                                    "what": "따르기 자리"}
+                        self.queue = [cup_step, pour_step]
                         self._say(f"컵을 가운데 따르기 자리로 먼저 옮긴 뒤 따릅니다 "
                                   f"(컵이 자리에서 {np.linalg.norm(anchor - spot) * 100:.0f}cm 떨어짐)")
+                        if self._start_parallel(cup_step, pour_step):
+                            return
                     else:
+                        # 컵이 이미 자리에 있으면 검출된 컵 바닥 중심으로 (동시 경로의 재검출과 같은 기준)
+                        pour_step["target"] = np.array([anchor[0], anchor[1], 0.0])
                         self.queue = [pour_step]
                     self._next_step()
                     return
@@ -357,10 +519,13 @@ class TaskManager(Node):
         cands = sorted((i for i in range(len(rs)) if lo <= rs[i] <= hi),
                        key=lambda i: rs[i])
         if not cands:
-            near = all(r < lo for r in rs)
+            # 가장 가까운 팔 기준으로 '가깝다/멀다' (예전엔 한 팔은 가깝고 다른 팔은 멀면 '멉니다' 로 잘못 나왔다)
+            i0 = int(np.argmin(rs))
+            near = rs[i0] < lo
+            name = {"cup": "컵", "bottle": "물병"}.get(label, "물체")
             self._warn(
-                f"{'컵' if label == 'cup' else '물체'}이(가) 받침대에 너무 "
-                f"{'가깝습니다' if near else '멉니다'} → 초록 띠 안으로 옮기세요 "
+                f"{name}이(가) 팔 {self.arms[i0][0]} 받침대에 너무 "
+                f"{'가깝습니다 → 팔에서 ' + format((lo - rs[i0]) * 100 + 1, '.0f') + 'cm 이상 멀리' if near else '멉니다 → 초록 띠 안으로'} 옮기세요 "
                 f"({self._desc(rs)}; {lo * 100:.0f}~{hi * 100:.0f}cm)")
         else:
             self.get_logger().info(
@@ -368,16 +533,16 @@ class TaskManager(Node):
                 f"{[self.arms[i][0] for i in cands]}")
         return cands
 
-    def order_for(self, p, what):
+    def order_for(self, p, what, pick=None, pour=None, quiet=False):
         """2026-10-14(5): 팔 고르기 — 집을 곳과 놓을 곳(또는 컵)을 **둘 다** 본다 (사용자).
         팔마다 둘 다 그 팔 범위 안인지 보고, 되는 팔 중 두 거리 합이 작은 팔부터 (arm_server 가
         실제 IK 로 최종 확인, 안 되면 다음 팔)."""
         hi = float(self.get_parameter("hard_max_r").value)
         cup_lo = float(self.get_parameter("pick_min_r").value)
-        lab = self.pick_label
         pick_lo = cup_lo
-        pour = self.task in ("pour", "pour_calib")
-        pr, lr = self._dists(self.pick_point), self._dists(p)
+        if pour is None:
+            pour = self.task in ("pour", "pour_calib")
+        pr, lr = self._dists(self.pick_point if pick is None else pick), self._dists(p)
         ok, why = [], []
         for i, (n, _, _) in enumerate(self.arms):
             bad = []
@@ -395,6 +560,8 @@ class TaskManager(Node):
         order = sorted(ok, key=lambda i: pr[i] + lr[i])
         rng = (f"집기 {pick_lo * 100:.0f}~{hi * 100:.0f}cm, "
                + ("컵 23~40cm" if pour else f"놓기 {pick_lo * 100:.0f}~{hi * 100:.0f}cm"))
+        if quiet:
+            return order
         if not order:
             self._warn(f"집기와 {what} 둘 다 닿는 팔이 없습니다 → {what} 다시 고르세요 ("
                        + " / ".join(why) + f"; {rng})")
@@ -444,22 +611,8 @@ class TaskManager(Node):
         if not (self.pick_label == "bottle" and lab == "cup"):
             return "blocked", lab or "물체"
         self._cup_anchor = np.array(o[:2], float)
-        c = self._away_from_camera(o, float(self.get_parameter("pour_cup_center_shift").value))
-        self.get_logger().info(
-            f"물병 -> 컵: 따르기. 컵 축 ({c[0]:.3f}, {c[1]:.3f}) "
-            f"(검출 바닥 가장자리 ({o[0]:.3f}, {o[1]:.3f}) 에서 카메라 반대쪽으로 "
-            f"{self.get_parameter('pour_cup_center_shift').value * 100:.0f}cm)")
-        return "pour", np.array([c[0], c[1], 0.0])
-
-    def _away_from_camera(self, xy, dist):
-        """첫 팔 호모그래피로: 화면 위쪽(카메라에서 먼 쪽) 책상 방향으로 dist 만큼."""
-        H = self.arms[0][1]
-        px = H.to_pixel(xy[0], xy[1])
-        up = H.to_robot(px[0], px[1] - 20.0) if px else None
-        if up is None or dist <= 0.0:
-            return np.array(xy, float)
-        d = np.array(up, float) - np.array(xy, float)
-        return np.array(xy, float) + d / max(float(np.linalg.norm(d)), 1e-9) * dist
+        self.get_logger().info(f"물병 -> 컵: 따르기. 컵 바닥 중심 ({o[0]:.3f}, {o[1]:.3f})")
+        return "pour", np.array([o[0], o[1], 0.0])
 
     def clamp_place(self, q):
         lo = float(self.get_parameter("place_min_r").value)
@@ -481,13 +634,21 @@ class TaskManager(Node):
             self.pick_point = None
             self.set_state(IDLE)
             return
+        goal = self._build_goal(i, pick, place, self.pick_label, self.task)
+        self.set_state(EXECUTING)
+        fut = client.send_goal_async(goal, feedback_callback=self.on_feedback)
+        fut.add_done_callback(self.on_goal_response)
+
+    def _build_goal(self, i, pick, place, label, task):
+        name = self.arms[i][0]
         pk = self.to_arm(i, pick)
         pl = self.to_arm(i, place)        # 거리 보정 안 함 — 되는지는 arm_server 가 판단
+        pour = task.startswith("pour")
         gh = dict(zip(self.get_parameter("grasp_height_labels").value,
-                      self.get_parameter("grasp_height_values").value)).get(self.pick_label)
+                      self.get_parameter("grasp_height_values").value)).get(label)
         if gh is not None:
             pk[2] = float(gh)
-            if self.task not in ("pour", "pour_calib"):          # 따르기면 place 는 컵 축(높이 무관)
+            if not pour:                                          # 따르기면 place 는 컵 바닥 중심(높이 무관)
                 pl[2] = float(gh) + float(self.get_parameter("place_clearance").value)
         goal = PickPlace.Goal()
         goal.pick = Point(x=float(pk[0]), y=float(pk[1]), z=float(pk[2]))
@@ -495,13 +656,13 @@ class TaskManager(Node):
         goal.frame_id = "base_link"          # 고른 팔의 base_link (arm_server 는 변환 안 함)
         goal.approach_pitch = self.approach_pitch
         goal.dry_run = self.dry_run
-        goal.task = self.task
-        goal.pick_label = self.pick_label or ""
-        self.set_state(EXECUTING)
+        goal.task = task
+        goal.pick_label = label or ""
+        kind = {"pour": "따르기", "pour_calib": "따르기 보정"}.get(task.removesuffix("_wait"), "")
         self.get_logger().info(
-            f"팔 {name} 에 {dict(pour='따르기', pour_calib='따르기 보정').get(self.task, '')} 목표 전달 — 집기 {np.round(pk, 3)}, 놓기 {np.round(pl, 3)}")
-        fut = client.send_goal_async(goal, feedback_callback=self.on_feedback)
-        fut.add_done_callback(self.on_goal_response)
+            f"팔 {name} 에 {kind}{'(대기)' if task.endswith('_wait') else ''} 목표 전달 — "
+            f"집기 {np.round(pk, 3)}, 놓기 {np.round(pl, 3)}")
+        return goal
 
     def on_goal_response(self, future):
         handle = future.result()
