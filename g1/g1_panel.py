@@ -142,7 +142,8 @@ def dialog_attend(text):
     return True
 
 
-dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic)
+dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic, synth=g1_tts.synth)
+threading.Thread(target=dialog.warm, daemon=True).start()   # 고정·대비 문장 미리 합성(캐시) — TTS 가 죽어도 대화가 끝까지 간다
 
 
 def save_upload(data: bytes) -> str:
@@ -210,15 +211,18 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <label style="display:block;margin:6px 0"><input type="checkbox" id="clapsay"> 같이 보기 때 <b>마지막 동작(박수·손 흔들기) 시작에</b> 위 문장 말하기</label>
 <div style="font-size:14px;color:#aaa">WAV 파일: <input type="file" id="wavf" accept=".wav,audio/wav"> <button style="padding:6px 10px;font-size:14px" onclick="upwav()">올려서 재생</button></div>
 <div id="spk" style="margin-top:8px;color:#888">🔇 조용</div>
-<h3 style="margin:18px 0 4px">대화 <small style="color:#888">(첫 마디 → 질문 → 대답 듣기 → 공감 → 마무리)</small></h3>
-<div class="row"><select id="dmode" style="flex:1;font-size:16px;padding:10px;background:#222;color:#eee;border-radius:8px">
+<h3 style="margin:18px 0 4px">대화 <small style="color:#888">(물건 → 고정 질문 → 대답 ↔ 공감·질문 … 고마워 → 마무리)</small></h3>
+<div class="row"><select id="dkind" style="flex:1;font-size:16px;padding:10px;background:#222;color:#eee;border-radius:8px">
+<option value="plant">🪴 화분</option><option value="bottle">🥤 물병·텀블러</option><option value="photo">🖼 가족사진</option><option value="phone">📱 휴대폰</option></select>
+<select id="dmode" style="flex:1;font-size:16px;padding:10px;background:#222;color:#eee;border-radius:8px">
 <option value="mic">🎤 마이크로 듣기</option><option value="keyboard">⌨ 대답을 여기 입력</option></select></div>
-<label style="display:block;margin:6px 0"><input type="checkbox" id="dattend"> 첫 마디를 <b>같이 보고 축하</b>(위 물체·착용자 방위)의 박수에 맞춰 말하기 <small style="color:#888">(정책 켜졌을 때만)</small></label>
+<label style="display:block;margin:6px 0"><input type="checkbox" id="dattend"> 첫 질문을 <b>같이 보기</b>(위 물체·착용자 방위)의 마지막 동작에 맞춰 말하기 <small style="color:#888">(정책 켜졌을 때만 · 양팔 벌리기 학습 전에는 마지막 동작이 박수)</small></label>
 <div class="row"><button class="wave" style="background:#059669" onclick="dlg('start')">💬 대화 시작</button>
 <button style="background:#374151;color:#eee" onclick="dlg('stop')">■ 대화 중지</button>
 <button style="background:#374151;color:#eee" onclick="dlg('mictest')">🎤 마이크 시험(3초)</button></div>
 <div class="row"><input id="dans" style="flex:3;font-size:16px;padding:10px;background:#222;color:#eee;border:1px solid #444;border-radius:8px" placeholder="(키보드 모드) 어르신 대답">
 <button style="flex:1;background:#374151;color:#eee" onclick="dlg('answer')">보내기</button></div>
+<div id="dalert" style="display:none;background:#7f1d1d;color:#fff;font-weight:700;padding:10px;border-radius:8px;margin-bottom:6px"></div>
 <div id="dlog" style="background:#0b1220;color:#cbd5e1;font-size:14px;white-space:pre-wrap;padding:8px;border-radius:8px;min-height:40px">대화 기록</div>
 <div id="st">상태: ?</div><p id="msg" style="color:#888"></p><div id="log"></div>
 <script>
@@ -238,7 +242,7 @@ const txt=document.getElementById('txt'),phr=document.getElementById('phr');
 ['안녕하세요, 저는 지원이에요.','저기 보세요!','다음 주에 손녀 생일이에요. 축하해요!','오늘 이야기 나눠서 즐거웠어요.'].forEach(v=>{const e=document.createElement('button');e.textContent=v;e.onclick=()=>{txt.value=v};phr.appendChild(e)});
 async function say(){if(!txt.value.trim())return;document.getElementById('msg').textContent='합성 중…';
 const r=await fetch('/say',{method:'POST',body:JSON.stringify({text:txt.value})});document.getElementById('msg').textContent=(await r.json()).msg}
-async function dlg(op){const q={};if(op==='start'){q.mode=document.getElementById('dmode').value;q.with_attend=document.getElementById('dattend').checked;
+async function dlg(op){const q={};if(op==='start'){q.mode=document.getElementById('dmode').value;q.kind=document.getElementById('dkind').value;q.with_attend=document.getElementById('dattend').checked;
 q.obj_bearing_deg=+o.value;q.user_bearing_deg=+b.value}if(op==='answer'){q.text=document.getElementById('dans').value;document.getElementById('dans').value=''}
 if(op==='mictest')document.getElementById('msg').textContent='마이크 3초 녹음 중… 말해 보세요';
 const r=await fetch('/dialog/'+op,{method:'POST',body:JSON.stringify(q)});document.getElementById('msg').textContent=(await r.json()).msg}
@@ -252,6 +256,7 @@ async function act(p){const r=await fetch('/act',{method:'POST',body:JSON.string
 document.getElementById('msg').textContent=(await r.json()).msg}
 setInterval(async()=>{const s=await(await fetch('/state')).json(),busy=s.state!=='idle';
 document.getElementById('st').textContent='상태: '+(s.stale?'서버 응답 없음':({idle:'서 있는 중',turning:'도는 중',acting:'동작 중'}[s.state]||s.state));
+{const a=document.getElementById('dalert');a.style.display=s.dlg_alert?'block':'none';a.textContent=s.dlg_alert||''}
 if(s.dlg_log&&s.dlg_log.length)document.getElementById('dlog').textContent=(s.dlg_running?'● 대화 중\\n':'')+s.dlg_log.join('\\n');
 document.getElementById('spk').textContent=s.speaking?'🔊 말하는 중 (이 동안 음성 인식은 끄기)':'🔇 조용'+(s.say_last?' · '+s.say_last:'');
 document.querySelectorAll('.wave,.shake').forEach(x=>{if(x.textContent.indexOf('말하기')<0&&x.textContent.indexOf('대화')<0)x.disabled=busy&&!s.stale})},300);
@@ -273,7 +278,7 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/state":
             self._send(json.dumps(dict(state, stale=time.time() - state["t"] > 1.0, say_last=SAY["last"],
                                         speaking=bool(state.get("speaking")) or SAY["direct"],
-                                        dlg_running=dialog.running, dlg_log=dialog.log[-14:])))
+                                        dlg_running=dialog.running, dlg_log=dialog.log[-14:], dlg_alert=dialog.alert)))
         else:
             self._send(PAGE, "text/html")
 
@@ -306,7 +311,7 @@ class H(BaseHTTPRequestHandler):
                 op = self.path[8:]
                 if op == "start":
                     DLG["bear"] = (int(req.get("obj_bearing_deg", 60)), int(req.get("user_bearing_deg", -30)))
-                    msg = dialog.start(req.get("mode", "mic"), bool(req.get("with_attend")))
+                    msg = dialog.start(req.get("mode", "mic"), bool(req.get("with_attend")), str(req.get("kind", "plant")))
                 elif op == "stop":
                     msg = dialog.stop()
                 elif op == "answer":

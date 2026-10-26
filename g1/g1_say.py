@@ -12,6 +12,7 @@
   · --direct(g1_play_pcm, 새 DDS 참여자)는 서버가 없을 때만. 젯슨에서 재생 직전에 서버가 떠 있으면 거부한다.
 """
 import argparse
+import math
 import os
 import socket
 import subprocess
@@ -51,6 +52,16 @@ def say(wav: str, jetson: str = "127.0.0.1", user: str = "unitree", play: bool =
     return path
 
 
+def pad_for_player(raw: bytes, margin: float = 0.3) -> bytes:
+    """g1_play_pcm 은 1초 조각을 0.85초 간격으로 보내고 마지막 조각 뒤 0.85+0.7초에 PlayStop → M초 파일이면
+    0.85*ceil(M)+0.7 초에 끊는다(보내기가 재생보다 빨라 약 4.7초보다 긴 문장은 끝이 잘림 — g1_audio.py 와 같은 문제).
+    소리 N초가 끝난 뒤(margin) 끊기도록 필요한 만큼만 무음을 덧붙인다. 무음이 길면 그만큼 다음 듣기가 늦다."""
+    n = len(raw) / 32000
+    chunks = max(math.ceil(n), math.ceil((n + margin - 0.7) / 0.85))
+    need = max(n, chunks - 1 + 0.05)
+    return raw + b"\x00\x00" * int(16000 * (need - n))
+
+
 def say_direct(wav: str, jetson: str, user: str = "unitree", volume: int = 100, iface: str = "eth1") -> str:
     """정책 없을 때 경로: raw PCM 으로 올려 젯슨 g1_play_pcm(실기 확인된 C++ 재생기)으로 튼다. 끝날 때까지 블록."""
     if _local(jetson):
@@ -58,7 +69,7 @@ def say_direct(wav: str, jetson: str, user: str = "unitree", volume: int = 100, 
     with wave.open(wav, "rb") as w:
         if (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (1, 2, 16000):
             raise ValueError("16 kHz mono int16 WAV 만 — g1_tts.synth 로 만든 파일을 쓰세요")
-        raw = w.readframes(w.getnframes())
+        raw = pad_for_player(w.readframes(w.getnframes()))
     dst = f"{user}@{jetson}"
     pcm = f"/tmp/molbwa_say_{int(time.time() * 1000)}.pcm"
     guard = (f"if pgrep -f \"[g]1_motion_server.py\" >/dev/null; then echo '거부: 모션 서버(정책)가 돌고 있음 — UDP say 를 쓰세요'; "
