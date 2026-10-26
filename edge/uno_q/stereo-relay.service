@@ -11,7 +11,7 @@ WorkingDirectory=/home/arduino/stereo
 ExecStart=/usr/bin/python3 /home/arduino/stereo/stereo_relay.py \
   --left  /dev/v4l/by-path/CHANGE_ME_LEFT-video-index0 \
   --right /dev/v4l/by-path/CHANGE_ME_RIGHT-video-index0 \
-  --width 640 --height 480 --fps 30
+  --width 640 --height 480 --fps 60
 Restart=always
 RestartSec=2
 

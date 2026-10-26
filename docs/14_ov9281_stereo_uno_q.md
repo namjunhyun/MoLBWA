@@ -58,7 +58,7 @@ UNO Q:
 python3 ~/stereo/stereo_relay.py \
   --left  /dev/v4l/by-path/<왼쪽>-video-index0 \
   --right /dev/v4l/by-path/<오른쪽>-video-index0 \
-  --width 640 --height 480 --fps 30 \
+  --width 640 --height 480 --fps 60 \
   --controls "auto_exposure=1,exposure_time_absolute=150"     # 이름·값은 카메라에 맞게, 두 대 똑같이
 ```
 - 5초마다 `받은 프레임 · 보낸 쌍 · 어긋남 ms 중앙/95%/최대` 가 찍힌다. **보낸 쌍이 fps 에 가깝고 어긋남 중앙이 10 ms 안쪽**이면 정상.

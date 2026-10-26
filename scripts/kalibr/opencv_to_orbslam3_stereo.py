@@ -41,7 +41,7 @@ File.version: "1.0"
 Camera.type: "PinHole"
 {cam}Camera.width: {w}
 Camera.height: {h}
-Camera.fps: 30
+Camera.fps: 60
 Camera.RGB: 0
 Stereo.ThDepth: 40.0
 Stereo.T_c1_c2: !!opencv-matrix

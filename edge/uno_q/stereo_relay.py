@@ -92,7 +92,6 @@ class Cam(threading.Thread):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
         cap.set(cv2.CAP_PROP_FPS, a.fps)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if a.fourcc == "MJPG":
             self.passthrough = bool(cap.set(cv2.CAP_PROP_CONVERT_RGB, 0))
         self.cap, self.jq = cap, a.jpeg_quality
@@ -141,7 +140,7 @@ def main():
     ap.add_argument("--right", help="오른쪽 카메라 장치")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
-    ap.add_argument("--fps", type=float, default=30)
+    ap.add_argument("--fps", type=float, default=60, help="Waveshare OV9281 USB(A) 는 MJPG 60·120 fps 만 지원(30 없음)")
     ap.add_argument("--fourcc", default="MJPG", help="MJPG(권장, USB2 두 대) / GREY / YUYV")
     ap.add_argument("--jpeg_quality", type=int, default=90, help="보드에서 인코드할 때만")
     ap.add_argument("--controls", default="", help="두 카메라에 똑같이 넣을 v4l2 컨트롤 (예: auto_exposure=1,exposure_time_absolute=150)")
