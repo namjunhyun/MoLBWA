@@ -12,7 +12,7 @@ RP=$!; sleep 2
 ros2 run uvc_stereo uvc_stereo_bridge --ros-args -p host:=127.0.0.1 -p port:=55101 -p prefix:=/camera \
   -p rectify:=false -p publish_raw:=true > /tmp/uvc_local_bridge.log 2>&1 &
 BP=$!
-trap 'kill $BP $RP 2>/dev/null' EXIT
+trap 'pkill -P $BP 2>/dev/null; kill $BP $RP 2>/dev/null' EXIT   # ros2 run 이 띄운 실제 노드(자식)까지 — 안 그러면 남는다
 if [ "${1:-8}" = keep ]; then
   echo "중계·브리지 실행 중 (/camera/left·right 원본). 로그: /tmp/uvc_local_relay.log  Ctrl-C 로 끝"; wait $BP; exit
 fi
