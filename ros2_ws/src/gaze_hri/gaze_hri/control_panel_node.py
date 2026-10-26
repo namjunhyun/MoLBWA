@@ -83,6 +83,8 @@ class ControlPanel(Node):
         self.declare_parameter("yolo_imgsz", 640)
         # 2026-10-22: 화면 녹화. 폴더를 주면 GUI 화면(탑다운 + 광선·PICK/PLACE + 사이드바)을 15fps avi 로 남긴다
         self.declare_parameter("record_dir", "")
+        # 2026-10-26: 팔별 뻗음 보정 [이 팔, 다른 팔들...] — 초록 띠(집기 범위)를 실제 거리로 그린다
+        self.declare_parameter("reach_offsets", [0.0])
         self._rec, self._rec_t, self._rec_path = None, 0.0, None       # 2026-10-22: 탑다운 1280x720 은 "MJPG" (YUYV 는 10fps)
         self.declare_parameter("sidebar_width", 320)
         self.declare_parameter("table_z", 0.0)
@@ -228,6 +230,10 @@ class ControlPanel(Node):
             self.create_subscription(PoseStamped, "/head/pose", self.on_head, qos)
             self.create_subscription(PointStamped, "/gaze/ray_point", self.on_ray_point, qos)
             self.create_subscription(Int32, "/gaze/snapped", self.on_snapped, qos)
+            # 2026-10-26: task_manager 가 계산한 '실제로 놓일 자리'(시선 방향, 초록 띠 안) 미리보기
+            self.create_subscription(PointStamped, "/task/place_preview",
+                                     lambda m: setattr(self, "_place_prev", (m.point.x, m.point.y, time.time())), 10)
+        self._place_prev = None
         self._head = self._ray_pt = None
         self._snapped = (-1, 0.0)
 
@@ -380,16 +386,22 @@ class ControlPanel(Node):
             self._reach_cache[f] = c
         return c[1]
 
+    def _reach_off(self, label):
+        names = [self.get_parameter("arm_label").value or ""] + [n for n, _, _ in self.other_arms]
+        offs = list(self.get_parameter("reach_offsets").value)
+        return float(offs[names.index(label)]) if label in names and names.index(label) < len(offs) else 0.0
+
     def _band_at(self, label, xy, lo, hi):
         """그 팔의 띠 (손으로 그린 게 있으면 가장 가까운 pan 칸)."""
         arc = self._reach_arc(label)
+        off = self._reach_off(label)
         if not arc or not arc.get("pan_deg"):
-            return lo, hi
+            return lo + off, hi + off
         pan = math.degrees(math.atan2(xy[1], xy[0]))
         k = min(range(len(arc["pan_deg"])), key=lambda i: abs(arc["pan_deg"][i] - pan))
         if abs(arc["pan_deg"][k] - pan) > 7.5:
             return None                     # 그 방향은 손으로 그린 범위 밖
-        return arc["r_min"][k], arc["r_max"][k]
+        return arc["r_min"][k] + off, arc["r_max"][k] + off
 
     def _object_info(self):
         """검출 물체마다 각 팔 받침대까지 거리 글자와, 어느 팔이든 집기 띠 안인지."""
@@ -803,6 +815,9 @@ class ControlPanel(Node):
             objects=self.objects,
             pointer_px=px,
             ray_px=self._ray_pixels(now) if self.source != "mouse" else None,
+            place_preview=(self.homography.to_pixel(self._place_prev[0], self._place_prev[1])
+                           if self._place_prev is not None and now - self._place_prev[2] < 0.5
+                           and math.isfinite(self._place_prev[0]) else None),
             snapped_index=(self._snapped[0] if self.source != "mouse"
                            and now - self._snapped[1] < 0.5 else -1),
             pointer_holding=holding,
@@ -820,6 +835,9 @@ class ControlPanel(Node):
             object_info=self._object_info(),
             pour_spot=tuple(self.get_parameter("pour_spot").value),
             modes=(["따르기 보정"] if self.pour_calib else []) + (["집기 보정"] if self.grasp_calib else []),
+            reach_offsets={id(h): self._reach_off(n) for n, h in
+                           [(self.get_parameter("arm_label").value or "", self.homography)]
+                           + [(n, h) for n, h, _ in self.other_arms]},
             reach_arcs={id(h): a for h, a in
                         [(self.homography, self._reach_arc(self.get_parameter("arm_label").value))]
                         + [(h, self._reach_arc(n)) for n, h, _ in self.other_arms] if a},

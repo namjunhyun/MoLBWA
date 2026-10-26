@@ -1,1 +1,1 @@
-{"time": "2026-10-22 17:58:17", "arm": "a", "pick_cam": [0.3658312727636674, -0.07499311524500199, 0.04], "offset_this_cm": [0.021997649159658482, -0.9997580224391619], "offset_cm": [0.021997649159658482, -0.9997580224391619], "snapshot": "/home/nooyjs/MoLBWA-gaze-hri/notes/pour_calib/snap/snap_1022_175817.png"}
+{"time": "2026-10-26 21:25:43", "arm": "a", "label": "bottle", "pick_cam": [0.3707525968735974, 0.14397270460017417, 0.08], "offset_this_cm": [0.0, 0.0], "offset_cm": [0.0, 0.0], "snapshot": "/home/nooyjs/MoLBWA-gaze-hri/notes/pour_calib/snap/snap_1026_212542.png"}

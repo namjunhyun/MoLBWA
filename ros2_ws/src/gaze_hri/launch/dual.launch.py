@@ -34,7 +34,16 @@ Z_OFFSET = {"a": 0.02, "b": 0.0}
 # (arm_server side_descend_extra = 최대치, 실제는 위치마다 IK 로). standoff 자체를 늘리는 건 IK 불가라 안 됨
 DESCEND_EXTRA = {"a": 0.15, "b": 0.15}
 # 2026-10-22: 놓은 컵이 늘 6cm 바깥 (손 안에서 컵이 기준점보다 앞) -> 놓을 때 6cm 안쪽 (arm_server place_hold_offset)
-PLACE_HOLD = {"a": 0.06, "b": 0.06}
+# 2026-10-26: 뻗음 보정을 넣어 컵을 안 밀면 6cm 는 과하다 -> 0 에서 시작해 실측으로 다시 (옛 값 0.06 은 팔 A 밀림 기준)
+PLACE_HOLD = {"a": 0.03, "b": 0.025}   # 2026-10-26: 뻗음 보정 후에도 놓으면 바깥으로 A 3.1cm, B 2.5cm (따르기 자리 실측)
+# 2026-10-26: 수평 자세 실제 컵 중심이 모델보다 팔 방향으로 더 나감 (빈 컵 테이프 실측, 새 탑다운 캘리브 기준)
+REACH_OFFSET = {"a": 0.022, "b": 0.035}
+# 따르기 자리 (팔 A 기준 xy). task_manager 와 control_panel 이 같은 값을 쓴다
+# 2026-10-26: 새 테이프 자리 (팔별 뻗음 보정 후 두 팔 다 수평으로 놓을 수 있게 — 모델 거리 A 39.1, B 38.2cm)
+POUR_SPOT = [0.377, -0.182]
+# 따르기: 컵이 병 팔에서 이보다 멀면 거부. 새 자리는 41.9/42.5cm 라 40 -> 43 (안 닿으면 arm_server 가
+# 끝 각도를 5° 씩 줄여 다시 계획하고, 그래도 안 되면 움직이기 전에 거부한다)
+POUR_MAX_R = 0.43
 
 
 def generate_launch_description():
@@ -83,6 +92,9 @@ def generate_launch_description():
                  "z_offset": Z_OFFSET.get(a, 0.0),
                  "side_descend_extra": DESCEND_EXTRA.get(a, 0.0),
                  "place_hold_offset": PLACE_HOLD.get(a, 0.0),
+                 "reach_offset": REACH_OFFSET.get(a, 0.0),
+                 # 2026-10-26: 집기 보정은 물체별(라벨). 옛 기록(라벨 없음, 옛 캘리브 + 컵 밀림)은 *_grasp.jsonl.old_1026 로 뺌
+                 "grasp_correction": True,
                  "homography_file": homography[a],      # 따르기 보정: 화면 방향 -> 책상 방향
                  # 리더 (tools/so101_leader.py assign/solve). 아직 없으면 "" — 따르기 보정만 거부된다
                  "leader_port": leader_port(a) or "",
@@ -115,6 +127,8 @@ def generate_launch_description():
              parameters=[params, {
                  "input_source": inp, "homography_file": homography["a"],
                  "record_dir": LaunchConfiguration("record_dir"),
+                 "reach_offsets": [REACH_OFFSET["a"], REACH_OFFSET["b"]],     # [이 팔 A, 다른 팔 B]
+                 "pour_spot": POUR_SPOT,
                  "camera_index": cam_idx, "detect_objects": True,
                  "joint_states_topic": "/arm_a/joint_states", "arm_label": "A",
                  "allow_calib": False,
@@ -140,6 +154,10 @@ def generate_launch_description():
                  "arms": list(ARMS),
                  "arm_homographies": [homography[a] for a in ARMS],
                  "arm_actions": [f"/arm_{a}/pick_place" for a in ARMS],
+                 "pour_spot": POUR_SPOT,
+                 "pour_max_r": POUR_MAX_R,
+                 "arm_reach_offsets": [REACH_OFFSET.get(a, 0.0) for a in ARMS],
+                 "place_along_ray": ParameterValue(is_gaze, value_type=bool),   # 시선 모드: 놓을 곳을 시선 방향 초록 띠 안으로
                  "pick_min_r": float(band["place_min_r"]),     # 숙여 집기 포함 (arm_server side_tilt_min_radius 와 같게)
                  "pick_max_r": float(band["place_max_r"]),
                  "place_min_r": float(band["place_min_r"]),

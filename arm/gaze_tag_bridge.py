@@ -72,6 +72,7 @@ class GazeToBase:
         # 소비자(calibrate_world_to_base)가 origin+point로 광선을 재구성해 진짜 높이와
         # 교차시키므로, 어느 점이든 광선 위에 있기만 하면 된다.
         self.calib_mode = calib_mode
+        self.ray_fallback_m = 0.0     # main 에서 설정 (--ray-fallback-m)
         self.last_ray = None
         self.hold_s = 0.0 if calib_mode else hold_s   # 캘리브 때는 옛 자세를 섞지 않는다
         self._last_T, self._last_T_t = None, 0.0
@@ -167,7 +168,13 @@ class GazeToBase:
         else:
             p = ray_hit_height(origin, direction, self.plane_z)
             if p is None:
-                return None, None, "광선이 테이블 쪽을 안 향함"
+                # 2026-10-26: 멀리 있는 물병(62cm)을 보면 광선이 거의 수평이라 책상과 안 만나 시선이 통째로
+                # 끊겼다. 선택은 '광선이 물체 옆을 몇 cm 지나는가'라 교점이 없어도 된다 -> 방향만 살려 보낸다
+                norm = np.linalg.norm(direction)
+                if self.ray_fallback_m <= 0 or norm < 1e-9:
+                    return None, None, "광선이 테이블 쪽을 안 향함"
+                p = origin + direction / norm * self.ray_fallback_m
+                src = src + "-noplane"
         T_origin = np.linalg.inv(T).copy()
         T_origin[:3, 3] = origin      # 하류가 origin→p 로 광선을 재구성 — 진짜 원점을 싣는다
         return p, T_origin, src
@@ -196,6 +203,8 @@ def main():
                          "(그리퍼 끝처럼 공중의 점을 볼 때 쓸 것)")
     ap.add_argument("--tag-hold-s", type=float, default=0.3,
                     help="태그를 놓친 프레임에 직전 머리 자세를 이어 쓰는 최대 시간 [s] (0=끔)")
+    ap.add_argument("--ray-fallback-m", type=float, default=1.5,
+                    help="광선이 책상과 안 만나면 머리에서 이 거리의 광선 위 점을 보낸다 (0 이면 예전처럼 버림)")
     ap.add_argument("--debug-ray", action="store_true",
                     help="2초마다 armbase 기준 광선 원점/방향 중앙값과 평면까지 거리 출력")
     args = ap.parse_args()
@@ -209,6 +218,7 @@ def main():
                      {k: a[k] for k in ("stale_after_s", "drift_warn_m", "drift_max_m",
                                         "latch_ema_alpha")},
                      use_slam=args.slam, calib_mode=args.calib_mode, hold_s=args.tag_hold_s)
+    g2b.ray_fallback_m = args.ray_fallback_m
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
                      gaze_px_port=args.gaze_px_port, gaze_ray_port=args.gaze_ray_port)
     if args.slam and not args.latest_pose:

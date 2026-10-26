@@ -341,6 +341,10 @@ class ArmServer(Node):
         # 2026-10-22: 컵은 밀면서 잡혀 손 안에서 기준점보다 ~6cm 앞에 있다 -> 놓으면 늘 6cm 바깥 (팔 A 6.0,
         # 6.1, 5.8cm). 놓을 때 그만큼 안쪽을 목표로. 안쪽이라 놓은 뒤 9cm 뒤로는 못 빠져 2~5cm 중 닿는 만큼
         self.declare_parameter("place_hold_offset", 0.0)
+        # 2026-10-26: 수평 자세에서 실제 컵 중심이 모델 TCP 보다 팔 방향으로 더 나간다 (빈 컵 테이프 실측:
+        # 팔 A 2.2cm, 팔 B 3.5cm). 그만큼 더 들어가 컵을 3~4cm 밀고 잡았다 -> 목표를 팔 쪽으로 당긴다.
+        # 집기는 늘, 놓기는 컵 놓기(task "" / grasp_calib)만 (따르기 place 는 컵 위치라 그대로)
+        self.declare_parameter("reach_offset", 0.0)
         self.declare_parameter("place_hold_labels", ["cup"])
         self.declare_parameter("place_retreat_max", 0.05)
         self.declare_parameter("place_retreat_min", 0.02)
@@ -1136,11 +1140,19 @@ class ArmServer(Node):
             go = self._grasp_offset()
             self._grasp_cam_pick = np.array(pick, float)
             if go is not None and np.linalg.norm(go) > 1e-6:
-                # 2026-10-22: 위치는 모두 물체 바닥 중심(카메라 검출점 + 이 팔 집기 보정)으로 통일 —
-                # 따르기의 컵 위치에도 같은 보정을 더한다 (예전엔 병에만 더해 컵과 기준이 달랐다)
                 pick = pick + np.array([go[0], go[1], 0.0])
-                place = place + np.array([go[0], go[1], 0.0])
-                self.get_logger().info(f"  집기 보정 적용: {np.round(go * 100, 1).tolist()} cm")
+                if task in ("", "grasp_calib"):   # 같은 물체를 놓을 때만 (2026-10-26: 물체별 보정)
+                    place = place + np.array([go[0], go[1], 0.0])
+                self.get_logger().info(f"  집기 보정 적용({self._pick_label}): {np.round(go * 100, 1).tolist()} cm")
+            if task not in ("", "grasp_calib"):
+                gc = self._grasp_offset("cup")      # 따르기의 컵 위치는 컵 보정(없으면 그대로)
+                if gc is not None:
+                    place = place + np.array([gc[0], gc[1], 0.0])
+            ro = float(self.get_parameter("reach_offset").value)
+            if ro and self.get_parameter("grasp_mode").value == "side":
+                # 2026-10-26: 따르기의 컵 위치에도 — 빼면 실제로 닿는 컵(43cm)을 IK 불가로 거부했다
+                pick, place = self._reach_pull(pick), self._reach_pull(place)
+                self.get_logger().info(f"  팔별 뻗음 보정 {ro * 100:.1f}cm (팔 쪽으로)")
             self._place_standoff = None
             hold = float(self.get_parameter("place_hold_offset").value)
             if (hold > 0.0 and task in ("", "grasp_calib")
@@ -1152,10 +1164,16 @@ class ArmServer(Node):
                 self.get_logger().info(
                     f"  놓을 곳 {hold * 100:.0f}cm 안쪽으로 (손 안의 컵이 앞에 있음), 놓은 뒤 "
                     f"{self._place_standoff * 100:.1f}cm 뒤로 빠짐")
+            elif (ro and task in ("", "grasp_calib")
+                    and self.get_parameter("grasp_mode").value == "side"):
+                # 2026-10-26: 밀림 보정을 0 으로 두면 기본 9cm 뒤 접근점이 받침대 28cm 라 IK 가 안 풀렸다
+                # (따르기 자리, 팔 B) -> 뻗음 보정을 쓸 때는 놓은 뒤 닿는 만큼(2~5cm)만 빠진다
+                self._place_standoff = self._place_retreat(place)
+                self.get_logger().info(f"  놓은 뒤 {self._place_standoff * 100:.1f}cm 뒤로 빠짐")
             self.check_safe(pick, "집을")
             self.check_safe(place, "놓을")
             if task in ("pour", "pour_calib"):
-                self._pour_plan(pick, place)   # 안 되면 IKError (아직 안 움직임)
+                self._pour_plan_pulled(pick, place)   # 안 되면 IKError (아직 안 움직임). 끝이면 조금 당겨서
                 self._side_pitch(pick, "병", max_tilt_deg=POUR_MAX_GRASP_TILT)
             elif self.get_parameter("grasp_mode").value == "side":
                 # 2026-10-14: 움직이기 전에 집기/놓기 둘 다 닿는지 실제 IK 로 확인 (안 되면 다른 팔에게)
@@ -1353,6 +1371,34 @@ class ArmServer(Node):
             break
         cache[key] = best
         return best
+
+    def _pour_plan_pulled(self, bottle, cup, max_pull=0.05, step=0.005):
+        """2026-10-26: 놓인 컵이 따르기 도달 끝(병 쥔 손이 컵보다 5~7cm 바깥, 높이 23cm)을 1~3cm 넘으면
+        병을 그냥 내려놨다. 컵 목표를 이 팔 쪽으로 0.5cm 씩 최대 max_pull 당겨 풀리는 곳에서 따른다
+        (입구가 그만큼 팔 쪽으로 치우침 -> 따르기 보정 p 로 맞춘다)."""
+        try:
+            return self._pour_plan(bottle, cup), cup
+        except IKError as first:
+            r = float(np.linalg.norm(cup[:2]))
+            d = step
+            while d <= max_pull + 1e-9 and r > d:
+                c = np.array([cup[0] * (r - d) / r, cup[1] * (r - d) / r, cup[2]])
+                try:
+                    plan = self._pour_plan(bottle, c)
+                    self.get_logger().warn(f"  따르기 도달 끝 — 컵 목표를 팔 쪽으로 {d * 100:.1f}cm 당겨 계획"
+                                           " (입구가 그만큼 팔 쪽, 따르기 보정으로 맞출 것)")
+                    return plan, c
+                except IKError:
+                    d += step
+            raise first
+
+    def _reach_pull(self, q):
+        """수평 자세에서 실제가 모델보다 더 뻗는 만큼(reach_offset) 목표를 받침대 쪽으로 당긴다."""
+        ro = float(self.get_parameter("reach_offset").value)
+        r = float(np.linalg.norm(q[:2]))
+        if not ro or r < 1e-6:
+            return q
+        return np.array([q[0] * (r - ro) / r, q[1] * (r - ro) / r, q[2]])
 
     def _place_retreat(self, place):
         """안쪽으로 당긴 놓을 곳에서 뒤로 빠질 거리: max~min 을 0.5cm 씩 줄이며 IK 가 풀리는 가장 큰 값."""
@@ -1941,7 +1987,9 @@ class ArmServer(Node):
         # 집기 보정(xy)·높이 보정은 execute 에서 이미 병 위치에 더했다
         # 2026-10-14: 보정 때도 지금까지의 보정을 적용해서 시작한다 (적용 안 하면 먼 컵이 IK 로 거부됐다).
         # 기록은 '카메라 컵 기준 누적 오프셋' 이라 적용한 보정 + 이번에 옮긴 양으로 남긴다.
-        plan = self._pour_plan(bottle, cup)   # 움직이기 전에 전부 검사
+        raw_cup = np.asarray(cup, float).copy()
+        plan, cup = self._pour_plan_pulled(bottle, cup)   # 움직이기 전에 전부 검사 (도달 끝이면 조금 당김)
+        pull_v = np.asarray(cup[:2], float) - raw_cup[:2]   # 당긴 양 — 보정 기록(카메라 컵 기준)에 더한다
         segs, cfg = plan["qsegs"], plan["cfg"]
 
         def path(name):
@@ -1955,6 +2003,19 @@ class ArmServer(Node):
             f"{dur('move'):.1f}s -> {cfg.onset_deg:.0f}° -> 천천히 {cfg.max_deg:.0f}° {dur('pour'):.1f}s")
         _, _, _, above = self._side_points(bottle, "병")
         up_here = np.array([bottle[0], bottle[1], plan["carry"][2]])
+        # 2026-10-26: 멀리 놓인 병(받침대 42cm+)은 그 자리에서 23cm 로 들어 올리는 자세가 IK 불가라
+        # 집었다가 그냥 내려놨다 -> 들어 올릴 점만 받침대 쪽으로 1cm 씩(최대 10cm) 당겨 풀리는 곳으로
+        r_b = float(np.linalg.norm(bottle[:2]))
+        for d_in in np.arange(0.0, 0.1001, 0.01):
+            c = np.array([bottle[0] * (r_b - d_in) / r_b, bottle[1] * (r_b - d_in) / r_b, up_here[2]])
+            try:
+                solve_with_fallback(c, self.geo, pitch_candidates=[0.0])
+            except IKError:
+                continue
+            if d_in > 0:
+                self.get_logger().info(f"  병을 들어 올릴 점을 받침대 쪽으로 {d_in * 100:.0f}cm 당김 (그 자리 위는 IK 불가)")
+            up_here = c
+            break
 
         def cancelled():
             return self._cancel or goal_handle.is_cancel_requested
@@ -1964,7 +2025,7 @@ class ArmServer(Node):
             base = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "session": time.strftime("%m%d_%H%M%S"),
                     "arm": self.get_parameter("arm_name").value,
-                    "cup_cam": np.asarray(cup, float), "bottle": np.asarray(bottle, float),
+                    "cup_cam": raw_cup, "bottle": np.asarray(bottle, float),
                     "s": plan["s"], "roll_sign": int(self.get_parameter("roll_sign").value),
                     "bottle_height": cfg.bottle_height, "cup_height": cfg.cup_height,
                     "lip_clear": cfg.lip_clear}
@@ -2000,18 +2061,23 @@ class ArmServer(Node):
                 result.success, result.message = False, f"따르기 안 함 ({got}) — 병을 제자리에 두었습니다"
                 return result
             if self._gate_cup is not None:
-                go = self._grasp_offset()
+                go = self._grasp_offset("cup")
                 new = np.array([self._gate_cup[0], self._gate_cup[1], cup[2]])
                 if go is not None:
                     new[:2] += go[:2]
+                if self.get_parameter("grasp_mode").value == "side":
+                    new = self._reach_pull(new)        # 처음 계획과 같은 뻗음 보정
                 self.get_logger().info(
                     f"  컵 다시 검출: {np.round(new[:2], 3).tolist()} (계획 {np.round(cup[:2], 3).tolist()}, "
                     f"{np.linalg.norm(new[:2] - np.asarray(cup[:2])) * 100:.1f}cm 차이) — 다시 계획")
                 try:
-                    plan = self._pour_plan(bottle, new)
+                    raw_new = new.copy()
+                    plan, new = self._pour_plan_pulled(bottle, new)
+                    pull_v = np.asarray(new[:2], float) - raw_new[:2]
                     segs, cfg, cup = plan["qsegs"], plan["cfg"], new
                     if calib:
-                        base["cup_cam"] = new
+                        # 기록 기준은 실제 검출 컵 — 당긴 양은 보정 오프셋에 포함돼야 다음에 맞는다
+                        base["cup_cam"] = raw_new
                 except IKError as exc:
                     self.get_logger().warn(f"놓인 컵 위치로 따르기 계획 불가 ({exc}) — 병을 제자리에 둡니다.")
                     self._put_bottle_back(bottle, up_here, above, g_hold, g_open, fb)
@@ -2057,7 +2123,7 @@ class ArmServer(Node):
                 return result
             rec_s, off_s = got
             c_s, c_e = plan["corr_start"], plan["corr_end"]     # 이번에 이미 적용한 보정
-            rec_s["offset_cm"] = (c_s + off_s) * 100
+            rec_s["offset_cm"] = (c_s + off_s + pull_v) * 100
             rec_s["applied_corr_cm"] = c_s * 100
             self._record_calib(rec_s)
             th_s = self._calib_theta
@@ -2076,7 +2142,7 @@ class ArmServer(Node):
                 result.success, result.message = False, "보정 취소 — 그 자리에서 정지했습니다."
                 return result
             rec_e, off_e = got
-            rec_e["offset_cm"] = (c_e + off_s + off_e) * 100      # 카메라 컵 기준 누적
+            rec_e["offset_cm"] = (c_e + off_s + off_e + pull_v) * 100      # 카메라 컵 기준 누적 (+ 도달 끝 당김)
             rec_e["applied_corr_cm"] = c_e * 100
             self._record_calib(rec_e)
             try:   # 되돌아갈 경로도 맞춘 두 자세 기준으로
@@ -2165,16 +2231,21 @@ class ArmServer(Node):
         return os.path.join(os.path.expanduser(str(self.get_parameter("pour_calib_dir").value)),
                             f"{self.get_parameter('arm_name').value or 'arm'}_grasp.jsonl")
 
-    def _grasp_offset(self):
-        """최신 집기 보정 (xy, m). 없으면 None."""
+    def _grasp_offset(self, label=None):
+        """최신 집기 보정 (xy, m). 없으면 None.
+        2026-10-26: 물체 종류별 — 컵은 잘 잡는데 물병만 한쪽으로 치우쳤다(투명 병이라 검출 중심이 밀림).
+        label(없으면 지금 집는 물체)과 같은 라벨 기록만 쓴다. 라벨 없는 옛 기록은 안 쓴다."""
         if not self.get_parameter("grasp_correction").value or not os.path.exists(self._grasp_file()):
             return None
+        label = self._pick_label if label is None else label
         last = None
         for line in open(self._grasp_file()):
             try:
-                last = json.loads(line)
+                r = json.loads(line)
             except ValueError:
                 continue
+            if r.get("label") == label:
+                last = r
         return None if last is None else np.array(last["offset_cm"][:2]) / 100.0
 
     def _grasp_calib_stage(self, target, pitch):
@@ -2222,6 +2293,7 @@ class ArmServer(Node):
         prev = self._grasp_offset()
         total = offset + (prev if prev is not None else 0.0)
         rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm": self.get_parameter("arm_name").value,
+               "label": self._pick_label,
                "pick_cam": np.asarray(self._grasp_cam_pick, float), "offset_this_cm": offset * 100,
                "offset_cm": total * 100, "snapshot": cmd.partition(":")[2] or None}
         os.makedirs(os.path.dirname(self._grasp_file()), exist_ok=True)

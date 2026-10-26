@@ -44,6 +44,7 @@
 """
 
 import math
+import time
 
 import json
 import os
@@ -88,6 +89,9 @@ class TaskManager(Node):
         # 실제보다 좁아 "선택 안 되는 곳이 너무 많다" — 사용자)
         self.declare_parameter("hard_min_r", 0.25)
         self.declare_parameter("hard_max_r", 0.44)        # 수평 집기 IK 한계 (= arm_server workspace_radius)
+        # 2026-10-26: 팔별 뻗음 보정 (arm_server reach_offset 과 같은 값, arms 순서). 수평 집기 범위는 모델 거리라
+        # 실제(카메라) 거리로는 이만큼 바깥으로 밀린다 — 안 밀면 GUI 범위 안 물병(37.7cm)을 팔이 거부했다
+        self.declare_parameter("arm_reach_offsets", [0.0])
         # 2026-10-22: 따르기는 컵을 늘 가운데 한 자리(두 팔 다 닿는 곳)에 두고 한다 (사용자 —
         # 위치가 매번 다르면 보정이 안 맞는다). 컵이 거기 없으면 먼저 옮긴 다음 따른다.
         # 첫 팔(a) 기준 컵 기준점(박스 아래 변) 좌표. 두 팔 모두 받침대 38.8cm, 컵 축 36cm.
@@ -128,6 +132,25 @@ class TaskManager(Node):
         self.target_frame = "base_link"
 
         self.create_subscription(GazeTarget, "/gaze/target", self.on_target, 10)
+        # 2026-10-26: 시선 모드 놓을 곳 — 광선-책상 교점은 머리가 낮아 초록 띠 밖(46~73cm)으로 찍혀 늘 거부됐다.
+        # 머리 -> 응시점 방향(책상 위 직선)을 따라 집는 팔의 초록 띠 안에서 교점에 가장 가까운 점에 놓는다.
+        self.declare_parameter("place_along_ray", False)
+        self._head = None
+        from geometry_msgs.msg import PoseStamped
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        be = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(PoseStamped, "/head/pose",
+                                 lambda m: setattr(self, "_head", (np.array([m.pose.position.x, m.pose.position.y]),
+                                                                   time.time())), be)
+        # 미리보기: 물체를 고른 뒤 보는 동안 실제로 놓일 자리를 GUI 에 (같은 계산 — 화면과 실제가 안 어긋나게)
+        from geometry_msgs.msg import PointStamped
+        self._ray_pt = None
+        self._place_pref_arm = None
+        self.create_subscription(PointStamped, "/gaze/ray_point",
+                                 lambda m: setattr(self, "_ray_pt", (np.array([m.point.x, m.point.y, m.point.z]),
+                                                                     time.time())), be)
+        self.pub_place_prev = self.create_publisher(PointStamped, "/task/place_preview", 10)
+        self.create_timer(0.1, self._publish_place_preview)
         self.create_subscription(Empty, "/task/cancel", self.on_cancel, 10)
 
         self.pub_role = self.create_publisher(String, "/task/expected_role", 10)
@@ -458,9 +481,18 @@ class TaskManager(Node):
                     return
                 self.task = "grasp_calib" if self.grasp_calib else ""
                 target, what = p, "놓을 곳"
+                pref = None
+                if bool(self.get_parameter("place_along_ray").value):
+                    got = self._place_along_ray(p)
+                    if got is not None:
+                        target, pref = got
                 self.try_order = self.order_for(target, what)
                 if not self.try_order:
                     return            # 집기 선택은 유지 — 다른 놓을 곳을 보면 된다
+                if pref is not None and pref in self.try_order:
+                    # 놓을 곳을 정한 팔(바라본 곳에 가까운 팔)이 맡는다
+                    self.try_order.remove(pref)
+                    self.try_order.insert(0, pref)
                 self.try_target, self.try_reasons = target, []
                 self.pick_arm = self.try_order.pop(0)
                 self.send_goal_dual(self.pick_point, target)
@@ -516,11 +548,12 @@ class TaskManager(Node):
         lo = float(self.get_parameter("pick_min_r").value)    # 컵·물병 모두 뒤에서 수평 접근 (36cm~)
         hi = float(self.get_parameter("hard_max_r").value)
         rs = self._dists(p)
-        cands = sorted((i for i in range(len(rs)) if lo <= rs[i] <= hi),
+        cands = sorted((i for i in range(len(rs)) if lo + self._ro(i) <= rs[i] <= hi + self._ro(i)),
                        key=lambda i: rs[i])
         if not cands:
             # 가장 가까운 팔 기준으로 '가깝다/멀다' (예전엔 한 팔은 가깝고 다른 팔은 멀면 '멉니다' 로 잘못 나왔다)
             i0 = int(np.argmin(rs))
+            lo, hi = lo + self._ro(i0), hi + self._ro(i0)
             near = rs[i0] < lo
             name = {"cup": "컵", "bottle": "물병"}.get(label, "물체")
             self._warn(
@@ -532,6 +565,11 @@ class TaskManager(Node):
                 f"집을 곳 거리: {self._desc(rs)} -> 닿는 팔 "
                 f"{[self.arms[i][0] for i in cands]}")
         return cands
+
+    def _ro(self, i):
+        """팔 i 의 뻗음 보정 [m] (없으면 0)."""
+        offs = list(self.get_parameter("arm_reach_offsets").value)
+        return float(offs[i]) if i < len(offs) else 0.0
 
     def order_for(self, p, what, pick=None, pour=None, quiet=False):
         """2026-10-14(5): 팔 고르기 — 집을 곳과 놓을 곳(또는 컵)을 **둘 다** 본다 (사용자).
@@ -546,12 +584,14 @@ class TaskManager(Node):
         ok, why = [], []
         for i, (n, _, _) in enumerate(self.arms):
             bad = []
-            if not pick_lo <= pr[i] <= hi:
+            ro = self._ro(i)
+            if not pick_lo + ro <= pr[i] <= hi + ro:
                 bad.append(f"집기 {pr[i] * 100:.0f}cm")
             if pour:
-                if not 0.23 <= lr[i] <= 0.40:          # 컵 중심 거리 (pour.py + IK 로 확인한 범위)
+                # 컵 중심 거리 (pour.py + IK 로 확인한 범위). 2026-10-26: 상한은 pour_max_r 설정 (옛 0.40 고정)
+                if not 0.23 <= lr[i] <= float(self.get_parameter("pour_max_r").value):
                     bad.append(f"컵 {lr[i] * 100:.0f}cm")
-            elif not pick_lo <= lr[i] <= hi:            # 같은 물체를 놓으므로 같은 범위
+            elif not pick_lo + ro <= lr[i] <= hi + ro:  # 같은 물체를 놓으므로 같은 범위
                 bad.append(f"놓기 {lr[i] * 100:.0f}cm")
             if bad:
                 why.append(f"팔 {n}: " + ", ".join(bad))
@@ -559,7 +599,8 @@ class TaskManager(Node):
                 ok.append(i)
         order = sorted(ok, key=lambda i: pr[i] + lr[i])
         rng = (f"집기 {pick_lo * 100:.0f}~{hi * 100:.0f}cm, "
-               + ("컵 23~40cm" if pour else f"놓기 {pick_lo * 100:.0f}~{hi * 100:.0f}cm"))
+               + (f"컵 23~{float(self.get_parameter('pour_max_r').value) * 100:.0f}cm" if pour
+                  else f"놓기 {pick_lo * 100:.0f}~{hi * 100:.0f}cm"))
         if quiet:
             return order
         if not order:
@@ -613,6 +654,62 @@ class TaskManager(Node):
         self._cup_anchor = np.array(o[:2], float)
         self.get_logger().info(f"물병 -> 컵: 따르기. 컵 바닥 중심 ({o[0]:.3f}, {o[1]:.3f})")
         return "pour", np.array([o[0], o[1], 0.0])
+
+    def _publish_place_preview(self):
+        from geometry_msgs.msg import PointStamped
+        if (self.state != PICK_SELECTED or self.task in ("pour", "pour_calib")
+                or not bool(self.get_parameter("place_along_ray").value)
+                or self._ray_pt is None or time.time() - self._ray_pt[1] > 0.5):
+            return
+        got = self._place_along_ray(self._ray_pt[0], quiet=True)
+        m = PointStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.target_frame or "base_link"
+        if got is None:
+            m.point.x = m.point.y = m.point.z = float("nan")      # 놓을 수 있는 곳 없음
+        else:
+            m.point.x, m.point.y, m.point.z = float(got[0][0]), float(got[0][1]), float(got[1])  # z = 팔 번호
+        self.pub_place_prev.publish(m)
+
+    def _place_along_ray(self, p, quiet=False):
+        """머리 -> 응시점 방향 직선 위에서, 물체를 집을 수 있는 팔의 초록 띠(뻗음 보정 포함) 안이면서
+        다른 물체와 8cm 이상 떨어진 점 중 원래 응시점에 가장 가까운 점 -> (점, 팔 번호). 없으면 None.
+        2026-10-26: 팔은 바라본 곳(원래 응시점)에 가까운 팔부터 — 그 팔 띠에 없을 때만 다른 팔."""
+        if self._head is None or time.time() - self._head[1] > 1.0:
+            return None
+        h = self._head[0]
+        d = np.asarray(p[:2], float) - h
+        if float(np.linalg.norm(d)) < 0.05:
+            return None
+        lo = float(self.get_parameter("pick_min_r").value)
+        hi = float(self.get_parameter("hard_max_r").value)
+        pr = self._dists(self.pick_point)
+        arms_ok = [i for i in range(len(self.arms)) if lo + self._ro(i) <= pr[i] <= hi + self._ro(i)]
+        gaze_d = self._dists(np.array([p[0], p[1], 0.0]))
+        arms_ok.sort(key=lambda i: gaze_d[i])               # 바라본 곳에 가까운 팔부터
+        others = [o for o in self.objects if np.linalg.norm(np.asarray(o[:2]) - self.pick_point[:2]) > 0.03]
+        for i in arms_ok:
+            best = None
+            for t in np.linspace(0.3, 1.6, 131):
+                q = h + d * t
+                q3 = np.array([q[0], q[1], p[2]])
+                if np.linalg.norm(q - self.pick_point[:2]) < max(self.min_separation, 0.05):
+                    continue
+                if any(np.linalg.norm(q - np.asarray(o[:2])) < 0.08 for o in others):
+                    continue
+                r = self._dists(q3)[i]
+                if not lo + self._ro(i) + 0.005 <= r <= hi + self._ro(i) - 0.005:
+                    continue
+                if best is None or abs(t - 1.0) < abs(best[0] - 1.0):
+                    best = (t, q3)
+            if best is not None:
+                q3 = best[1]
+                if not quiet:
+                    self.get_logger().info(
+                        f"놓을 곳을 시선 방향 팔 {self.arms[i][0]} 초록 띠 안으로: ({p[0]:.3f}, {p[1]:.3f}) -> "
+                        f"({q3[0]:.3f}, {q3[1]:.3f})")
+                return q3, i
+        return None
 
     def clamp_place(self, q):
         lo = float(self.get_parameter("place_min_r").value)

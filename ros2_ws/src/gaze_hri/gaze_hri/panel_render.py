@@ -53,6 +53,7 @@ class PanelState:
     pointer_px: tuple = None          # 화면 위 시선/커서 픽셀
     ray_px: list = None               # 2026-10-22 시선 광선 (책상 위 25cm, 0cm) 화면 두 점
     snapped_index: int = -1           # 광선이 붙은 물체 (objects 순서), -1 = 없음
+    place_preview: tuple = None       # 2026-10-26 실제로 놓일 자리 미리보기 (화면 픽셀)
     pointer_holding: bool = False
     hold_frac: float = 0.0            # 마우스 클릭 고정 진행률
     dwell_progress: float = 0.0
@@ -66,6 +67,7 @@ class PanelState:
     other_arms: list = field(default_factory=list)
     object_info: list = field(default_factory=list)
     reach_arcs: dict = field(default_factory=dict)
+    reach_offsets: dict = field(default_factory=dict)   # 2026-10-26: id(homography) -> 뻗음 보정 [m]
     pour_spot: tuple = None           # 2026-10-22: 따르기 자리 (첫 팔 기준 xy)
     modes: list = field(default_factory=list)          # 켜진 보정 모드 이름    # 2026-10-14: id(homography) -> 손으로 그린 띠 (pan/r_min/r_max)   # 2026-10-14: [(글자, 집기 가능?)] objects 순서  # 2026-10-14: [(호모그래피, tcp, 이름)] 다른 팔들
     has_fixation: bool = False
@@ -243,12 +245,15 @@ def _draw_reach_band(view, st, homo, max_yaw_deg=60.0):
     범위 밖에 놓였다. 받침대 중심에서 r_min~r_max 인 책상 위 영역을 반투명하게 칠한다."""
     if not getattr(homo, "ready", True):
         return
+    off = st.reach_offsets.get(id(homo), 0.0)
     arc = st.reach_arcs.get(id(homo))
+    if arc and off:
+        arc = dict(arc, r_min=[r + off for r in arc["r_min"]], r_max=[r + off for r in arc["r_max"]])
     if arc and _draw_reach_arc(view, homo, arc):
         return
     if st.reach_band is None:
         return
-    r0, r1 = st.reach_band
+    r0, r1 = st.reach_band[0] + off, st.reach_band[1] + off
     yaws = np.radians(np.linspace(-max_yaw_deg, max_yaw_deg, 41))
     pts = [homo.to_pixel(r * math.cos(a), r * math.sin(a))
            for r, seq in ((r0, yaws), (r1, yaws[::-1])) for a in seq]
@@ -289,6 +294,12 @@ def _draw_ray(view, st, hud):
     if st.ray_px:
         a, b = st.ray_px
         cv2.line(view, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), GAZE_RAY, 2, cv2.LINE_AA)
+    if st.place_preview is not None and st.task_state == "PICK_SELECTED":
+        px = st.place_preview
+        hud.marker(view, px, H.PLACE, radius=22, thickness=2, dashed=True)
+        cv2.circle(view, (int(px[0]), int(px[1])), 5, H.PLACE, -1, cv2.LINE_AA)
+        hud.chip(view, (px[0], px[1] - 26), hud.label("여기에 놓음", "PLACE HERE"), H.PLACE, 12,
+                 bold=True, anchor="cb")
     k = st.snapped_index
     if 0 <= k < len(st.objects):
         u, v = st.objects[k][0]
