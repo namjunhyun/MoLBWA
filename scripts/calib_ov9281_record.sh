@@ -9,7 +9,7 @@ cd "$(git rev-parse --show-toplevel)"
 SEC="${1:-120}"; NAME="${2:-ov9281_$(date +%Y%m%d_%H%M%S)}"
 export LEFT="${LEFT:-/dev/v4l/by-path/pci-0000:00:14.0-usb-0:2.2:1.0-video-index0}"
 export RIGHT="${RIGHT:-/dev/v4l/by-path/pci-0000:00:14.0-usb-0:2.4:1.0-video-index0}"
-export CONTROLS="${CONTROLS:-auto_exposure=1,exposure_time_absolute=80}"   # 수동·짧은 노출(8 ms) — 흔들림 흐림 방지
+export CONTROLS="${CONTROLS:-auto_exposure=1,exposure_time_absolute=80,gain=24}"   # 수동·짧은 노출(8 ms, 흐림 방지) + 게인(실내에서 게인 0 은 너무 어두움)
 source /opt/ros/jazzy/setup.bash; source ros2_ws/install/setup.bash
 bash ros2_ws/src/uvc_stereo/test/run_local_cams.sh keep & CAM=$!
 trap 'kill $PV $CAM 2>/dev/null; pkill -P $CAM 2>/dev/null; true' EXIT

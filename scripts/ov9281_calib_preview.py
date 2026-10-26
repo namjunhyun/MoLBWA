@@ -8,8 +8,11 @@ import numpy as np
 import rclpy
 from sensor_msgs.msg import Image
 
-DET = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11),
-                              cv2.aruco.DetectorParameters())
+_P = cv2.aruco.DetectorParameters()
+# 실측(2026-10-26, 판 ~1 m·태그 ~18 px): 기본값은 후보를 대부분 탈락시켜 6/36 → 아래로 19/36. 이 판독은 미리보기용이고
+# 실제 계산은 Kalibr 자체 검출기가 한다.
+_P.perspectiveRemovePixelPerCell, _P.perspectiveRemoveIgnoredMarginPerCell, _P.errorCorrectionRate = 8, 0.25, 1.0
+DET = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11), _P)
 img = {"left": None, "right": None}
 cov = {}
 
