@@ -18,5 +18,9 @@ for i in $(seq 1 20); do ros2 topic list | grep -qx /camera/left && break; sleep
 sleep 2
 echo "== ${SEC}초 녹화 → calibration/bags/${NAME}  (판을 천천히: 가까이·멀리·네 귀퉁이·30~45° 기울여서)"
 mkdir -p calibration/bags
-timeout -s INT "$SEC" ros2 bag record -s sqlite3 -o "calibration/bags/${NAME}" /camera/left /camera/right || true
+# < /dev/null 필수: Jazzy 의 bag record 는 키보드 입력(스페이스=일시정지)을 터미널에서 읽는데, timeout 이 백그라운드
+# 프로세스 그룹에 두므로 터미널을 읽는 순간 SIGTTIN 으로 멈춘다(2026-10-26 실제로 2분 녹화가 파일 하나 없이 멈춤).
+timeout -s INT "$SEC" ros2 bag record -s sqlite3 -o "calibration/bags/${NAME}" --topics /camera/left /camera/right < /dev/null || true
+[ -d "calibration/bags/${NAME}" ] || { echo "[실패] 녹화 파일이 생기지 않았다 — /camera 토픽이 나오는지 확인"; exit 1; }
+bash scripts/check_bag_counts.sh "calibration/bags/${NAME}"
 echo "== 녹화 끝: calibration/bags/${NAME}"
