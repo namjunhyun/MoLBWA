@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """캘리브레이션 bag 에서 사진마다 두 카메라 위치를 따로 풀어 상대 위치(|T|·회전)가 일정한지 본다.
    회전이 사진마다 몇 도씩 흔들리면 카메라 고정이 휘는 것 — 스테레오 캘리브레이션이 발산한다(2026-10-26 3.3~8.7°).
-   python3 scripts/kalibr/stereo_relpose_check.py   (경로는 아래 R·bag 이름을 고쳐 쓴다)
+   python3 scripts/kalibr/stereo_relpose_check.py calibration/bags/<이름>
 """
 import sys, cv2, numpy as np, yaml
 sys.path.insert(0, "/home/junhyun/창종설/.claude/worktrees/ov9281-stereo/scripts/kalibr")
@@ -10,7 +10,7 @@ R = "/home/junhyun/창종설/.claude/worktrees/ov9281-stereo/"
 K0, D0, _ = S.cam(R + "calibration/ov9281/mono_left_camchain.yaml")
 K1, D1, _ = S.cam(R + "calibration/ov9281/mono_right_camchain.yaml")
 tg = yaml.safe_load(open(R + "calibration/target.yaml")); obj = S.obj_points(tg, False)
-pairs = S.detections(R + "calibration/bags/ov9281_02", 4.0, 8)
+pairs = S.detections(sys.argv[1] if len(sys.argv) > 1 else R + "calibration/bags/ov9281_02", 4.0, 8)
 rows = []
 def pnp(D, K, Dd):
     ids = sorted(set(D) & set(obj)); o = np.concatenate([obj[i] for i in ids]); im = np.concatenate([D[i] for i in ids]).astype(np.float32)
