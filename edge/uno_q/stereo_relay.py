@@ -85,9 +85,18 @@ class Cam(threading.Thread):
         self.q = collections.deque(maxlen=8)
         self.n = 0
         self.passthrough = False
+        self.a = a
+        if not self._open():
+            raise SystemExit(f"{name} 카메라를 못 엶: {dev}")
+
+    def _open(self):
+        """열고 형식·컨트롤 설정. USB 가 끊겼다 붙으면 run() 이 이걸 다시 부른다(by-path 경로는 다시 꽂아도 같다)."""
+        a, name, dev = self.a, self.name, self.dev
         cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
         if not cap.isOpened():
-            raise SystemExit(f"{name} 카메라를 못 엶: {dev}")
+            return False
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)   # 끊김을 10 s(기본) 대신 1 s 안에 알아챈다
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*a.fourcc))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
@@ -99,16 +108,25 @@ class Cam(threading.Thread):
         fcc = int(cap.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode(errors="replace")
         print(f"{name}: {dev} → {int(cap.get(3))}x{int(cap.get(4))} @{cap.get(5):.0f}fps {fcc} "
               f"({'MJPG 그대로 전달' if self.passthrough else '보드에서 JPEG 인코드'})", flush=True)
-        self.t0_wall_mono = (time.time(), time.monotonic())
+        return True
 
     def run(self):
+        t_last = time.monotonic()
         while True:
             ok, f = self.cap.read()
             t_cam = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0    # V4L2 버퍼 시각(단조 시계)
             t = t_cam if t_cam > 0 else time.monotonic()            # 못 주는 드라이버면 읽은 시각
             if not ok or f is None:
+                # 2026-10-27: 안경을 쓰고 움직이다 케이블이 당겨져 USB 가 1 s 끊겼다 붙었는데, 다시 안 열어서 그 뒤로 0 프레임.
+                if time.monotonic() - t_last > 1.0:
+                    print(f"[경고] {self.name} 1초째 프레임 없음 — USB 끊김으로 보고 다시 연다", flush=True)
+                    self.cap.release()
+                    while not self._open():
+                        time.sleep(0.5)
+                    t_last = time.monotonic()
                 time.sleep(0.005)
                 continue
+            t_last = time.monotonic()
             if self.passthrough and f.ndim == 2 and f.shape[0] == 1:   # 압축 그대로 (1×N 바이트)
                 jpg = f.tobytes()
             else:
