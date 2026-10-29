@@ -21,6 +21,12 @@ yolo:
   conf: 0.25
   classes: [g1_face, g1_hand, g1_torso]
 
+# 물체 YOLO(시선이 향한 물건 → 대화 kind). classes 는 obj_gaze_detector.OBJ_TO_KIND 키를 그대로 쓴다.
+# model: 아직 ~/yolo-env 에 없다 — `yolo settings` 로 받거나 ultralytics 가 자동 내려받게 한다. --no-obj 로 끌 수 있다.
+obj_yolo:
+  model: "~/yolo-env/yolo11l.pt"
+  conf: 0.3
+
 # 같이 보기: 착용자가 보는 물체까지 가정 거리 (스테레오 깊이 연결 전). 지원이 기준 물체 방위 계산에 쓴다
 attend:
   object_dist_m: 1.5

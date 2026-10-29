@@ -14,7 +14,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from g1_protocol import PART_TO_SEGMENT, PORT_CMD, PORT_STATE, decode, encode, plan, plan_attend
+from g1_protocol import PART_TO_SEGMENT, PORT_BRIDGE, PORT_CMD, PORT_STATE, decode, encode, plan, plan_attend
+from g1_orchestrator import Orchestrator
 import g1_dialog
 import g1_say
 import g1_tts
@@ -27,7 +28,7 @@ AP.add_argument("--tts", choices=["edge", "clova"], default="edge",
                 help="목소리: edge(무료, 기본) / clova(CLOVA Voice Premium — 월 기본요금 9만원, 앱에서 체크 필요)")
 AP.add_argument("--volume", type=int, default=100, help="정책 꺼졌을 때 직접 재생 음량(0~100)")
 AP.add_argument("--ssh", default="", help="실기: unitree@<젯슨 IP>. 주면 비상정지·정지·모드·정책 ON 버튼이 켜진다 (젯슨 ~/molbwa_g1/g1_ctl.py)")
-args = AP.parse_args()
+args, _ = AP.parse_known_args()   # 테스트에서 import 만 해도 안 죽게 — 모르는 인자는 흘린다
 os.environ["TTS_ENGINE"] = args.tts
 
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -44,7 +45,6 @@ def listen_state():
             state.update(m, t=time.time())
 
 
-threading.Thread(target=listen_state, daemon=True).start()
 CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "shutdown", "status"}
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
        "-o", "ControlPath=/tmp/g1_panel_%r@%h", "-o", "ControlPersist=600"]
@@ -143,7 +143,63 @@ def dialog_attend(text):
 
 
 dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic, synth=g1_tts.synth)
-threading.Thread(target=dialog.warm, daemon=True).start()   # 고정·대비 문장 미리 합성(캐시) — TTS 가 죽어도 대화가 끝까지 간다
+
+
+# ── 자동 교감(시선 → 명령) ───────────────────────────────────────────────
+# 브리지(55057)가 부위 라벨·물체 kind·방위를 보낸다. 오케스트레이터가 dwell 로 확정해
+# 부위 → act, 물체 → 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
+AUTO = {"on": False, "status": "대기"}        # status = /demo 큰 문구(현재 교감 상태)
+LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)
+AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
+PART_STATUS = {"g1_face": "👋 얼굴을 보고 손 흔들기", "g1_hand": "🤝 손을 보고 악수",
+               "g1_torso": "🙆 몸을 보고 양팔 벌리기"}
+
+
+def _auto_send(cmd):
+    """오케스트레이터 send_cmd 콜백. cmd = {seq, cmd:'act', part, bearing_deg}. auto ON 일 때만 발사."""
+    if not AUTO["on"]:
+        return
+    seq = send({"cmd": cmd["cmd"], "part": cmd["part"], "bearing_deg": cmd["bearing_deg"]})   # send() 가 seq 재부여
+    AUTO["status"] = PART_STATUS.get(cmd["part"], cmd["part"])
+    print(f"[auto] act seq {seq}: {cmd['part']} @ {cmd['bearing_deg']}°", flush=True)
+
+
+def _auto_dialog(kind, bearing):
+    """오케스트레이터 start_dialog 콜백. 물체 kind + 물체 방위. dialog_attend 방위 세팅 후 대화 시작."""
+    if not AUTO["on"]:
+        return
+    DLG["bear"] = (int(bearing), LAST["user_bearing"])     # 같이 보기: (물체, 착용자) 방위
+    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=True, kind=kind)
+    AUTO["status"] = f"💬 {g1_dialog.SCENARIOS.get(kind, {}).get('name', kind)} 이야기 나누는 중"
+    print(f"[auto] dialog {kind} @ {bearing}°: {msg}", flush=True)
+
+
+def is_busy():
+    """오케스트레이터 is_busy 콜백 — 로봇이 동작·말하는 중이거나 대화 진행 중."""
+    return robot_busy() or dialog.running
+
+
+orc = Orchestrator(_auto_send, _auto_dialog, is_busy)
+
+
+def listen_bridge():
+    """브리지(55057) 수신 → 오케스트레이터 투입. 부위 먼저(부위 우선), 물체 다음."""
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("0.0.0.0", PORT_BRIDGE))
+    while True:
+        m = decode(rx.recvfrom(4096)[0])
+        if not m:
+            continue
+        t = m.get("t") or time.time()
+        ub = m.get("bearing_deg")
+        ub_i = int(round(ub)) if isinstance(ub, (int, float)) else 0
+        if isinstance(ub, (int, float)):
+            LAST["user_bearing"] = ub_i
+        label = m.get("label")
+        orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
+        ob = m.get("obj_bearing_deg")
+        ob_i = int(round(ob)) if isinstance(ob, (int, float)) else 0
+        orc.feed_object(t, m.get("obj_kind"), ob_i)
 
 
 def save_upload(data: bytes) -> str:
@@ -262,6 +318,43 @@ document.getElementById('spk').textContent=s.speaking?'🔊 말하는 중 (이 �
 document.querySelectorAll('.wave,.shake').forEach(x=>{if(x.textContent.indexOf('말하기')<0&&x.textContent.indexOf('대화')<0)x.disabled=busy&&!s.stale})},300);
 </script>"""
 
+# 발표용 페이지(/demo): 큰 상태 문구 + 대화 말풍선 + 자동 교감 토글/표시 + 비상정지만. 세부 버튼·SSH 없음.
+DEMO_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>지원이 시선 교감</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:0 auto;padding:24px 16px;background:#0b1020;color:#f1f5f9}
+h1{font-size:22px;margin:0 0 16px}
+#auto{width:100%;padding:28px;font-size:26px;font-weight:800;border:0;border-radius:16px;cursor:pointer;background:#334155;color:#fff}
+#auto.on{background:#7c3aed}#dot{display:inline-block;width:16px;height:16px;border-radius:50%;background:#64748b;margin-right:10px;vertical-align:middle}
+#dot.on{background:#22c55e;box-shadow:0 0 14px #22c55e}
+#status{font-size:34px;font-weight:800;text-align:center;padding:30px 16px;margin:18px 0;border-radius:16px;background:#111827;min-height:44px;line-height:1.35}
+#bubbles{margin:18px 0;min-height:80px;display:flex;flex-direction:column}
+.b{margin:6px 0;padding:12px 16px;border-radius:14px;font-size:17px;max-width:82%;white-space:pre-wrap}
+.me{background:#1e293b;align-self:flex-start}.you{background:#2563eb;align-self:flex-end;text-align:right}
+#alert{display:none;background:#7f1d1d;color:#fff;font-weight:800;font-size:20px;padding:16px;border-radius:12px;margin:12px 0}
+.estop{width:100%;padding:22px;font-size:22px;font-weight:800;border:0;border-radius:14px;background:#dc2626;color:#fff;cursor:pointer;margin-top:12px}
+</style>
+<h1>지원이 — 시선 교감 데모 <small style="color:#888">(세부 조작은 <a href="/origin" style="color:#60a5fa">/origin</a>)</small></h1>
+<button id="auto" onclick="toggle()"><span id="dot"></span><span id="al">자동 교감 시작</span></button>
+<div id="status">대기</div>
+<div id="alert"></div>
+<div id="bubbles"></div>
+<button class="estop" onclick="if(confirm('비상정지: 로봇 힘을 뺍니다(받쳐야 함). 계속할까요?'))fetch('/ctl/damp',{method:'POST'})">⛔ 비상정지</button>
+<script>
+let on=false;
+async function toggle(){on=!on;await fetch('/auto',{method:'POST',body:JSON.stringify({on:on})});draw()}
+function draw(){document.getElementById('auto').classList.toggle('on',on);document.getElementById('dot').classList.toggle('on',on);
+document.getElementById('al').textContent=on?'자동 교감 중 — 정지':'자동 교감 시작'}
+setInterval(async()=>{const s=await(await fetch('/state')).json();on=!!s.auto_on;draw();
+document.getElementById('status').textContent=s.auto_status||(on?'시선을 기다려요':'대기');
+{const a=document.getElementById('alert');a.style.display=s.dlg_alert?'block':'none';a.textContent=s.dlg_alert||''}
+const bb=document.getElementById('bubbles');bb.innerHTML='';
+(s.dlg_log||[]).forEach(line=>{const m=line.match(/^\\d\\d:\\d\\d:\\d\\d \\[(.*?)\\] (.*)$/);if(!m)return;
+const you=/대답/.test(m[1]),me=/질문|생성|대체|마무리|고정|위험|기다림/.test(m[1]);if(!you&&!me)return;
+const e=document.createElement('div');e.className='b '+(you?'you':'me');e.textContent=m[2];bb.appendChild(e)});
+bb.scrollTop=bb.scrollHeight},500);
+</script>"""
+
 
 class H(BaseHTTPRequestHandler):
     def _send(self, body, ctype="application/json"):
@@ -278,8 +371,11 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/state":
             self._send(json.dumps(dict(state, stale=time.time() - state["t"] > 1.0, say_last=SAY["last"],
                                         speaking=bool(state.get("speaking")) or SAY["direct"],
-                                        dlg_running=dialog.running, dlg_log=dialog.log[-14:], dlg_alert=dialog.alert)))
-        else:
+                                        dlg_running=dialog.running, dlg_log=dialog.log[-14:], dlg_alert=dialog.alert,
+                                        auto_on=AUTO["on"], auto_status=AUTO["status"])))
+        elif self.path == "/demo":
+            self._send(DEMO_PAGE, "text/html")
+        else:                                  # "/", "/origin", 그 외 → 기존 조작 패널
             self._send(PAGE, "text/html")
 
     def do_POST(self):
@@ -293,6 +389,20 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps({"msg": msg}))
             return
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/auto":
+            try:
+                on = bool(json.loads(body or b"{}").get("on"))
+            except ValueError:
+                self.send_error(400)
+                return
+            AUTO["on"] = on
+            AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요" if on else "자동 교감 꺼짐"
+            print(f"[auto] {'ON' if on else 'OFF'}", flush=True)
+            self._send(json.dumps({"auto_on": AUTO["on"], "msg": AUTO["status"]}))
+            return
+        if AUTO["on"] and (self.path in ("/act", "/attend") or self.path == "/dialog/start"):
+            self._send(json.dumps({"msg": "자동 교감 중 — 수동 버튼은 자동을 끈 뒤에 쓰세요"}))
+            return
         if self.path in ("/say", "/say_wav"):
             try:
                 if self.path == "/say":
@@ -360,7 +470,18 @@ def poll_status():
         time.sleep(10)   # 젯슨 부하 최소화 (정책 루프 20 ms 주기)
 
 
-threading.Thread(target=poll_status, daemon=True).start()
 assert set(PART_TO_SEGMENT) >= {"g1_face", "g1_hand"}
-print(f"패널: http://0.0.0.0:{args.port}  → 명령 {args.jetson}:{PORT_CMD}")
-ThreadingHTTPServer(("0.0.0.0", args.port), H).serve_forever()
+
+
+def main():
+    # 스레드·소켓 바인드·서버는 실행할 때만(테스트는 import 만 한다).
+    threading.Thread(target=listen_state, daemon=True).start()
+    threading.Thread(target=dialog.warm, daemon=True).start()   # 고정·대비 문장 미리 합성(캐시)
+    threading.Thread(target=poll_status, daemon=True).start()
+    threading.Thread(target=listen_bridge, daemon=True).start()  # 시선 브리지(55057) → 자동 교감
+    print(f"패널: http://0.0.0.0:{args.port}  → 명령 {args.jetson}:{PORT_CMD} · 자동 교감 수신 :{PORT_BRIDGE}")
+    ThreadingHTTPServer(("0.0.0.0", args.port), H).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

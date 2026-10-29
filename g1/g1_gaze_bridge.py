@@ -7,6 +7,7 @@
 label       : 시선 픽셀을 포함하는 YOLO 박스 (hand > face > torso, 손 박스가 몸통 박스 안이라)
 bearing_deg : G1 torso 기준 헤드캠(=사용자 머리) 방위, + 왼쪽. 태그 번들이 안 보이면 null
 obj_bearing_deg : 착용자가 보는 점의 G1 torso 기준 방위(같이 보기용). 거리는 config attend.object_dist_m(기본 1.5 m) 가정
+obj_kind    : 시선이 향한 물체의 대화 kind(plant/bottle/phone/photo) — 물체 YOLO + pick_object. 없으면 null
 valid       : 이번 프레임에 시선 픽셀이 있었는가
 
 arm/gaze_tag_bridge.py 와 같은 구조: 순수 함수 + 얇은 루프. 무거운 의존(cv2, apriltag, rclpy)은 main 안에서.
@@ -105,6 +106,9 @@ def main():
     ap.add_argument("--gaze-px-port", type=int, default=55056)
     ap.add_argument("--udp-host", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=PORT_BRIDGE)
+    ap.add_argument("--obj-model", default="",
+                    help="물체 YOLO 모델(미지정 시 config obj_yolo.model 또는 ~/yolo-env/yolo11l.pt)")
+    ap.add_argument("--no-obj", action="store_true", help="물체 검출 끄기(부위만) — yolo11l.pt 가 아직 없을 때")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -114,13 +118,22 @@ def main():
     import yaml
     sys.path.insert(0, os.path.join(REPO, "arm"))
     from anchor import TagBundleDetector
+    from obj_gaze_detector import OBJ_TO_KIND, ObjectDetector, pick_object   # main 안에서 import(순환 import 회피)
     from run_demo import GazeSource, load_intrinsics
 
     cfg = yaml.safe_load(open(args.config))
     K = load_intrinsics()
     tags = TagBundleDetector(cfg, K)
     obj_dist = float(cfg.get("attend", {}).get("object_dist_m", 1.5))   # 스테레오 깊이 연결 전 가정 거리
-    yolo = _Yolo(cfg["yolo"])
+    yolo = _Yolo(cfg["yolo"])                                           # 부위 YOLO(g1_parts.pt)
+    obj_det = None                                                      # 물체 YOLO(yolo11l.pt) — 별도 subprocess
+    if not args.no_obj:
+        ocfg = cfg.get("obj_yolo", {})
+        obj_model = args.obj_model or ocfg.get("model", "~/yolo-env/yolo11l.pt")
+        obj_det = ObjectDetector(ocfg.get("python", cfg["yolo"]["python"]), model=obj_model,
+                                 conf=float(ocfg.get("conf", 0.3)))
+        obj_det.start()
+        log.info("물체 YOLO: %s (classes=%s)", obj_model, ",".join(OBJ_TO_KIND))
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
                      gaze_px_port=args.gaze_px_port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -139,9 +152,15 @@ def main():
             label = pick_part(yolo(frame), uv)
             bearing = None if T is None else bearing_deg(T)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
+            obj_kind = None
+            if obj_det is not None and uv is not None:                 # 시선이 있을 때만 물체 추론(부하 절반)
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ok:
+                    picked = pick_object(obj_det.feed(jpg.tobytes()), uv)
+                    obj_kind = picked[0] if picked else None
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
             sock.sendto(encode({"t": time.time(), "label": label, "bearing_deg": bearing,
-                                "obj_bearing_deg": obj_b, "valid": uv is not None}), dst)
+                                "obj_bearing_deg": obj_b, "obj_kind": obj_kind, "valid": uv is not None}), dst)
             n += 1
             n_label += label is not None
             n_bear += bearing is not None
@@ -153,9 +172,12 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        sock.sendto(encode({"t": time.time(), "label": None, "bearing_deg": None, "valid": False}), dst)
+        sock.sendto(encode({"t": time.time(), "label": None, "bearing_deg": None,
+                            "obj_kind": None, "valid": False}), dst)
         sock.close()
         yolo.close()
+        if obj_det is not None:
+            obj_det.stop()
         src.shutdown()
     return 0
 

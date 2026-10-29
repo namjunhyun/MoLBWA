@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import time
 
 _ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(_ROOT, "ros2_ws", "src", "gaze_hri", "gaze_hri"))
@@ -17,7 +18,7 @@ class Orchestrator:
         self._send, self._dialog, self._busy = send_cmd, start_dialog, is_busy
         self._part = LabelDwell(dwell_time=dwell_time)
         self._obj = LabelDwell(dwell_time=dwell_time)
-        self._seq = 0
+        self._seq = int(time.time() * 1000)   # ms 기반 — 노드 재시작 후에도 단조 증가(젯슨이 조용히 거부 안 하게)
         self._part_fire_t = -1e9
 
     def feed_part(self, t, label, bearing_deg):
