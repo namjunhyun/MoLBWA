@@ -45,6 +45,7 @@ def listen_state():
             state.update(m, t=time.time())
 
 
+STOP_CMDS = {"damp", "stop", "release", "shutdown"}   # 멈춤/정책 내림 성격 → 자동 교감 해제
 CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "shutdown", "status"}
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
        "-o", "ControlPath=/tmp/g1_panel_%r@%h", "-o", "ControlPersist=600"]
@@ -182,24 +183,34 @@ def is_busy():
 orc = Orchestrator(_auto_send, _auto_dialog, is_busy)
 
 
+def _bridge_feed(m):
+    """브리지 메시지 1건 → 오케스트레이터 투입. 부위 먼저(부위 우선), 물체 다음."""
+    t = m.get("t") or time.time()
+    ub = m.get("bearing_deg")
+    ub_i = int(round(ub)) if isinstance(ub, (int, float)) else 0
+    if isinstance(ub, (int, float)):
+        LAST["user_bearing"] = ub_i
+    label = m.get("label")
+    orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
+    ob = m.get("obj_bearing_deg")
+    # 몸통 태그 소실(방위 None)이면 물체 방향을 알 수 없다 → 0° 로 속이지 말고 물체 트리거를 막는다
+    if isinstance(ob, (int, float)):
+        orc.feed_object(t, m.get("obj_kind"), int(round(ob)))
+    else:
+        orc.feed_object(t, None, 0)
+
+
 def listen_bridge():
-    """브리지(55057) 수신 → 오케스트레이터 투입. 부위 먼저(부위 우선), 물체 다음."""
+    """브리지(55057) 수신 → 오케스트레이터 투입. 예외가 나도 스레드는 죽지 않는다."""
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("0.0.0.0", PORT_BRIDGE))
     while True:
-        m = decode(rx.recvfrom(4096)[0])
-        if not m:
-            continue
-        t = m.get("t") or time.time()
-        ub = m.get("bearing_deg")
-        ub_i = int(round(ub)) if isinstance(ub, (int, float)) else 0
-        if isinstance(ub, (int, float)):
-            LAST["user_bearing"] = ub_i
-        label = m.get("label")
-        orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
-        ob = m.get("obj_bearing_deg")
-        ob_i = int(round(ob)) if isinstance(ob, (int, float)) else 0
-        orc.feed_object(t, m.get("obj_kind"), ob_i)
+        try:
+            m = decode(rx.recvfrom(4096)[0])
+            if m:
+                _bridge_feed(m)
+        except Exception as e:   # 자동 콜백·디코드 예외로 데몬 스레드가 조용히 죽는 것 방지
+            print(f"[bridge] 예외 무시하고 계속: {e!r}", flush=True)
 
 
 def save_upload(data: bytes) -> str:
@@ -384,6 +395,9 @@ class H(BaseHTTPRequestHandler):
             if cmd not in CTL:
                 self.send_error(400)
                 return
+            if cmd in STOP_CMDS:   # 멈춤/정책 내림 → 자동 교감 해제(정책 되살릴 때 다음 응시에 로봇이 또 움직이지 않게)
+                AUTO["on"] = False
+                AUTO["status"] = "자동 교감 꺼짐 (정지)"
             msg = ctl(cmd)
             print(f"[ctl] {cmd}: {msg}", flush=True)
             self._send(json.dumps({"msg": msg}))

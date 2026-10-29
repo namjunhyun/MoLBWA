@@ -59,3 +59,24 @@ def test_state_includes_auto_flag():
     assert code == 200
     s = json.loads(body)
     assert "auto_on" in s and "auto_status" in s
+
+
+def test_estop_and_stop_cmds_turn_auto_off(monkeypatch):
+    monkeypatch.setattr(g1_panel, "ctl", lambda cmd: "ok")
+    for cmd in ("damp", "stop", "release", "shutdown"):
+        g1_panel.AUTO["on"] = True
+        assert _call("POST", "/ctl/" + cmd)[0] == 200
+        assert g1_panel.AUTO["on"] is False, cmd
+    g1_panel.AUTO["on"] = True
+    _call("POST", "/ctl/status")           # 무해한 명령은 유지
+    assert g1_panel.AUTO["on"] is True
+    g1_panel.AUTO["on"] = False
+
+
+def test_bridge_no_tag_blocks_object_trigger(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
+    monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: calls.append((kind, b)))
+    g1_panel._bridge_feed({"t": 1.0, "obj_kind": "cup", "bearing_deg": 10})              # 태그 없음
+    g1_panel._bridge_feed({"t": 2.0, "obj_kind": "cup", "obj_bearing_deg": 30.4})        # 정상
+    assert calls == [(None, 0), ("cup", 30)]
