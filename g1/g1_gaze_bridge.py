@@ -32,15 +32,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 log = logging.getLogger("g1_gaze_bridge")
 
-PART_PRIORITY = ("g1_hand", "g1_face", "g1_torso")
+PART_PRIORITY = ("g1_hand", "g1_face")   # 몸통은 판정 안 함 (2026-10-30: 시나리오는 머리·손, 젯슨에 open_arms 없음)
 
 
-PART_MARGIN_PX = 20   # 시선 캘리브 오차(2026-10-30 다점 10점 평균 16px)만큼 판정 박스를 키운다
+PART_MARGIN_PX = 30   # 시선 캘리브 오차(2026-10-30 다점 10점 평균 16px)보다 넉넉히 판정 박스를 키운다
 
 
 def pick_part(dets: list, uv: tuple[float, float] | None, margin: float = PART_MARGIN_PX) -> str | None:
     """dets = [[cls, conf, x1, y1, x2, y2], ...] 중 uv 를 포함하는 박스(사방 margin px 확장)의 부위.
-    우선순위 hand > face > torso — 확장으로 겹쳐도 작은 부위가 이긴다."""
+    우선순위 hand > face — 확장으로 겹치면 손이 이긴다."""
     if uv is None:
         return None
     u, v = uv

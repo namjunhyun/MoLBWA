@@ -24,8 +24,9 @@ def test_pick_part_hand_inside_torso_wins():
     assert pick_part([TORSO, HAND, FACE], (270, 320)) == "g1_hand"
 
 
-def test_pick_part_torso_only_region():
-    assert pick_part([TORSO, HAND, FACE], (120, 200)) == "g1_torso"
+def test_pick_part_torso_ignored():
+    # 몸통 응시는 판정 안 함 (2026-10-30: 시나리오는 머리·손뿐, 젯슨 라이브러리에 open_arms 없음)
+    assert pick_part([TORSO, HAND, FACE], (120, 200)) is None
 
 
 def test_pick_part_same_class_higher_conf():
@@ -175,4 +176,5 @@ def test_pick_part_margin_absorbs_gaze_error():
     # 시선 오차(캘리브 16px)만큼 박스 밖에 떨어져도 그 부위로 본다
     assert pick_part([FACE], (150 - 15, 60)) == "g1_face"
     assert pick_part([FACE], (150 - 15, 60), margin=0) is None
+    assert pick_part([FACE], (150 - 28, 60)) == "g1_face"           # 30px 까지
     assert pick_part([FACE], (150 - 40, 60)) is None
