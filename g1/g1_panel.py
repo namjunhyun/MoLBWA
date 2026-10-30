@@ -150,6 +150,7 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 # 브리지(55057)가 부위 라벨·물체 kind·방위를 보낸다. 오케스트레이터가 dwell 로 확정해
 # 부위 → act, 물체 → 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
 AUTO = {"on": False, "status": "대기"}        # status = /demo 큰 문구(현재 교감 상태)
+TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
 LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
 PART_STATUS = {"g1_face": "👋 얼굴을 보고 손 흔들기", "g1_hand": "🤝 손을 보고 악수",
@@ -159,6 +160,10 @@ PART_STATUS = {"g1_face": "👋 얼굴을 보고 손 흔들기", "g1_hand": "�
 def _auto_send(cmd):
     """오케스트레이터 send_cmd 콜백. cmd = {seq, cmd:'act', part, bearing_deg}. auto ON 일 때만 발사."""
     if not AUTO["on"]:
+        return
+    if TALK["on"]:                       # 대화 모드: 인사·악수 동작 생략
+        AUTO["status"] = PART_STATUS.get(cmd["part"], cmd["part"]) + " (대화 모드 — 동작 생략)"
+        print(f"[auto] act 생략(대화 모드): {cmd['part']}", flush=True)
         return
     seq = send({"cmd": cmd["cmd"], "part": cmd["part"], "bearing_deg": cmd["bearing_deg"]})   # send() 가 seq 재부여
     AUTO["status"] = PART_STATUS.get(cmd["part"], cmd["part"])
@@ -170,7 +175,7 @@ def _auto_dialog(kind, bearing):
     if not AUTO["on"]:
         return
     DLG["bear"] = (int(bearing), LAST["user_bearing"])     # 같이 보기: (물체, 착용자) 방위
-    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=True, kind=kind)
+    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=not TALK["on"], kind=kind)   # 대화 모드면 같이 보기 동작 없이
     AUTO["status"] = f"💬 {g1_dialog.SCENARIOS.get(kind, {}).get('name', kind)} 이야기 나누는 중"
     print(f"[auto] dialog {kind} @ {bearing}°: {msg}", flush=True)
 
@@ -249,6 +254,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 </style>
 <h1>지원이 조작 패널 <small style="color:#888">(시선 안경 대신)</small></h1>
 <div class="row"><button class="estop" onclick="c('damp')">⛔ 비상정지</button></div>
+<div class="row ctl"><button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button></div>
 <div class="row ctl"><button onclick="c('stop','정책 중이면: 기본자세로 최대 5분 서 있다가 5초 카운트다운 후 힘이 빠집니다(받쳐야 함). 고수준이면 제자리 정지. 계속할까요?')">■ 정지(기본자세)</button>
 <button onclick="c('release','디벨롭 모드로 내리면 로봇이 스스로 못 섭니다. 하네스가 받치고 있나요?')">디벨롭 모드</button>
 <button onclick="c('highlevel','고수준(기본 보행) 모드로 올립니다. 계속할까요?')">고수준 모드</button></div>
@@ -299,6 +305,9 @@ function draw(){const v=+b.value,r=v*Math.PI/180;document.getElementById('deg').
 document.getElementById('side').textContent=v>0?'왼쪽':v<0?'오른쪽':'정면';
 const u=document.getElementById('u');u.setAttribute('cx',-80*Math.sin(r));u.setAttribute('cy',-80*Math.cos(r))}
 b.oninput=draw;draw();
+let talk=false;
+async function ttalk(){talk=!talk;const r=await fetch('/talk',{method:'POST',body:JSON.stringify({on:talk})});
+document.getElementById('msg').textContent=(await r.json()).msg}
 let ctlUntil=0;
 async function c(cmd,warn){if(warn&&!confirm(warn))return;ctlUntil=Date.now()+60000;document.getElementById('robot').textContent='로봇: '+cmd+' 보내는 중…';
 const r=await fetch('/ctl/'+cmd,{method:'POST'});ctlUntil=Date.now()+10000;document.getElementById('robot').textContent='로봇: '+(await r.json()).msg}
@@ -326,7 +335,9 @@ document.getElementById('st').textContent='상태: '+(s.stale?'서버 응답 없
 {const a=document.getElementById('dalert');a.style.display=s.dlg_alert?'block':'none';a.textContent=s.dlg_alert||''}
 if(s.dlg_log&&s.dlg_log.length)document.getElementById('dlog').textContent=(s.dlg_running?'● 대화 중\\n':'')+s.dlg_log.join('\\n');
 document.getElementById('spk').textContent=s.speaking?'🔊 말하는 중 (이 동안 음성 인식은 끄기)':'🔇 조용'+(s.say_last?' · '+s.say_last:'');
-document.querySelectorAll('.wave,.shake').forEach(x=>{if(x.textContent.indexOf('말하기')<0&&x.textContent.indexOf('대화')<0)x.disabled=busy&&!s.stale})},300);
+talk=!!s.talk_only;{const t=document.getElementById('talk');t.classList.toggle('on',talk);
+t.textContent=talk?'🗣 대화 모드 — 모션 없이 대화만 (끄기)':'🗣 대화 모드 꺼짐 — 동작+대화'}
+document.querySelectorAll('.wave,.shake').forEach(x=>{if(x.textContent.indexOf('말하기')<0&&x.textContent.indexOf('대화')<0)x.disabled=(busy&&!s.stale)||talk})},300);
 </script>"""
 
 # 발표용 페이지(/demo): 큰 상태 문구 + 대화 말풍선 + 자동 교감 토글/표시 + 비상정지만. 세부 버튼·SSH 없음.
@@ -338,6 +349,8 @@ h1{font-size:22px;margin:0 0 16px}
 #auto{width:100%;padding:28px;font-size:26px;font-weight:800;border:0;border-radius:16px;cursor:pointer;background:#334155;color:#fff}
 #auto.on{background:#7c3aed}#dot{display:inline-block;width:16px;height:16px;border-radius:50%;background:#64748b;margin-right:10px;vertical-align:middle}
 #dot.on{background:#22c55e;box-shadow:0 0 14px #22c55e}
+#talk{width:100%;margin-top:10px;padding:16px;font-size:19px;font-weight:700;border:0;border-radius:14px;cursor:pointer;background:#1f2937;color:#cbd5e1}
+#talk.on{background:#0d9488;color:#fff}
 #status{font-size:34px;font-weight:800;text-align:center;padding:30px 16px;margin:18px 0;border-radius:16px;background:#111827;min-height:44px;line-height:1.35}
 #bubbles{margin:18px 0;min-height:80px;display:flex;flex-direction:column}
 .b{margin:6px 0;padding:12px 16px;border-radius:14px;font-size:17px;max-width:82%;white-space:pre-wrap}
@@ -347,16 +360,20 @@ h1{font-size:22px;margin:0 0 16px}
 </style>
 <h1>지원이 — 시선 교감 데모 <small style="color:#888">(세부 조작은 <a href="/origin" style="color:#60a5fa">/origin</a>)</small></h1>
 <button id="auto" onclick="toggle()"><span id="dot"></span><span id="al">자동 교감 시작</span></button>
+<button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button>
 <div id="status">대기</div>
 <div id="alert"></div>
 <div id="bubbles"></div>
 <button class="estop" onclick="if(confirm('비상정지: 로봇 힘을 뺍니다(받쳐야 함). 계속할까요?'))fetch('/ctl/damp',{method:'POST'})">⛔ 비상정지</button>
 <script>
-let on=false;
+let on=false,talk=false;
 async function toggle(){on=!on;await fetch('/auto',{method:'POST',body:JSON.stringify({on:on})});draw()}
+async function ttalk(){talk=!talk;await fetch('/talk',{method:'POST',body:JSON.stringify({on:talk})});drawT()}
+function drawT(){const t=document.getElementById('talk');t.classList.toggle('on',talk);
+t.textContent=talk?'🗣 대화 모드 — 모션 없이 대화만 (끄기)':'🗣 대화 모드 꺼짐 — 동작+대화'}
 function draw(){document.getElementById('auto').classList.toggle('on',on);document.getElementById('dot').classList.toggle('on',on);
 document.getElementById('al').textContent=on?'자동 교감 중 — 정지':'자동 교감 시작'}
-setInterval(async()=>{const s=await(await fetch('/state')).json();on=!!s.auto_on;draw();
+setInterval(async()=>{const s=await(await fetch('/state')).json();on=!!s.auto_on;draw();talk=!!s.talk_only;drawT();
 document.getElementById('status').textContent=s.auto_status||(on?'시선을 기다려요':'대기');
 {const a=document.getElementById('alert');a.style.display=s.dlg_alert?'block':'none';a.textContent=s.dlg_alert||''}
 const bb=document.getElementById('bubbles');bb.innerHTML='';
@@ -383,7 +400,7 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(dict(state, stale=time.time() - state["t"] > 1.0, say_last=SAY["last"],
                                         speaking=bool(state.get("speaking")) or SAY["direct"],
                                         dlg_running=dialog.running, dlg_log=dialog.log[-14:], dlg_alert=dialog.alert,
-                                        auto_on=AUTO["on"], auto_status=AUTO["status"])))
+                                        auto_on=AUTO["on"], auto_status=AUTO["status"], talk_only=TALK["on"])))
         elif self.path == "/demo":
             self._send(DEMO_PAGE, "text/html")
         else:                                  # "/", "/origin", 그 외 → 기존 조작 패널
@@ -414,8 +431,21 @@ class H(BaseHTTPRequestHandler):
             print(f"[auto] {'ON' if on else 'OFF'}", flush=True)
             self._send(json.dumps({"auto_on": AUTO["on"], "msg": AUTO["status"]}))
             return
+        if self.path == "/talk":
+            try:
+                TALK["on"] = bool(json.loads(body or b"{}").get("on"))
+            except ValueError:
+                self.send_error(400)
+                return
+            print(f"[talk] 대화 모드 {'ON' if TALK['on'] else 'OFF'}", flush=True)
+            self._send(json.dumps({"talk_only": TALK["on"],
+                                   "msg": "대화 모드 — 모션 없이 대화만" if TALK["on"] else "대화 모드 꺼짐 — 동작+대화"}))
+            return
         if AUTO["on"] and (self.path in ("/act", "/attend") or self.path == "/dialog/start"):
             self._send(json.dumps({"msg": "자동 교감 중 — 수동 버튼은 자동을 끈 뒤에 쓰세요"}))
+            return
+        if TALK["on"] and self.path in ("/act", "/attend"):
+            self._send(json.dumps({"msg": "대화 모드라 동작은 보내지 않아요 — 대화 모드를 끈 뒤에 쓰세요"}))
             return
         if self.path in ("/say", "/say_wav"):
             try:
@@ -435,7 +465,8 @@ class H(BaseHTTPRequestHandler):
                 op = self.path[8:]
                 if op == "start":
                     DLG["bear"] = (int(req.get("obj_bearing_deg", 60)), int(req.get("user_bearing_deg", -30)))
-                    msg = dialog.start(req.get("mode", "mic"), bool(req.get("with_attend")), str(req.get("kind", "plant")))
+                    msg = dialog.start(req.get("mode", "mic"), bool(req.get("with_attend")) and not TALK["on"],
+                                       str(req.get("kind", "plant")))
                 elif op == "stop":
                     msg = dialog.stop()
                 elif op == "answer":

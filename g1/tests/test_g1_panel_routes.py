@@ -73,6 +73,53 @@ def test_estop_and_stop_cmds_turn_auto_off(monkeypatch):
     g1_panel.AUTO["on"] = False
 
 
+def test_talk_toggle_endpoint_and_state():
+    code, body = _call("POST", "/talk", json.dumps({"on": True}).encode())
+    assert code == 200 and json.loads(body)["talk_only"] is True
+    assert json.loads(_call("GET", "/state")[1])["talk_only"] is True
+    _call("POST", "/talk", json.dumps({"on": False}).encode())
+    assert g1_panel.TALK["on"] is False
+
+
+def test_talk_mode_skips_auto_act(monkeypatch):
+    sent = []
+    monkeypatch.setattr(g1_panel, "send", lambda m: sent.append(m) or 1)
+    g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, True
+    g1_panel._auto_send({"seq": 1, "cmd": "act", "part": "g1_hand", "bearing_deg": 30})
+    assert sent == []                                   # 대화 모드 → 악수 동작 생략
+    g1_panel.TALK["on"] = False
+    g1_panel._auto_send({"seq": 2, "cmd": "act", "part": "g1_hand", "bearing_deg": 30})
+    assert len(sent) == 1                               # 끄면 원래대로 동작
+    g1_panel.AUTO["on"] = False
+
+
+def test_talk_mode_dialog_without_attend(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.dialog, "start", lambda mode, with_attend, kind: calls.append(with_attend) or "ok")
+    g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, True
+    g1_panel._auto_dialog("bottle", 40)                # 자동: 같이 보기 동작 없이
+    g1_panel.AUTO["on"] = False
+    _call("POST", "/dialog/start", json.dumps({"kind": "plant", "with_attend": True}).encode())   # 수동도 강제로 끔
+    g1_panel.TALK["on"] = False
+    g1_panel.AUTO["on"] = True
+    g1_panel._auto_dialog("bottle", 40)                # 대화 모드 끄면 다시 같이 보기
+    g1_panel.AUTO["on"] = False
+    assert calls == [False, False, True]
+
+
+def test_talk_mode_blocks_manual_motion(monkeypatch):
+    sent = []
+    monkeypatch.setattr(g1_panel, "send", lambda m: sent.append(m) or 1)
+    monkeypatch.setattr(g1_panel, "send_attend", lambda *a: sent.append(a) or (1, [], None))
+    g1_panel.TALK["on"] = True
+    for path, req in (("/act", {"part": "g1_hand", "bearing_deg": 0}),
+                      ("/attend", {"obj_bearing_deg": 60, "user_bearing_deg": -30})):
+        code, body = _call("POST", path, json.dumps(req).encode())
+        assert code == 200 and "대화 모드" in json.loads(body)["msg"]
+    g1_panel.TALK["on"] = False
+    assert sent == []
+
+
 def test_bridge_no_tag_blocks_object_trigger(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
