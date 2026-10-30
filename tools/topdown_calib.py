@@ -22,6 +22,7 @@ gaze_hri 의 topdown_click calib 모드를 대신한다. 그쪽을 그대로 쓰
       q = 중단(그 자리 정지). 잘못 찍은 점 하나는 RANSAC 이 걸러낸다.
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -137,6 +138,16 @@ def solve_camera(pix, xyz):
             "points3d": xyz.tolist(), "pixels3d": pix.astype(int).tolist()}
 
 
+def go_rest(bus, m, grip, speed, arm, home_q):
+    """home 으로 편 뒤 저장된 휴식자세로 (tools/so101_goto.py rest 와 같은 파일)."""
+    print("끝 — home -> 휴식자세")
+    t = m.to_ticks(list(home_q) + [0.0, 0.0])
+    t[4], t[5] = bus.last_goal[4], grip
+    move_smooth(bus, t, max_deg_s=speed)
+    rest = json.load(open(arms.rest_file(arm)))
+    move_smooth(bus, rest, max_deg_s=speed)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam", type=int, default=0)
@@ -238,6 +249,10 @@ def main():
             t[4], t[5] = bus.last_goal[4], grip
             move_smooth(bus, t, max_deg_s=a.speed)
 
+        # 2026-10-30: 끝나면 home -> 휴식자세. 안 하면 마지막 지점에 선 채 남고, 다음 GUI 가
+        # "현재 자세 유지"로 받아 태스크가 home 에서 시작했다 (평소엔 휴식자세에서 출발).
+        go_rest(bus, m, grip, a.speed, a.arm, HOME_Q)
+
         if len(pix) < 4:
             sys.exit("클릭 4개 미만 — 저장 안 함")
         src = np.array(pix, np.float32)
@@ -273,7 +288,7 @@ def main():
         return 2
     except KeyboardInterrupt:
         bus.hold()
-        print("중단 — 그 자리에 멈춤")
+        print("중단 — 그 자리에 멈춤 (휴식자세로: bash run_so101_rest.sh " + a.arm + ")")
         return 1
     finally:
         cv2.destroyAllWindows()

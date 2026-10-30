@@ -54,6 +54,7 @@ class PanelState:
     ray_px: list = None               # 2026-10-22 시선 광선 (책상 위 25cm, 0cm) 화면 두 점
     snapped_index: int = -1           # 광선이 붙은 물체 (objects 순서), -1 = 없음
     place_preview: tuple = None       # 2026-10-26 실제로 놓일 자리 미리보기 (화면 픽셀)
+    place_progress: float = 0.0       # 2026-10-30 미리보기 점 응시 진행률 (1 = 확정)
     pointer_holding: bool = False
     hold_frac: float = 0.0            # 마우스 클릭 고정 진행률
     dwell_progress: float = 0.0
@@ -298,6 +299,8 @@ def _draw_ray(view, st, hud):
         px = st.place_preview
         hud.marker(view, px, H.PLACE, radius=22, thickness=2, dashed=True)
         cv2.circle(view, (int(px[0]), int(px[1])), 5, H.PLACE, -1, cv2.LINE_AA)
+        if st.place_progress > 0:
+            hud.progress_ring(view, px, st.place_progress, H.PLACE)
         hud.chip(view, (px[0], px[1] - 26), hud.label("여기에 놓음", "PLACE HERE"), H.PLACE, 12,
                  bold=True, anchor="cb")
     k = st.snapped_index

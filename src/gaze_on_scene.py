@@ -31,6 +31,7 @@
 사용:
   python gaze_on_scene.py                 # 창 두 개(눈/씬). 눈 굴려 모델 수렴 → 'c'로 캘리브
   키: c=1점 캘리브 / m=다점 캘리브 모드 토글(클릭으로 포인트 추가) / r=리셋 / q=종료
+       p=동공->씬 2차 회귀 캘리브(표적 시트, src/gaze_poly_calib.py) / v=검증 / j=1점 보정 / n=칸 건너뛰기
 
 시각화(docs/09_visualization.md A-2, 2026-07-30):
   cv2 창(다점 캘리브용 마우스 클릭 때문에 그대로 둠)에 더해, 같은 프레임을 Rerun에도 로깅한다
@@ -51,6 +52,7 @@ except ImportError:
 
 import ocams_calib
 import eye_scene_extrinsic
+import gaze_poly_calib
 import fusion
 from gaze_udp_sender import GazeUdpSender
 from gaze_px_udp import ArmPointReceiver, GazePixelSender, GazeRaySender
@@ -722,6 +724,10 @@ def main():
     ap.add_argument("--restore-eye-model", action="store_true",
                     help="캘리브 파일에 저장된 안구 중심을 복원하고 고정한다. 안경을 벗지 않고 "
                          "뷰어만 재시작했을 때용 — 다시 썼으면 새로 캘리브할 것")
+    ap.add_argument("--poly-file", default=os.path.join(HERE, "..", "calibration", "gaze_scene_poly.json"),
+                    help="동공->씬 픽셀 2차 회귀 캘리브(p 키) 저장·불러오기 경로")
+    ap.add_argument("--no-poly-load", action="store_true",
+                    help="저장된 2차 회귀 캘리브를 불러오지 않는다 (안경을 다시 썼을 때)")
     ap.add_argument("--rerun-every", type=int, default=3,
                     help="Rerun에 영상을 N프레임마다 1번만 로깅 (기본 3). 매 프레임 원본 "
                          "해상도로 다 보내면 gRPC 버퍼(1GiB)가 몇 분 안에 차서 뷰어가 죽는다 "
@@ -849,6 +855,73 @@ def main():
         fx = fy = SW * 0.94  # rectify 못 쓰는 경우의 옛 근사치 (해상도 불일치 시)
         cx, cy = SW / 2.0, SH / 2.0
     fx0 = fx  # 리셋 시 되돌아갈 초기값
+
+    # 2026-10-30: 동공 중심 -> 씬 픽셀 2차 회귀 캘리브 (src/gaze_poly_calib.py). 있으면 다른 캘리브보다 우선.
+    K_scene = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    poly_path = os.path.abspath(args.poly_file)
+    poly_target = gaze_poly_calib.TargetDetector(
+        os.path.join(HERE, "..", "calibration", "gaze_target_sheet_60mm_layout.yaml"), K_scene)
+    if poly_target.det is None:
+        print("[poly] pupil_apriltags 없음 — 표적 캘리브(p) 불가, 저장된 모델로 시선만 계산")
+    poly_model, poly_meta = (None, None) if args.no_poly_load else gaze_poly_calib.load_model(poly_path)
+    if poly_model is not None:
+        if poly_meta.get("eye_flip") != [args.flip, args.flip_v, args.flip_h]:
+            print(f"[poly] {poly_path} 눈 영상 반전 설정이 달라 안 씀 — 새로 캘리브(p)")
+            poly_model = None
+        else:
+            print(f"[poly] 불러옴: {poly_path} ({poly_meta.get('saved_at')}, "
+                  f"LOO {poly_meta.get('loo_mean_deg', float('nan')):.2f}°) — 안경을 다시 썼으면 "
+                  "새로 캘리브(p) 하거나 1점 보정(j)")
+    poly_session = None
+
+    def finish_poly(sess, model):
+        """끝난 세션 처리 -> (새) 모델. calib = 맞추고 저장, val = 각도 오차 기록, drift = 상수항 이동."""
+        P = [s[2] for s in sess.samples]
+        U = [s[3] for s in sess.samples]
+        D = [s[4] for s in sess.samples]
+        if not P:
+            print("[poly] 기록된 점이 없다")
+            return model
+        if sess.kind == "drift":
+            res = np.asarray(U[0]) - model.predict(P[0], D[0])
+            ang = gaze_poly_calib.pixel_angle_deg(K_scene, model.predict(P[0], D[0]), U[0])
+            model.shift(res[0], res[1])
+            print(f"[poly] 1점 보정: {ang:.2f}° ({res[0]:+.1f}, {res[1]:+.1f})px 이동 — 세션 한정, 저장 안 함")
+            return model
+        if sess.kind == "val":
+            err = gaze_poly_calib.angle_errors(model, P, U, D)
+            print(f"[poly] 검증 {len(err)}점: 평균 {err.mean():.2f}° 중앙 {np.median(err):.2f}° "
+                  f"최대 {err.max():.2f}° (목표 평균 1.5° 이하)")
+            print("[poly]   칸별(°): " + " ".join(f"{e:.1f}" for e in err))
+            log = os.path.join(os.path.dirname(poly_path), "gaze_poly_validation.jsonl")
+            with open(log, "a") as f:
+                f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "n": len(err),
+                                    "mean_deg": float(err.mean()), "median_deg": float(np.median(err)),
+                                    "max_deg": float(err.max()), "errors_deg": err.tolist(),
+                                    "depths": list(map(float, D))}) + "\n")
+            print(f"[poly]   기록: {log}")
+            return model
+        try:
+            new = gaze_poly_calib.PolyModel.fit(P, U, D, K_scene)
+        except (ValueError, np.linalg.LinAlgError) as e:
+            print(f"[poly] 계산 실패: {e}")
+            return model
+        fit = gaze_poly_calib.angle_errors(new, P, U, D)
+        loo = gaze_poly_calib.loo_errors(P, U, D, K_scene)
+        print(f"[poly] {len(P)}점 캘리브: 적합 평균 {fit.mean():.2f}°, LOO 평균 {np.nanmean(loo):.2f}° "
+              f"최대 {np.nanmax(loo):.2f}° — 시차 원점(눈) {np.round(new.ray(P[0])[0] * 100, 1)}cm")
+        print("[poly]   점별 LOO(°): " + " ".join(f"{s[0][0]}{s[1] + 1}:{e:.1f}"
+                                              for s, e in zip(sess.samples, loo)))
+        if np.nanmax(loo) > 3 * max(np.nanmedian(loo), 0.3):
+            print("[poly][주의] 튀는 점이 있다 — 위 점별 LOO 가 큰 칸을 의심 (그 순간 다른 곳을 봤거나 동공 오검출)")
+        meta = {"loo_mean_deg": float(np.nanmean(loo)), "fit_mean_deg": float(fit.mean()),
+                "eye_flip": [args.flip, args.flip_v, args.flip_h], "scene_size": [SW, SH]}
+        gaze_poly_calib.save_model(poly_path, new, P, U, D, meta)
+        print(f"[poly] 저장: {poly_path} — 이제 시선 커서·광선은 이 모델을 쓴다. 검증은 v")
+        return new
+
+    pupil_xy = None          # 이번 프레임 동공 중심 (눈 영상 픽셀)
+    pupil_s = None           # 표시·송신용 EMA
     stereo_matcher = make_stereo_matcher()
     latest_disparity = None
     latest_depth_m = None
@@ -858,6 +931,8 @@ def main():
           f"({'rectified 캘리브레이션 값' if left_maps is not None and not args.fx else '근사/수동값'})")
     print("[키] f=안구모델 고정/해제 / c=1점 / m=affine 다점(한 거리) / u=마지막 점 취소 / e(=M)=R,p_eye 다점(여러 거리, 6+, docs/12) / o=R,p_eye 드리프트 1점 보정(그리퍼 응시) "
           "/ d=깊이 좌클릭 모드 / x,y=축 반전 / s=저장 / r=리셋 / q=종료")
+    print("[키] 2차 회귀(2026-10-30): p=표적 캘리브(가까이 9 + 멀리 9) / v=5x5 검증 / j=1점 보정 / n=칸 건너뛰기 "
+          "(UDP 55060: poly, poly_val, poly_drift, poly_skip)")
 
     R = np.eye(3, dtype=np.float32)
     gaze_affine = None
@@ -1025,6 +1100,8 @@ def main():
             reconnect_scene()
 
             scene = None
+            scene_gray = None        # 뒤집지 않은 rectified 좌영상 (표적 검출용)
+            pupil_xy = None
             if ros_src is not None:
                 # Pi 가 이미 분리·rectify 해서 보낸다. 여기서 또 하면 안 된다.
                 left_gray, right_gray = ros_src.scene_pair()
@@ -1033,6 +1110,7 @@ def main():
                         print("[ros] 씬 토픽 대기 중 — Pi 의 ocams.sh 가 떠 있는지 확인")
                 else:
                     scene = cv2.cvtColor(left_gray, cv2.COLOR_GRAY2BGR)
+                    scene_gray = left_gray
                     if frame_idx % 3 == 0 and (
                             depth_mode or args.enable_experimental_depth or extrinsic_mode
                             or args.send_udp):
@@ -1049,6 +1127,7 @@ def main():
                     next_scene_retry = 0.0
                 else:
                     scene = cv2.cvtColor(left_gray, cv2.COLOR_GRAY2BGR)
+                    scene_gray = left_gray
                     if frame_idx % 3 == 0 and (
                             depth_mode or args.enable_experimental_depth or extrinsic_mode):
                         latest_disparity = (
@@ -1091,6 +1170,11 @@ def main():
                         rr_log_safe("eye/ir", rr.Image(cv2.cvtColor(eye, cv2.COLOR_BGR2RGB)))
 
                 _ellipse, d = tracker.process_frame(eye)  # 검출 + 안구모델 + 눈 창 표시, 반환값으로 시선벡터 바로 받음
+                pupil_xy = None
+                if _ellipse is not None and _ellipse[1][0] > 1 and _ellipse[1][1] > 1:
+                    pupil_xy = np.array(_ellipse[0], dtype=np.float64)
+                    pupil_s = pupil_xy if pupil_s is None else \
+                        (1 - args.smooth) * pupil_s + args.smooth * pupil_xy
 
                 if d is not None and np.linalg.norm(d) > 1e-6:
                     d = (d / np.linalg.norm(d)) * sign
@@ -1128,6 +1212,7 @@ def main():
                     print(f"[depth] ({du},{dv}) = {measured_depth:.3f}m "
                           f"(유효 disparity {valid_n}개)")
 
+            poly_key = None
             try:
                 while True:
                     _msg, _ = record_sock.recvfrom(64)
@@ -1150,6 +1235,10 @@ def main():
                             _t0 = time.time()
                             drift_capture = {"start": _t0 + 2.0, "end": _t0 + 3.0, "dirs": [], "pts": []}
                             print("[R,p_eye-보정] 2초 뒤 1초간 측정 — 지금 그리퍼를 보세요.")
+                    elif _msg.strip() in (b"poly", b"poly_val", b"poly_drift", b"poly_skip"):
+                        # 한글 입력 중엔 p/v/j/n 키가 안 먹는다 — UDP 로도 받는다
+                        poly_key = {b"poly": "p", b"poly_val": "v", b"poly_drift": "j",
+                                    b"poly_skip": "n"}[_msg.strip()]
                     elif _msg.strip() == b"reset":
                         extrinsic_dirs.clear()
                         extrinsic_points.clear()
@@ -1286,11 +1375,34 @@ def main():
                     else:
                         print(f"[다점-affine] {len(calib_dirs)}/3점 — affine 계산 대기")
 
+            if poly_session is not None and scene_gray is not None:
+                poly_session.update(time.monotonic(), pupil_xy, poly_target.detect(scene_gray))
+                if poly_session.done:
+                    poly_model = finish_poly(poly_session, poly_model)
+                    poly_session = None
+
             n_model = len(getattr(tracker, "model_centers", []))
             gaze_offscreen = None
-            if (calibrated or extrinsic_R is not None) and smooth_dir is not None:
+            poly_uv = None
+            if poly_model is not None and pupil_s is not None and pupil_xy is not None:
+                # 커서는 표적이 보이면 그 깊이, 아니면 0.8m 기준 (팔 쪽은 깊이 무관한 광선을 받는다)
+                _d = (poly_session.last_target[1] if poly_session is not None
+                      and poly_session.last_target is not None else 0.8)
+                poly_uv = poly_model.predict(pupil_s, _d)
+            if poly_uv is not None or ((calibrated or extrinsic_R is not None) and smooth_dir is not None):
                 gaze_valid = True
-                if extrinsic_R is not None and extrinsic_p_eye is not None:
+                if poly_uv is not None:
+                    _u, _v = poly_uv
+                    gaze_valid = bool(np.all(np.isfinite(poly_uv)))
+                    if gaze_valid:
+                        if args.scene_flip:
+                            _u, _v = SW - 1 - _u, SH - 1 - _v
+                        _off = [nm for c, nm in ((_v > SH - 1, "below"), (_v < 0, "above"),
+                                                 (_u > SW - 1, "right"), (_u < 0, "left")) if c]
+                        gaze_offscreen = "/".join(_off) if _off else None
+                        u = int(np.clip(_u, 0, SW - 1))
+                        v = int(np.clip(_v, 0, SH - 1))
+                elif extrinsic_R is not None and extrinsic_p_eye is not None:
                     # 2026-09-28: 커서도 팔로 가는 것과 같은 (R,p_eye) 광선으로 그린다. 예전 affine
                     # (다른 세션·반전 전 기준)으로 그려서 y 가 479 에 붙어 사용자를 헷갈리게 했다.
                     # 광선 위 1m 점을 씬카메라(rectified 좌영상)에 투영.
@@ -1374,6 +1486,8 @@ def main():
                 if (args.enable_experimental_depth
                         and affine_05 is not None and affine_10 is not None):
                     status = "CALIBRATED DEPTH 0.5-1.0m"
+                elif poly_uv is not None:
+                    status = "CALIBRATED POLY (pupil->scene)"
                 else:
                     status = "CALIBRATED AFFINE" if gaze_affine is not None else "CALIBRATED R"
                 color = (0, 255, 0)
@@ -1452,7 +1566,13 @@ def main():
             # /camera/left)라 scene_flip 보정 불필요. ★ affine/R 캘리브(calibrated) 여부와
             # 무관해야 한다 — 'y' 반전은 calibrated 를 끄므로, 예전엔 e 모드만 한 세션에서
             # 광선이 한 번도 안 나갔다(2026-09-27 실측: 브리지 '시선 없음' 100%).
-            if ray_sender is not None:
+            if ray_sender is not None and poly_model is not None:
+                if pupil_xy is not None and pupil_s is not None:
+                    _o, _dir = poly_model.ray(pupil_s)
+                    ray_sender.send(_o, _dir, valid=True)
+                else:
+                    ray_sender.send((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), valid=False)
+            elif ray_sender is not None:
                 ray_dir = (extrinsic_R @ smooth_dir
                            if extrinsic_R is not None and extrinsic_p_eye is not None
                            and smooth_dir is not None else None)
@@ -1516,12 +1636,34 @@ def main():
             if eye_cap is None:
                 cv2.putText(scene, "EYE CAMERA DISCONNECTED (scene-only depth test OK)",
                             (20, SH - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
+            if poly_session is not None:
+                poly_session.draw(scene, flip=args.scene_flip)
             cv2.imshow(win_name, scene)
             frame_idx += 1
 
             key = cv2.waitKey(1) & 0xFF
+            if poly_key is not None:
+                key = ord(poly_key)
             if key == ord('q'):
                 break
+            elif key in (ord('p'), ord('v'), ord('j')):
+                kind = {ord('p'): "calib", ord('v'): "val", ord('j'): "drift"}[key]
+                if poly_session is not None:
+                    print(f"[poly] {poly_session.kind} 중단 (기록 {len(poly_session.samples)}점 버림)")
+                    poly_session = None
+                elif poly_target.det is None:
+                    print("[poly] pupil_apriltags 없음 — 표적을 못 찾는다")
+                elif kind != "calib" and poly_model is None:
+                    print("[poly] 모델이 없다 — 먼저 p 로 캘리브")
+                else:
+                    poly_session = gaze_poly_calib.PolyCalibSession(kind, SW, SH)
+                    print({"calib": "[poly] 캘리브 시작 — 0.35~0.8m 에서 과녁을 보면서 고개를 돌려 노란 칸에 "
+                                    "(1초 유지되면 자동 기록, n=건너뛰기, p=중단)",
+                           "val": "[poly] 검증 5x5 시작 — 아무 거리(0.3~2m), 과녁을 보면서 노란 칸에",
+                           "drift": "[poly] 1점 보정 — 과녁을 1초 보세요 (화면 어디든)"}[kind])
+            elif key == ord('n'):
+                if poly_session is not None:
+                    poly_session.skip()
             elif key in (ord('f'), ord('F')):
                 # 트래커 자체 루프에만 있던 키. 여기 없어서 그동안 F 가 무시됐다.
                 tracker.toggle_eye_sphere_adjustment()
@@ -1609,7 +1751,8 @@ def main():
                 extrinsic_p_eye = None
                 extrinsic_residuals = None
                 extrinsic_from_file = False
-                print("[calib] 리셋 (다점 캘리브 포인트 + fx + R/p_eye 캘리브 포인트도 초기값으로 복원됨)")
+                poly_model, poly_session = None, None
+                print("[calib] 리셋 (다점 캘리브 포인트 + fx + R/p_eye 캘리브 포인트 + 2차 회귀 모델(세션) 초기화)")
             elif key == ord('o'):
                 # R,p_eye 드리프트 1점 보정 (2026-09-27: 재시작 후 좌우는 맞고 상하만 10.7° 밀림
                 # — 안경이 코에서 흘러내린 전형). 누른 '순간' 시선을 쓰면 키보드/화면을 보는

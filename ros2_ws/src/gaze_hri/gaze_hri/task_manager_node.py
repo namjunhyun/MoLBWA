@@ -57,7 +57,7 @@ from gaze_hri_msgs.msg import GazeTarget
 from geometry_msgs.msg import Point, PoseArray
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float32, Int32, String
 
 from gaze_hri.table_view import TableHomography
 
@@ -151,6 +151,22 @@ class TaskManager(Node):
                                                                      time.time())), be)
         self.pub_place_prev = self.create_publisher(PointStamped, "/task/place_preview", 10)
         self.create_timer(0.1, self._publish_place_preview)
+        # 2026-10-30: 놓을 곳은 '초록 띠 위 점(미리보기)'을 2초 응시해서 확정한다. 예전엔 먼 응시점을
+        # dwell 로 확정한 뒤 띠로 옮겨서, 먼 점이 흔들려 신뢰도로 거부되거나 확정점과 미리보기가 달랐다.
+        self.declare_parameter("place_dwell_s", 2.0)
+        self.declare_parameter("place_dwell_radius", 0.06)   # 먼 곳을 보면 띠 위 점이 5~6cm 씩 흔들렸다
+        # 띠 안쪽 여유: 바깥 끝은 물건을 든 채 놓고 뒤로 빠지는 IK 가 안 풀린다 (10-30 팔 B r 46cm 물병 거부)
+        self.declare_parameter("place_band_margin_in", 0.01)
+        self.declare_parameter("place_band_margin_out", 0.03)
+        self.declare_parameter("place_min_x", 0.14)          # arm_server min_x 0.12 + 여유 (팔 앞쪽만)
+        self.declare_parameter("place_max_yaw_deg", 60.0)    # GUI 초록 띠(±60°)와 같게 (arm_server 한계 70°)
+        self._band = None             # {"anchor", "arm", "t0", "pts"}
+        self._band_log_t = 0.0        # 진단 로그·안내 1초에 한 번
+        self._snapped_t = 0.0         # 광선이 물체에 붙은 마지막 시각 — 그동안은 띠 확정을 안 한다(컵 = 따르기)
+        self.create_subscription(Int32, "/gaze/snapped",
+                                 lambda m: setattr(self, "_snapped_t", time.time()) if m.data >= 0 else None, be)
+        self.pub_place_prog = self.create_publisher(Float32, "/task/place_progress", 10)
+        self.pub_place_final = self.create_publisher(PointStamped, "/task/place_final", 10)   # GUI 놓을 곳 표시
         self.create_subscription(Empty, "/task/cancel", self.on_cancel, 10)
 
         self.pub_role = self.create_publisher(String, "/task/expected_role", 10)
@@ -399,6 +415,10 @@ class TaskManager(Node):
 
     def on_target(self, msg: GazeTarget):
         p = np.array([msg.point.x, msg.point.y, msg.point.z])
+
+        if (self.state == PICK_SELECTED and msg.role == "place" and not msg.snapped and self.arms
+                and bool(self.get_parameter("place_along_ray").value)):
+            return      # 빈 곳은 초록 띠 위 점 응시로 확정한다 (_publish_place_preview)
 
         # 안전장치 3: 신뢰도가 낮은 목표는 거부한다.
         # (dwell 산포가 크거나 깜빡임이 섞인 응시는 여기서 걸러진다)
@@ -660,8 +680,10 @@ class TaskManager(Node):
         if (self.state != PICK_SELECTED or self.task in ("pour", "pour_calib")
                 or not bool(self.get_parameter("place_along_ray").value)
                 or self._ray_pt is None or time.time() - self._ray_pt[1] > 0.5):
+            self._band_reset()
             return
         got = self._place_along_ray(self._ray_pt[0], quiet=True)
+        self._band_dwell(got)
         m = PointStamped()
         m.header.stamp = self.get_clock().now().to_msg()
         m.header.frame_id = self.target_frame or "base_link"
@@ -670,6 +692,72 @@ class TaskManager(Node):
         else:
             m.point.x, m.point.y, m.point.z = float(got[0][0]), float(got[0][1]), float(got[1])  # z = 팔 번호
         self.pub_place_prev.publish(m)
+
+    def _band_reset(self):
+        if self._band is not None:
+            self._band = None
+            self.pub_place_prog.publish(Float32(data=0.0))
+
+    def _band_dwell(self, got):
+        """미리보기 점이 place_dwell_radius 안에 place_dwell_s 동안 머물면 그 점(평균)에 놓는다."""
+        now = time.time()
+        log = now - self._band_log_t > 1.0
+        if log:
+            self._band_log_t = now
+        if now - self._snapped_t < 0.5:
+            self._band_reset()          # 광선이 물체(컵)에 붙어 있음 — 그쪽은 dwell/target_resolver 가 맡는다
+            return
+        if got is None:
+            if log:
+                names = [self.arms[k][0] for k in self.pick_cands] if self.pick_cands else []
+                self._say(f"이 방향엔 놓을 수 있는 초록 띠가 없습니다 — 집는 팔 {names} 의 띠 쪽을 보세요")
+            self._band_reset()
+            return
+        q, i = got
+        b = self._band
+        moved = None if b is None else float(np.linalg.norm(q[:2] - b["anchor"][:2]))
+        if b is None or b["arm"] != i or moved > float(self.get_parameter("place_dwell_radius").value):
+            if log and b is not None:
+                self.get_logger().info(f"[띠 응시] 다시 시작 — 점이 {moved * 100:.1f}cm 움직임 "
+                                       f"(기준 {float(self.get_parameter('place_dwell_radius').value) * 100:.0f}cm)")
+            self._band = {"anchor": q, "arm": i, "t0": now, "pts": [q]}
+            self.pub_place_prog.publish(Float32(data=0.0))
+            return
+        b["pts"].append(q)
+        b["anchor"] = np.mean(b["pts"], axis=0)       # 기준을 평균으로 — 한쪽으로 천천히 밀려도 덜 끊긴다
+        frac = (now - b["t0"]) / float(self.get_parameter("place_dwell_s").value)
+        self.pub_place_prog.publish(Float32(data=float(min(frac, 1.0))))
+        if frac >= 1.0:
+            target = np.mean(b["pts"], axis=0)
+            self._band = None
+            self._confirm_band_place(target, i)
+
+    def _confirm_band_place(self, target, pref):
+        self._say(f"놓을 곳 확정 (초록 띠 2초 응시): 팔 {self.arms[pref][0]} 쪽 "
+                  f"({target[0]:.3f}, {target[1]:.3f})")
+        from geometry_msgs.msg import PointStamped
+        m = PointStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.target_frame or "base_link"
+        m.point.x, m.point.y, m.point.z = float(target[0]), float(target[1]), float(target[2])
+        self.pub_place_final.publish(m)
+        self.task = "grasp_calib" if self.grasp_calib else ""
+        self.try_order = self.order_for(target, "놓을 곳")
+        if not self.try_order:
+            return            # 집기 선택은 유지 — 다른 곳을 보면 된다
+        if pref in self.try_order:
+            self.try_order.remove(pref)
+            self.try_order.insert(0, pref)
+        self.try_target, self.try_reasons = target, []
+        self.pick_arm = self.try_order.pop(0)
+        self.send_goal_dual(self.pick_point, target)
+
+    def _in_front(self, i, q3):
+        """팔 i 기준으로 앞쪽인가 (arm_server 의 min_x / max_yaw 거부를 미리 피한다)."""
+        a = self.to_arm(i, q3)
+        return (a[0] >= float(self.get_parameter("place_min_x").value)
+                and abs(math.degrees(math.atan2(a[1], a[0])))
+                <= float(self.get_parameter("place_max_yaw_deg").value))
 
     def _place_along_ray(self, p, quiet=False):
         """머리 -> 응시점 방향 직선 위에서, 물체를 집을 수 있는 팔의 초록 띠(뻗음 보정 포함) 안이면서
@@ -698,7 +786,10 @@ class TaskManager(Node):
                 if any(np.linalg.norm(q - np.asarray(o[:2])) < 0.08 for o in others):
                     continue
                 r = self._dists(q3)[i]
-                if not lo + self._ro(i) + 0.005 <= r <= hi + self._ro(i) - 0.005:
+                if not (lo + self._ro(i) + float(self.get_parameter("place_band_margin_in").value) <= r
+                        <= hi + self._ro(i) - float(self.get_parameter("place_band_margin_out").value)):
+                    continue
+                if not self._in_front(i, q3):       # 팔 뒤·옆 교점은 버린다 (10-30: 팔 B 옆 x=0.055 로 가 실패)
                     continue
                 if best is None or abs(t - 1.0) < abs(best[0] - 1.0):
                     best = (t, q3)

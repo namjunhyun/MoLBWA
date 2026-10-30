@@ -233,7 +233,14 @@ class ControlPanel(Node):
             # 2026-10-26: task_manager 가 계산한 '실제로 놓일 자리'(시선 방향, 초록 띠 안) 미리보기
             self.create_subscription(PointStamped, "/task/place_preview",
                                      lambda m: setattr(self, "_place_prev", (m.point.x, m.point.y, time.time())), 10)
+            # 2026-10-30: 놓을 곳은 이 미리보기 점을 2초 보면 확정 — 진행률을 미리보기에 링으로
+            self.create_subscription(Float32, "/task/place_progress",
+                                     lambda m: setattr(self, "_place_prog", float(m.data)), 10)
+            # 확정된 띠 위 점 = 실제 놓는 곳. 빈 곳 응시점(띠 밖일 수 있음)은 놓을 곳으로 그리지 않는다
+            self.create_subscription(PointStamped, "/task/place_final",
+                                     lambda m: setattr(self, "place_target", (m.point.x, m.point.y)), 10)
         self._place_prev = None
+        self._place_prog = 0.0
         self._head = self._ray_pt = None
         self._snapped = (-1, 0.0)
 
@@ -342,7 +349,8 @@ class ControlPanel(Node):
         if msg.role == "pick":
             self.pick_target = (msg.point.x, msg.point.y)
             self.place_target = None
-        else:
+        elif self.source == "mouse" or msg.snapped:
+            # 시선 모드의 빈 곳은 task_manager 가 띠 위 점으로 확정해 /task/place_final 로 준다
             self.place_target = (msg.point.x, msg.point.y)
 
     def on_state(self, msg: String):
@@ -818,6 +826,7 @@ class ControlPanel(Node):
             place_preview=(self.homography.to_pixel(self._place_prev[0], self._place_prev[1])
                            if self._place_prev is not None and now - self._place_prev[2] < 0.5
                            and math.isfinite(self._place_prev[0]) else None),
+            place_progress=self._place_prog,
             snapped_index=(self._snapped[0] if self.source != "mouse"
                            and now - self._snapped[1] < 0.5 else -1),
             pointer_holding=holding,
