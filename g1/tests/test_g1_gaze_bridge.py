@@ -159,3 +159,20 @@ def test_draw_overlay_no_gaze_no_dets():
     from g1_gaze_bridge import draw_overlay
     out = draw_overlay(np.zeros((480, 640, 3), np.uint8), [], [], None, None, None, None)
     assert out.shape == (480, 640, 3)
+
+
+def test_hold_dets_keeps_missing_class_briefly():
+    from g1_gaze_bridge import hold_dets
+    held = {}
+    assert hold_dets(held, [FACE, HAND], 0.0) == [FACE, HAND]
+    assert sorted(hold_dets(held, [HAND], 0.3)) == sorted([FACE, HAND])   # 얼굴 놓쳐도 0.5초는 유지
+    assert hold_dets(held, [HAND], 0.9) == [HAND]                         # 넘으면 사라짐
+    moved = ["g1_hand", 0.6, 260, 300, 300, 340]
+    assert hold_dets(held, [moved], 1.0) == [moved]                       # 새로 보이면 최신 박스로 교체
+
+
+def test_pick_part_margin_absorbs_gaze_error():
+    # 시선 오차(캘리브 16px)만큼 박스 밖에 떨어져도 그 부위로 본다
+    assert pick_part([FACE], (150 - 15, 60)) == "g1_face"
+    assert pick_part([FACE], (150 - 15, 60), margin=0) is None
+    assert pick_part([FACE], (150 - 40, 60)) is None

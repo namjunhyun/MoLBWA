@@ -35,12 +35,17 @@ log = logging.getLogger("g1_gaze_bridge")
 PART_PRIORITY = ("g1_hand", "g1_face", "g1_torso")
 
 
-def pick_part(dets: list, uv: tuple[float, float] | None) -> str | None:
-    """dets = [[cls, conf, x1, y1, x2, y2], ...] 중 uv 를 포함하는 박스의 부위. 우선순위 hand > face > torso."""
+PART_MARGIN_PX = 20   # 시선 캘리브 오차(2026-10-30 다점 10점 평균 16px)만큼 판정 박스를 키운다
+
+
+def pick_part(dets: list, uv: tuple[float, float] | None, margin: float = PART_MARGIN_PX) -> str | None:
+    """dets = [[cls, conf, x1, y1, x2, y2], ...] 중 uv 를 포함하는 박스(사방 margin px 확장)의 부위.
+    우선순위 hand > face > torso — 확장으로 겹쳐도 작은 부위가 이긴다."""
     if uv is None:
         return None
     u, v = uv
-    hits = [d for d in dets if d[0] in PART_PRIORITY and d[2] <= u <= d[4] and d[3] <= v <= d[5]]
+    m = margin
+    hits = [d for d in dets if d[0] in PART_PRIORITY and d[2] - m <= u <= d[4] + m and d[3] - m <= v <= d[5] + m]
     if not hits:
         return None
     return min(hits, key=lambda d: (PART_PRIORITY.index(d[0]), -d[1]))[0]
@@ -70,6 +75,14 @@ GAZE_COLOR = (0, 255, 0)                  # gaze_on_scene 씬 창과 같은 초�
 PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO"}
 
 
+def hold_dets(held: dict, dets: list, now: float, ttl: float = 0.5) -> list:
+    """표시용: 이번 프레임에 안 잡힌 클래스는 마지막 박스를 ttl 초 유지(깜빡임 방지). held 는 호출자가 들고 다닌다.
+    판정(LabelDwell)엔 쓰지 않는다 — 그쪽은 이미 max_gap 으로 틈을 메운다."""
+    for cls in dict.fromkeys(d[0] for d in dets):            # set 이면 순서가 실행마다 바뀐다
+        held[cls] = (now, [d for d in dets if d[0] == cls])
+    return [d for t, ds in held.values() if now - t <= ttl for d in ds]
+
+
 def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
     """확인 창(--show)용 그림: 부위·물체 박스, 시선 점, 위쪽에 판정·태그 방위. 원본은 건드리지 않고 복사본에 그린다.
     cv2 기본 글꼴은 한글을 못 그려서 화면 글자는 영어."""
@@ -79,7 +92,9 @@ def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
         c = PART_COLOR.get(cls)
         if c is None:
             continue
-        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), c, 2)
+        m = PART_MARGIN_PX                                      # 굵은 테두리 = 판정 영역, 얇은 선 = YOLO 박스
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), c, 1)
+        cv2.rectangle(img, (int(x1 - m), int(y1 - m)), (int(x2 + m), int(y2 + m)), c, 2)
         cv2.putText(img, f"{PART_NAME.get(cls, cls)} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
     for cls, conf, x1, y1, x2, y2 in obj_dets:
@@ -179,6 +194,7 @@ def main():
 
     n = n_label = n_bear = 0
     next_report = time.time() + 2.0
+    held_parts, held_objs, shown_uv = {}, {}, (0.0, None)
     try:
         while src.ok():
             frame, uv, _ = src.frame()
@@ -197,8 +213,14 @@ def main():
                     obj_dets = obj_det.feed(jpg.tobytes())
                     picked = pick_object(obj_dets, uv)
                     obj_kind = picked[0] if picked else None
-            if args.show:
-                cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing))
+            if args.show:                                              # 표시만 0.5초 유지(판정은 그대로)
+                now = time.time()
+                if uv is not None:
+                    shown_uv = (now, uv)
+                disp_uv = shown_uv[1] if now - shown_uv[0] <= 0.3 else None
+                cv2.imshow("gaze + YOLO", draw_overlay(frame, hold_dets(held_parts, part_dets, now),
+                                                       hold_dets(held_objs, obj_dets, now),
+                                                       disp_uv, label, obj_kind, bearing))
                 cv2.waitKey(1)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
             sock.sendto(encode({"t": time.time(), "label": label, "bearing_deg": bearing,
