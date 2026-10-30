@@ -37,3 +37,12 @@ ros2_ws/log/
 ros2_ws/src/ocams_ros2/include/
 ros2_ws/src/ocams_ros2/src/withrobot_camera.cpp
 ros2_ws/src/ocams_ros2/src/withrobot_utility.cpp
+
+# arm package
+arm/__pycache__/
+
+# 2026-09-28: ORB-SLAM3 ROS2 래퍼 외부 클론(자체 .git, ~880MB) — patches/ 에 수정 기록
+ros2_ws/src/orbslam3_ros2/
+# 설정 수동 백업 / 잘못 찍힌 캘리브 백업 (로컬 보관용)
+*.bak_*
+calibration/gaze_scene_extrinsic_*.json
