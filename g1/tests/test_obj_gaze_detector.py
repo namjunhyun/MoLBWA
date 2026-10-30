@@ -22,17 +22,17 @@ def test_pick_object_none_when_gaze_outside_boxes():
 
 
 def test_pick_object_none_when_no_gaze():
-    assert pick_object([["cup", 0.9, 0, 0, 640, 480]], None) is None
+    assert pick_object([["vase", 0.9, 0, 0, 640, 480]], None) is None
 
 
 def test_pick_object_prefers_higher_conf():
-    dets = [["cup", 0.5, 0, 0, 100, 100], ["cell phone", 0.9, 0, 0, 100, 100]]
-    assert pick_object(dets, (50, 50))[0] == "phone"
+    dets = [["vase", 0.5, 0, 0, 100, 100], ["potted plant", 0.9, 0, 0, 100, 100]]
+    assert pick_object(dets, (50, 50)) == ("plant", [0, 0, 100, 100])
 
 
 def test_obj_to_kind_values():
-    assert OBJ_TO_KIND == {"potted plant": "plant", "vase": "plant", "bottle": "bottle",
-                           "cup": "bottle", "cell phone": "phone", "teddy bear": "photo"}
+    assert OBJ_TO_KIND == {"potted plant": "plant", "vase": "plant"}          # 물병·가족사진·휴대폰 제외(2026-10-30)
+    assert pick_object([["cup", 0.9, 0, 0, 640, 480], ["cell phone", 0.9, 0, 0, 640, 480]], (320, 240)) is None
 
 
 def test_object_bearing_center_pixel_identity_T():

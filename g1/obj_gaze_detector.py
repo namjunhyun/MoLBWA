@@ -1,4 +1,4 @@
-"""시선이 향한 물체(화분·꽃병 등)를 YOLO 박스로 잡아 대화 kind 로 매핑한다.
+"""시선이 향한 물체(화분·꽃병)를 YOLO 박스로 잡아 대화 kind 로 매핑한다.
 pick_part(g1_gaze_bridge)와 같은 규약: dets 원소 = [cls, conf, x1, y1, x2, y2]."""
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ from g1_gaze_bridge import object_bearing_deg
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
-# YOLO(COCO) 라벨 -> 대화 kind (spec §3.3)
-OBJ_TO_KIND = {"potted plant": "plant", "vase": "plant", "bottle": "bottle",
-               "cup": "bottle", "cell phone": "phone", "teddy bear": "photo"}
+# YOLO(COCO) 라벨 -> 대화 kind (spec §3.3). 물체 대화는 화분만 남김(2026-10-30 — 물병·가족사진·휴대폰 제외)
+OBJ_TO_KIND = {"potted plant": "plant", "vase": "plant"}
 
 
 def pick_object(dets: list, uv: tuple[float, float] | None) -> tuple[str, list[float]] | None:

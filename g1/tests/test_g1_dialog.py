@@ -1,6 +1,8 @@
 import math
 import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -61,7 +63,7 @@ def test_risk(ans, kind):
 
 
 @pytest.mark.parametrize("q,ok", [
-    ("물 주실 때 어떤 기분이세요?", True), ("적적하실 때는 어떤 마음이 드세요?", True), ("누가 제일 생각나세요?", True),
+    ("물 주실 때 어떤 기분이세요?", True), ("적적하실 때는 어떤 마음이 드세요?", False), ("적적할 때 뭘 하고 싶어요?", False), ("누가 제일 생각나세요?", True),
     ("요즘 자주 보는 프로그램이 있으신가요?", False), ("오늘 하루도 화분과 함께 잘 보내셨어요?", False),
     ("설레는 순간도 있지 않으신가요?", False), ("요즘 어떻게 지내시는지 궁금하지는 않으세요?", False),
     ("식물은 주로 어떻게 돌봐주시나요?", False), ("손녀 생일이 있지요?", False), ("공감만 하는 말이에요.", False),
@@ -123,7 +125,7 @@ def test_four_answers_continue_until_thanks():
     r = Robot()
     d = run(r, ["물 주는 게 낙이지", "덜 적적해", "TV 보지", "딸 사진 봐", "보고 싶지. 이야기 들어줘서 고마워"], gen=chat)
     sc = SCENARIOS["plant"]
-    assert r.said[0] == sc["question"]
+    assert r.said[0] in sc["questions"]
     assert r.said[1:5] == ["그러셨군요. 그때는 어떤 마음이 드세요?"] * 4       # 4번은 공감 + 질문
     assert r.said[5] == "마음이 느껴져요."                                      # 고마움 → 공감만
     assert r.said[6] in CLOSINGS and len(r.said) == 7
@@ -163,17 +165,31 @@ def test_silence_once_waits_twice_closes():
 def test_risk_skips_clova_and_alerts():
     r = Robot()
     d = run(r, ["그냥 다 귀찮고 죽고 싶어"], gen=chat)
-    assert r.said == [SCENARIOS["plant"]["question"], RISK["life"][1]]
+    assert r.said[0] in SCENARIOS["plant"]["questions"] and r.said[1:] == [RISK["life"][1]]
     assert d.calls == [] and "위험 신호" in d.alert and "죽고 싶어" in d.alert
 
 
 def test_no_key_uses_fallback_and_rotates_follow_questions():
     r = Robot()
-    run(r, ["좋아", "그렇지", "고마워"], kind="phone")                          # 실제 gen, 키 없음
-    sc = SCENARIOS["phone"]
+    run(r, ["좋아", "그렇지", "고마워"], kind="greet")                          # 실제 gen, 키 없음
+    sc = SCENARIOS["greet"]
     assert r.said[1] == f"{sc['empathy']} {sc['follow'][0]}"
     assert r.said[2] == f"{sc['empathy']} {sc['follow'][1]}"
     assert r.said[3] == sc["empathy"] and r.said[4] in CLOSINGS
+
+
+def test_yes_no_question_is_regenerated_once():
+    outs = iter(["아드님이 그리우시겠어요. 아드님 보고 싶으신가요?", "아드님이 그리우시겠어요. 아드님 생각하시면 어떤 마음이 드세요?"])
+    r = Robot()
+    d = run(r, ["아들이 명절에나 와", "고마워"], gen=lambda m, last: "마음이 느껴져요." if last else next(outs))
+    assert r.said[1] == "아드님이 그리우시겠어요. 아드님 생각하시면 어떤 마음이 드세요?"
+    assert len(d.calls) == 3 and "열린 질문" in d.calls[1][-1]["content"]          # 생성 → 다시 만들기 → 마지막 공감
+
+
+def test_regenerated_still_bad_falls_back_to_follow():
+    r = Robot()
+    run(r, ["좋아", "고마워"], gen=lambda m, last: "저도 좋아요." if last else "좋으시겠어요. 좋으신가요?")
+    assert r.said[1] == f"좋으시겠어요. {SCENARIOS['plant']['follow'][0]}"
 
 
 def test_generated_without_question_gets_follow():
@@ -207,13 +223,51 @@ def test_attend_failure_still_speaks():
         raise RuntimeError("합성 실패")
     r = Robot()
     run(r, ["고마워"], gen=chat, attend=attend, with_attend=True)
-    assert r.said[0] == SCENARIOS["plant"]["question"] and r.said[-1] in CLOSINGS
+    assert r.said[0] in SCENARIOS["plant"]["questions"] and r.said[-1] in CLOSINGS
 
 
-def test_photo_memory_reaches_prompt():
+def test_greet_starts_with_hello_and_tells_scene():
     r = Robot()
-    d = run(r, ["손녀지", "고마워"], kind="photo", gen=chat)
-    assert "지은이" in d.calls[0][1]["content"] and "어르신 본인" in d.calls[0][1]["content"]
+    d = run(r, ["밥 먹었지", "고마워"], kind="greet", gen=chat)
+    assert r.said[0] in SCENARIOS["greet"]["questions"] and r.said[-1] in CLOSINGS
+    assert "얼굴" in d.calls[0][1]["content"] and "인사" in d.calls[0][1]["content"]
+
+
+def test_first_line_varies():
+    for kind, sc in SCENARIOS.items():
+        assert len(set(sc["questions"])) >= 5
+        firsts = set()
+        for _ in range(30):
+            r = Robot()
+            run(r, ["고마워"], kind=kind, gen=chat)
+            firsts.add(r.said[0])
+        assert len(firsts) >= 3 and firsts <= set(sc["questions"])      # 매번 같은 첫마디가 아니다
+
+
+def test_after_act_waits_for_motion_before_first_line():
+    st = {"busy": True}
+    d = Dialog(lambda t: 0, busy=lambda: st["busy"])
+    said_at = []
+    d.say_fn = lambda t: said_at.append(time.time()) or 0
+    t0 = time.time()
+    threading.Timer(2.5, lambda: st.update(busy=False)).start()     # 손 흔들기 2.5초
+    d.start("keyboard", kind="greet", after_act=True)
+    while not said_at and time.time() - t0 < 6:
+        time.sleep(0.05)
+    d.stop()
+    assert said_at and said_at[0] - t0 >= 2.4
+
+
+def test_plant_first_lines_ask_different_things():
+    qs = SCENARIOS["plant"]["questions"]
+    asks = [q.split(". ", 1)[1] for q in qs]                          # 앞 "화분을 보고 계셨네요." 다음 질문
+    assert len(set(asks)) == len(asks) and len(asks) >= 5
+
+
+def test_only_plant_and_greet():
+    assert set(SCENARIOS) == {"plant", "greet"}
+    for k in ("bottle", "photo", "phone"):
+        assert "모르는" in Dialog(lambda t: 0).start(kind=k)
 
 
 def test_unknown_kind():
@@ -224,7 +278,7 @@ def test_warm_synthesizes_fixed_lines_and_tolerates_failure():
     made = []
     d = Dialog(lambda t: 0, synth=made.append)
     assert d.warm() == len(fixed_lines()) and set(made) == set(fixed_lines())
-    assert all(sc["question"] in made for sc in SCENARIOS.values())
+    assert all(q in made for sc in SCENARIOS.values() for q in sc["questions"])
 
     def down(t):
         raise RuntimeError("offline")
@@ -298,6 +352,7 @@ def test_closings_vary_and_last_reply_does_not_copy_example():
 
 def test_first_questions_do_not_describe_what_robot_cannot_see():
     for sc in SCENARIOS.values():
-        q = sc["question"]
-        assert "보고 계셨네요" in q and not any(w in q for w in ("표정", "싱그럽", "드시는 거 보니", "가까이 있네요"))
+        for q in sc["questions"]:
+            assert "화분" in q or "안녕하세요" in q
+            assert good_question(q) and not any(w in q for w in ("표정", "싱그럽", "드시는 거 보니", "가까이 있네요"))
         assert not any(f.startswith("그분") for f in sc["follow"])

@@ -95,16 +95,27 @@ def test_talk_mode_skips_auto_act(monkeypatch):
 
 def test_talk_mode_dialog_without_attend(monkeypatch):
     calls = []
-    monkeypatch.setattr(g1_panel.dialog, "start", lambda mode, with_attend, kind: calls.append(with_attend) or "ok")
+    monkeypatch.setattr(g1_panel.dialog, "start", lambda mode, with_attend, kind, after_act=False: calls.append(with_attend) or "ok")
     g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, True
-    g1_panel._auto_dialog("bottle", 40)                # 자동: 같이 보기 동작 없이
+    g1_panel._auto_dialog("plant", 40)                 # 자동: 같이 보기 동작 없이
     g1_panel.AUTO["on"] = False
     _call("POST", "/dialog/start", json.dumps({"kind": "plant", "with_attend": True}).encode())   # 수동도 강제로 끔
     g1_panel.TALK["on"] = False
     g1_panel.AUTO["on"] = True
-    g1_panel._auto_dialog("bottle", 40)                # 대화 모드 끄면 다시 같이 보기
+    g1_panel._auto_dialog("plant", 40)                 # 대화 모드 끄면 다시 같이 보기
     g1_panel.AUTO["on"] = False
     assert calls == [False, False, True]
+
+
+def test_talk_mode_hand_greet_does_not_wait_for_skipped_wave(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.dialog, "start", lambda mode, with_attend, kind, after_act=False: calls.append((kind, after_act)) or "ok")
+    g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, True
+    g1_panel._auto_dialog("greet", 0, True)            # 대화 모드: 손 흔들기 생략 → 기다리지 않고 바로 안부
+    g1_panel.TALK["on"] = False
+    g1_panel._auto_dialog("greet", 0, True)
+    g1_panel.AUTO["on"] = False
+    assert calls == [("greet", False), ("greet", True)]
 
 
 def test_talk_mode_blocks_manual_motion(monkeypatch):

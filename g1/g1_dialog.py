@@ -1,6 +1,6 @@
 """지원이 정서 돌봄 대화 (패널 안에서 돈다). 시나리오: docs/g1_dialog_scenarios.md
 
-어르신이 물건(화분·물병·가족사진·휴대폰)을 바라보면 → [고정] 첫 질문 → 대답 ↔ [CLOVA] 공감 + 이어지는 질문 …
+어르신이 화분을 바라보면 → [고정] 첫 질문, 지원이 얼굴을 바라보면 → "안녕하세요~" 안부(스몰토크) → 대답 ↔ [CLOVA] 공감 + 이어지는 질문 …
 → 어르신이 "~해줘서 고마워"처럼 고마움으로 맺으면(또는 8번째 대답) 공감만 하고 [고정] 마무리 "… 저는 여기 있을게요."
 위험한 말("죽고 싶어", "너무 아파")은 CLOVA 로 보내지 않고 고정 돌봄 문장 → 마무리 → 패널 알림(alert).
 
@@ -8,7 +8,6 @@
 말하기: edge-tts(g1_tts) → 패널의 speak()(정책 켜짐 = 모션 서버 UDP say, 꺼짐 = 젯슨 g1_play_pcm).
 키: ~/.config/molbwa/clova.env (CLOVA_STUDIO_API_KEY, NCP_CLIENT_ID, NCP_CLIENT_SECRET).
 클라우드가 4초 안에 안 오거나·키가 없거나·금지 표현이 나오면 미리 쓴 문장으로 끝까지 간다(시연이 끊기지 않게).
-가족 기억은 시연용 가상 데이터(g1/dialog_memory.json — AI 생성 가족사진과 같은 설정).
 """
 import json
 import os
@@ -31,16 +30,19 @@ TIMEOUT = 4.0
 SYSTEM = ("당신은 홀로 사시는 어르신 곁에 머무는 말벗 휴머노이드 로봇 '지원이'입니다. 목표는 정보를 알려 주는 것이 아니라 "
           "어르신의 마음과 하루를 살피고 곁에 있어 드리는 것입니다. 모든 말은 정서적 공감과 돌봄이어야 합니다.\n"
           "- 공감이 먼저: 어르신 대답에 담긴 마음을 구체적으로 짚어 알아준 뒤에 묻습니다. 조언·해결책으로 서둘러 덮지 않습니다.\n"
+          "- 처음 바라본 것(화분 등)은 대화를 여는 실마리일 뿐입니다. 그 이야기만 고집하지 말고, 어르신이 꺼낸 이야기(사람·하루·감정)를 "
+          "따라가며 외로움·그리움·하루의 기쁨 같은 어르신의 마음으로 한 걸음씩 들어갑니다. 단 방금 대답과 상관없는 주제로 갑자기 넘어가지 않습니다 — "
+          "질문은 늘 어르신의 마지막 대답에서 자연스럽게 이어져야 합니다.\n"
           "- 외로움·그리움이 나오면 그 마음 곁에 머뭅니다('혼자 계시면 적적하셨겠어요'). '그냥 ~지 뭐' 같은 짧은 대답은 "
           "적적함일 수 있으니 그 마음부터 알아줍니다. 정보·방법·취미 이야기로 넘어가지 않습니다.\n"
           "- 질문은 마음·기분·그리운 사람에 대한 열린 질문 하나만: '어떤 마음이 드세요?', '어떤 기분이세요?', '누가 제일 생각나세요?' 꼴. "
-          "'~있으신가요?', '~인가요?' 같은 예/아니오 질문, 방법·정보를 묻는 질문, '~지요?' 확인형, '기억나세요?'·'추억이 있으세요?' 같은 기억 질문은 쓰지 않습니다.\n"
+          "'~있으신가요?', '~인가요?' 같은 예/아니오 질문, 방법·정보를 묻는 질문, '~지요?' 확인형, '기억나세요?'·'추억이 있으세요?' 같은 기억 질문, '적적하실 때 뭘 하고 싶으세요?'처럼 적적함을 캐묻는 질문은 쓰지 않습니다.\n"
           "- 건강은 물·끼니·햇볕·쉬기 같은 일상 돌봄까지만. 약·병원·진단·치료·돈·정치 이야기는 하지 않습니다.\n"
           "- 지원이는 가족이 아닌 말벗입니다. '저희 집'·'우리 가족', 지원이 자신의 취향·경험은 말하지 않습니다.\n"
           "- 성별을 짐작하지 말고 '어르신'이라고 부릅니다.\n"
           "- 따뜻한 존댓말로 짧게: 공감 1문장(30자 안팎) + 질문 1문장(20자 안팎). 이모티콘·특수기호는 쓰지 않습니다.\n"
           "예) 어르신 '물 주는 게 낙이지' → '매일 돌보시는 그 시간이 소중한 낙이시군요. 물 주실 때는 어떤 기분이세요?'\n"
-          "예) 어르신 '그냥 TV 보고 그러지 뭐' → '하루가 길게 느껴지실 때도 있으시겠어요. 적적하실 때는 어떤 마음이 드세요?'\n"
+          "예) 어르신 '그냥 TV 보고 그러지 뭐' → '혼자 계시는 시간이 길게 느껴지시겠어요. 그럴 때는 누가 제일 생각나세요?'\n"
           "예) 어르신 '바빠서 통 못 와' → '자주 못 보셔서 많이 그리우시겠어요. 다시 만나시면 어떤 말을 해 주고 싶으세요?'\n"
           "- 사람 이름·관계·사연은 [기억 데이터]에 있는 것만 씁니다. 없으면 지어내지 않습니다.\n"
           "- 지원이는 물건을 자세히 보지 못합니다. 사진 속 표정·옷·모습, 꽃 색깔처럼 눈에 보이는 것을 묘사하지 않습니다. "
@@ -48,28 +50,32 @@ SYSTEM = ("당신은 홀로 사시는 어르신 곁에 머무는 말벗 휴머�
           "- 어르신 대답은 음성인식 결과라 글자가 틀리거나 빠질 수 있습니다. 어색한 단어를 그대로 따라 말하지 말고, "
           "전체 뜻과 마음을 짐작해 공감하세요. 뜻을 알기 어려우면 '그런 마음이 드셨군요'처럼 마음을 받아 주세요.")
 
-# 물건별 시나리오 — 살피는 마음, 첫 질문(고정), 이어지는 질문(생성 실패 때 차례로), 공감 대비
+# 시나리오 — 상황, 살피는 마음, 첫 말(고정 여러 개 중 무작위 — 매번 같은 말로 시작하면 입력된 말을 뱉는 것처럼 들린다), 이어지는 질문(생성 실패 때 차례로), 공감 대비
+# plant = 화분을 3초 바라봄, greet = 지원이 얼굴을 3초 바라봄(안녕하세요~ 로 시작하는 스몰토크)
 SCENARIOS = {
-    "plant": {"name": "화분", "care": "무언가를 돌보는 기쁨, 하루의 작은 낙, 혼자 보내는 하루",
-              "question": "화분을 보고 계셨네요. 꽃 돌보실 때는 어떤 마음이 드세요?",
-              "follow": ["물 주실 때는 어떤 기분이세요?", "적적하실 때는 어떤 마음이 드세요?",
-                         "요즘 어르신 마음은 좀 어떠세요?", "요즘 어르신을 웃게 하는 건 뭐예요?"],
-              "empathy": "어르신 손길이 느껴져서 제 마음도 따뜻해져요."},
-    "bottle": {"name": "물병·텀블러", "care": "스스로를 챙기는 하루, 혼자 먹는 끼니, 몸보다 마음의 기운 (의료 이야기 금지)",
-               "question": "물병을 보고 계셨네요. 요즘 입맛은 좀 어떠세요?",
-               "follow": ["혼자 드실 때는 어떤 마음이 드세요?", "요즘 어르신 마음은 좀 어떠세요?",
-                         "기운이 없으실 때는 뭐가 제일 위로가 되세요?", "요즘 제일 생각나는 분은 누구세요?"],
-               "empathy": "어르신이 스스로 챙기시는 모습에 제 마음이 놓여요."},
-    "photo": {"name": "가족사진", "care": "가족에 대한 그리움, 지난날의 기쁨, 지금의 거리감",
-              "question": "가족사진을 보고 계셨네요. 이 사진 보시면 누가 제일 보고 싶으세요?",
-              "follow": ["보고 싶은 분 생각하시면 어떤 마음이 드세요?", "보고 싶은 분께 지금 어떤 말을 해 주고 싶으세요?",
-                         "보고 싶을 때는 어떻게 마음을 달래세요?", "요즘 어르신 마음은 좀 어떠세요?"],
-              "empathy": "가족을 생각하시는 마음이 참 깊으시네요."},
-    "phone": {"name": "휴대폰", "care": "누군가와 연결되어 있는지, 요즘의 적적함, 기다리는 연락",
-              "question": "휴대폰을 보고 계셨네요. 요즘 누구랑 이야기 나누셨어요?",
-              "follow": ["반가운 목소리 들으시면 어떤 기분이세요?", "연락 기다리실 때는 어떤 마음이 드세요?",
-                         "적적하실 때는 어떻게 마음을 달래세요?", "요즘 가장 듣고 싶은 목소리는 누구예요?"],
-              "empathy": "이렇게 저랑 이야기 나눠 주셔서 정말 고마워요."},
+    "plant": {"name": "화분", "scene": "어르신이 화분을 바라보셔서 화분 이야기로 대화를 열었습니다. 이제는 어르신이 꺼낸 이야기를 따라갑니다.",
+              "care": "화분은 실마리 — 돌보는 기쁨에서 시작해 혼자 보내는 하루, 그리운 사람, 요즘의 마음으로",
+              # 같은 뜻을 말만 바꾼 것이 아니라 하나하나 다른 마음을 묻는다(돌보는 마음·의미·계기·하루·사람)
+              "questions": ["화분을 보고 계셨네요. 꽃 돌보실 때는 어떤 마음이 드세요?",
+                            "화분을 보고 계셨네요. 이 화분이 어르신께는 어떤 의미예요?",
+                            "화분을 보고 계셨네요. 이 화분은 어떻게 키우게 되셨어요?",
+                            "화분을 보고 계셨네요. 화분 덕분에 하루가 어떻게 달라지셨어요?",
+                            "화분을 보고 계셨네요. 꽃이 피면 누구한테 제일 보여 주고 싶으세요?"],
+              # 대비 질문은 꽃 질문이 아니라 마음 질문 — 생성이 실패해도 대화가 꽃에 머물지 않게(2026-10-30)
+              "follow": ["요즘 하루 중에 언제가 제일 좋으세요?", "요즘 어르신 마음은 좀 어떠세요?",
+                         "요즘 제일 생각나는 분은 누구세요?", "요즘 어르신을 웃게 하는 건 뭐예요?"],
+              "empathy": "그런 마음이 드셨군요."},
+    "greet": {"name": "안부", "scene": "어르신이 지원이 얼굴을 바라보셔서 지원이가 먼저 반갑게 인사했습니다.",
+              "care": "오늘 하루와 기분, 끼니·잠 같은 일상, 요즘의 소소한 즐거움 — 가볍고 따뜻한 안부",
+              "questions": ["안녕하세요~ 오늘 하루는 어떻게 보내고 계세요?",
+                            "안녕하세요~ 반가워요. 오늘은 어떻게 지내셨어요?",
+                            "안녕하세요~ 저를 보고 계셨네요. 오늘 아침은 어떻게 시작하셨어요?",
+                            "안녕하세요, 어르신~ 요즘 어떻게 지내세요?",
+                            "안녕하세요~ 오늘 하루 중에 어떤 때가 제일 좋으셨어요?",
+                            "어르신, 안녕하세요~ 오늘은 뭐 하면서 지내셨어요?"],
+              "follow": ["오늘 기분은 좀 어떠세요?", "오늘은 어떤 일이 제일 기억에 남으세요?",
+                         "요즘 소소하게 즐거운 일은 뭐예요?", "요즘 어르신 마음은 좀 어떠세요?"],
+              "empathy": "그러셨군요, 말씀 들으니 제 마음도 따뜻해져요."},
 }
 MAX_TURNS = 8                    # 어르신 대답 상한 — 8번째 대답 뒤에는 공감만 하고 마무리
 # 마무리(고정) — 무작위로 하나. 모두 고마움 + 언제든 + "저는 여기 있을게요."
@@ -138,15 +144,16 @@ def fixed_lines() -> list:
     """미리 합성해 둘 고정·대비 문장 전부."""
     out = []
     for sc in SCENARIOS.values():
-        out += [sc["question"], sc["empathy"]] + sc["follow"] + [f"{sc['empathy']} {f}" for f in sc["follow"]]
+        out += sc["questions"] + [sc["empathy"]] + sc["follow"] + [f"{sc['empathy']} {f}" for f in sc["follow"]]
     return out + CLOSINGS + CLOSINGS_SILENT + NOT_HEARD + [line for _, line in RISK.values()]
 
 
 # 마음을 여는 질문: 의문사(어떤·어떻게·누구·무엇…)가 있는 열린 질문. 의문사 없는 예/아니오 질문
 # ("잘 자라고 있나요?", "귀여우신가요?"), 확인형("~지요?"), 정보·방법 질문(프로그램·채널·돌보는 법)은 아니다.
 # 너무 엄격하면 생성 질문이 다 대비 질문으로 바뀌어 다시 하드코딩처럼 들린다(2026-10-26 실측: 4/4 교체).
-_WH = re.compile(r"어떤|어떻|어떠|어땠|어떨|누구|누가|무엇|무슨|뭐|뭘|언제|어디|얼마나|왜")
-_BAD_Q = re.compile(r"(지요|하죠|이죠|잖아요)\?$|프로그램|채널|방법|어떻게\s*돌[보봐]|궁금하지")
+_WH = re.compile(r"어떤|어떻|어떠|어땠|어떨|누구|누가|무엇|무얼|무슨|뭐|뭘|언제|어디|얼마나|왜")
+# "적적할 때 뭘 하고 싶어요?" 류는 쓰지 않는다(2026-10-30) — 적적함은 공감으로 받아 주고 질문으로 캐묻지 않는다
+_BAD_Q = re.compile(r"(죠|지요|잖아요)\?$|프로그램|채널|방법|방식|분야|이름|어떻게\s*돌[보봐]|궁금하지|적적하?(실|할|하실)?\s*때")
 
 
 def good_question(q: str) -> bool:
@@ -189,14 +196,15 @@ class Dialog:
                 break
         return n
 
-    def start(self, mode="mic", with_attend=False, kind="plant"):
+    def start(self, mode="mic", with_attend=False, kind="plant", after_act=False):
+        """after_act: 방금 보낸 동작(손 흔들기 등)이 끝나기를 기다렸다가 첫마디를 한다."""
         if self.running:
             return "이미 대화 중"
         if kind not in SCENARIOS:
-            return f"모르는 물건 {kind!r}"
+            return f"모르는 시나리오 {kind!r}"
         self.env = load_env()
         self.running, self._stop, self._typed, self.log, self.alert = True, False, None, [], ""
-        threading.Thread(target=self._run, args=(mode, with_attend, kind), daemon=True).start()
+        threading.Thread(target=self._run, args=(mode, with_attend, kind, after_act), daemon=True).start()
         return f"대화 시작 ({SCENARIOS[kind]['name']})"
 
     def stop(self):
@@ -237,13 +245,19 @@ class Dialog:
                 return
             time.sleep(0.1)
 
-    def _run(self, mode, with_attend, kind):
+    def _wait_motion(self):
+        """보낸 동작이 시작(busy)되고 끝날 때까지. 상태가 늦게 와도 최소 2초, 길어도 40초."""
+        t0 = time.time()
+        while (self.busy() or time.time() - t0 < 2) and time.time() - t0 < 40 and not self._stop:
+            time.sleep(0.2)
+
+    def _run(self, mode, with_attend, kind, after_act=False):
         sc = SCENARIOS[kind]
         hist = []                                        # [("assistant"|"user", 글자)]
         try:
-            self._log(f"(물건: {sc['name']} · 살피는 마음: {sc['care']} · "
+            self._log(f"(시나리오: {sc['name']} · 살피는 마음: {sc['care']} · "
                       f"{'키 있음' if self.env['CLOVA_STUDIO_API_KEY'] else 'CLOVA 키 없음 → 미리 쓴 문장'})")
-            first = sc["question"]
+            first = self.rng.choice(sc["questions"])
             try:
                 attended = with_attend and self.attend_fn is not None and self.attend_fn(first)
             except Exception as e:                       # 합성 실패 등 — 동작 없이 말로 진행
@@ -251,10 +265,11 @@ class Dialog:
                 attended = False
             if attended:
                 self._log(f"[고정 질문·같이 보기에 맞춤] {first}")
-                t0 = time.time()
-                while (self.busy() or time.time() - t0 < 2) and time.time() - t0 < 40 and not self._stop:
-                    time.sleep(0.2)
+                self._wait_motion()
             else:
+                if after_act:
+                    self._log("(동작 끝나기 기다림)")
+                    self._wait_motion()
                 self._say("고정 질문", first)
             hist.append(("assistant", first))
             turns, silent, follow_i = 0, 0, 0
@@ -302,9 +317,11 @@ class Dialog:
         rule = ("어르신이 고마워하며 이야기를 맺었습니다. 지금까지 어르신이 꺼낸 마음 가운데 하나를 구체적으로 짚어 "
                 "따뜻하게 알아주는 1문장만 말하세요. 고맙다는 인사와 질문은 하지 마세요(다음 문장에서 지원이가 인사합니다)."
                 if last else
-                "어르신의 마지막 대답에 담긴 마음을 구체적으로 짚어 공감하는 1문장, 이어서 [살피는 마음]을 살피는 열린 질문 1문장을 말하세요. "
-                "질문은 하나만, 앞에서 한 질문과 겹치지 않게.")
-        ctx = f"[바라본 물건] {sc['name']}\n[살피는 마음] {sc['care']}\n[기억 데이터] {self._memory(sc)}"
+                "어르신의 마지막 대답에 담긴 마음을 구체적으로 짚어 공감하는 1문장, 이어서 그 대답에서 자연스럽게 이어지는 열린 질문 1문장을 말하세요. "
+                "질문은 방금 대답에 나온 사람·감정·하루에 대해 묻고, 어르신이 화분 이야기를 하지 않았다면 화분으로 돌아가지 마세요. "
+                "질문 꼴: '…어떤 마음이 드세요?', '…누가 제일 생각나세요?', '…언제가 제일 좋으세요?'처럼 의문사로 묻고 '~세요?'로 끝냅니다. "
+                "'~있으신가요?', '~시죠?', '~나요?' 꼴과 TV 프로그램·방법·연락 방식 같은 정보 질문은 쓰지 마세요. 질문은 하나만, 앞에서 한 질문과 겹치지 않게.")
+        ctx = f"[상황] {sc['scene']}\n[살피는 마음] {sc['care']}\n[기억 데이터] 없음"
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": ctx}]
         msgs += [{"role": r, "content": t} for r, t in hist]
         msgs[-1] = {"role": "user", "content": f"어르신: {hist[-1][1]}\n\n{rule}"}
@@ -315,22 +332,20 @@ class Dialog:
         if last:                                         # 질문이 섞이면 뺀다
             keep = [x for x in sents if not x.endswith("?")]
             return " ".join(keep) if keep else sc["empathy"]
-        if len(sents) < 2 or not good_question(sents[-1]):   # 질문이 없거나 예/아니오·정보 질문 → 공감은 살리고 대비 질문
-            empathy = next((x for x in sents if not x.endswith("?")), sc["empathy"])
-            if out.endswith("?"):
-                self._log(f"(질문 바꿈: {sents[-1]!r} → 대비 질문)")
-            return f"{empathy} {follow}"
-        return out
-
-    def _memory(self, sc):
-        if sc["name"] != "가족사진":
-            return "없음"
-        try:
-            m = json.load(open(os.path.join(HERE, "dialog_memory.json"), encoding="utf-8"))
-            p = m["photos"][0]
-            return f"사진 속 인물: 어르신 본인, {', '.join(p['people'])}. 사연: {p['story']}"
-        except (OSError, ValueError, KeyError, IndexError):
-            return "없음"
+        if len(sents) >= 2 and good_question(sents[-1]):
+            return out
+        # 질문이 없거나 예/아니오·정보 질문 → 한 번만 다시 묻는다(대비 질문은 대화와 덜 이어져 하드코딩처럼 들린다)
+        self._log(f"(질문 다시 만들기: {sents[-1] if sents else out!r})")
+        fix = msgs + [{"role": "assistant", "content": out},
+                      {"role": "user", "content": "질문을 예/아니오로 답하는 꼴이 아니라 '어떤·누구·무엇·언제·어떻게' 중 하나가 들어간 "
+                                                  "열린 질문으로 바꿔, 공감 1문장 + 질문 1문장으로 다시 말하세요. 방금 어르신 대답에서 이어지게."}]
+        again = self.gen("HCX-005", fix, None, max_sent=2)
+        s2 = split_sents(again) if again else []
+        if len(s2) >= 2 and good_question(s2[-1]):
+            return again
+        empathy = next((x for x in sents + s2 if not x.endswith("?")), sc["empathy"])   # 공감은 살리고 대비 질문
+        self._log("(질문 바꿈 → 대비 질문)")
+        return f"{empathy} {follow}"
 
     # ---------- 듣기 ----------
     def _listen(self, mode):
@@ -372,7 +387,7 @@ class Dialog:
             p.kill()
 
     MIN_SPEECH = 0.5                                     # 이보다 짧은 소리(딸깍·숨·지원이 목소리 끝자락)는 말로 보지 않는다
-    END_SILENCE = 1.2                                    # 말하다 이만큼 조용하면 끝 — 어르신은 천천히·쉬어 가며 말하실 수 있다
+    END_SILENCE = 0.9                                    # 말하다 이만큼 조용하면 끝 — 1.2 → 0.9 (2026-10-30, 답이 빨리 오게). 말 중간에 끊기면 다시 올린다
 
     def _record_vad(self, wait=None):
         """말 시작을 wait(기본 answer_sec)초까지 기다리고, 말이 끝난 뒤 END_SILENCE 초 조용하면 끝(최대 15초).

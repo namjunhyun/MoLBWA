@@ -148,12 +148,12 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 
 # ── 자동 교감(시선 → 명령) ───────────────────────────────────────────────
 # 브리지(55057)가 부위 라벨·물체 kind·방위를 보낸다. 오케스트레이터가 dwell 로 확정해
-# 부위 → act, 물체 → 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
+# 손 → 손 흔들기(act), 얼굴 → 안부 대화(greet), 물체 → 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
 AUTO = {"on": False, "status": "대기"}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
 LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
-PART_STATUS = {"g1_face": "👋 얼굴을 보고 손 흔들기", "g1_hand": "🤝 손을 보고 악수",
+PART_STATUS = {"g1_face": "👋 손을 보고 손 흔들기 인사", "g1_hand": "🤝 손을 보고 악수",   # 손 응시는 g1_face(=wave)로 보낸다
                "g1_torso": "🙆 몸을 보고 양팔 벌리기"}
 
 
@@ -170,13 +170,19 @@ def _auto_send(cmd):
     print(f"[auto] act seq {seq}: {cmd['part']} @ {cmd['bearing_deg']}°", flush=True)
 
 
-def _auto_dialog(kind, bearing):
-    """오케스트레이터 start_dialog 콜백. 물체 kind + 물체 방위. dialog_attend 방위 세팅 후 대화 시작."""
+def _auto_dialog(kind, bearing, after_act=False):
+    """오케스트레이터 start_dialog 콜백. kind + 방위. 물체면 같이 보기 방위 세팅 후, 얼굴(greet)이면 바로 인사로,
+    손(after_act)이면 손 흔들기가 끝난 뒤 인사로 대화 시작."""
     if not AUTO["on"]:
         return
-    DLG["bear"] = (int(bearing), LAST["user_bearing"])     # 같이 보기: (물체, 착용자) 방위
-    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=not TALK["on"], kind=kind)   # 대화 모드면 같이 보기 동작 없이
-    AUTO["status"] = f"💬 {g1_dialog.SCENARIOS.get(kind, {}).get('name', kind)} 이야기 나누는 중"
+    greet = kind == "greet"
+    if not greet:
+        DLG["bear"] = (int(bearing), LAST["user_bearing"])     # 같이 보기: (물체, 착용자) 방위
+    talk = TALK["on"]                                          # 대화 모드: 같이 보기·손 흔들기 없이 → 기다릴 동작도 없다
+    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=not greet and not talk, kind=kind, after_act=after_act and not talk)
+    AUTO["status"] = ("👋 손 흔들어 인사하고 안부 나누는 중" if after_act and not talk else
+                      "👋 안녕하세요~ 안부 나누는 중" if greet else
+                      f"💬 {g1_dialog.SCENARIOS.get(kind, {}).get('name', kind)} 이야기 나누는 중")
     print(f"[auto] dialog {kind} @ {bearing}°: {msg}", flush=True)
 
 
@@ -286,7 +292,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <div id="spk" style="margin-top:8px;color:#888">🔇 조용</div>
 <h3 style="margin:18px 0 4px">대화 <small style="color:#888">(물건 → 고정 질문 → 대답 ↔ 공감·질문 … 고마워 → 마무리)</small></h3>
 <div class="row"><select id="dkind" style="flex:1;font-size:16px;padding:10px;background:#222;color:#eee;border-radius:8px">
-<option value="plant">🪴 화분</option><option value="bottle">🥤 물병·텀블러</option><option value="photo">🖼 가족사진</option><option value="phone">📱 휴대폰</option></select>
+<option value="plant">🪴 화분</option><option value="greet">👋 안부 (얼굴 보면 안녕하세요~)</option></select>
 <select id="dmode" style="flex:1;font-size:16px;padding:10px;background:#222;color:#eee;border-radius:8px">
 <option value="mic">🎤 마이크로 듣기</option><option value="keyboard">⌨ 대답을 여기 입력</option></select></div>
 <label style="display:block;margin:6px 0"><input type="checkbox" id="dattend"> 첫 질문을 <b>같이 보기</b>(위 물체·착용자 방위)의 마지막 동작에 맞춰 말하기 <small style="color:#888">(정책 켜졌을 때만 · 양팔 벌리기 학습 전에는 마지막 동작이 박수)</small></label>
