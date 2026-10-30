@@ -178,3 +178,12 @@ def test_pick_part_margin_absorbs_gaze_error():
     assert pick_part([FACE], (150 - 15, 60), margin=0) is None
     assert pick_part([FACE], (150 - 28, 60)) == "g1_face"           # 30px 까지
     assert pick_part([FACE], (150 - 40, 60)) is None
+
+
+def test_hold_value_keeps_last_bearing_briefly():
+    from g1_gaze_bridge import hold_value
+    st = {}
+    assert hold_value(st, -16.0, 0.0, 2.0) == -16.0
+    assert hold_value(st, None, 1.5, 2.0) == -16.0     # 태그 잠깐 놓쳐도 직전 방위
+    assert hold_value(st, None, 2.5, 2.0) is None      # 오래되면 버린다(0° 로 속이지 않게)
+    assert hold_value(st, 30.0, 3.0, 2.0) == 30.0

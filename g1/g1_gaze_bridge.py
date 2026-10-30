@@ -83,6 +83,14 @@ def hold_dets(held: dict, dets: list, now: float, ttl: float = 0.5) -> list:
     return [d for t, ds in held.values() if now - t <= ttl for d in ds]
 
 
+def hold_value(st: dict, v, now: float, ttl: float):
+    """v 가 None 이면 ttl 초 안의 마지막 값. 태그를 잠깐 놓친 순간 확정되면 방위가 0° 로 가 돌지 않던 문제(2026-10-30)."""
+    if v is not None:
+        st["t"], st["v"] = now, v
+        return v
+    return st["v"] if st and now - st["t"] <= ttl else None
+
+
 def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
     """확인 창(--show)용 그림: 부위·물체 박스, 시선 점, 위쪽에 판정·태그 방위. 원본은 건드리지 않고 복사본에 그린다.
     cv2 기본 글꼴은 한글을 못 그려서 화면 글자는 영어."""
@@ -194,7 +202,7 @@ def main():
 
     n = n_label = n_bear = 0
     next_report = time.time() + 2.0
-    held_parts, shown_uv = {}, (0.0, None)
+    held_parts, held_bearing, shown_uv = {}, {}, (0.0, None)
     try:
         while src.ok():
             frame, uv, _ = src.frame()
@@ -202,9 +210,10 @@ def main():
                 time.sleep(0.005)
                 continue
             T = tags.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-            part_dets = yolo(frame)
-            label = pick_part(part_dets, uv)
-            bearing = None if T is None else bearing_deg(T)
+            now = time.time()
+            part_dets = hold_dets(held_parts, yolo(frame), now)        # YOLO 가 손·머리를 한두 프레임 놓쳐도 0.5초 유지
+            label = pick_part(part_dets, uv)                           # → 판정 비율이 깜빡임에 깎이지 않는다
+            bearing = hold_value(held_bearing, None if T is None else bearing_deg(T), now, 2.0)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
             obj_kind, obj_dets = None, []
             if obj_det is not None and uv is not None:                 # 시선이 있을 때만 물체 추론(부하 절반)
@@ -213,12 +222,11 @@ def main():
                     obj_dets = obj_det.feed(jpg.tobytes())
                     picked = pick_object(obj_dets, uv)
                     obj_kind = picked[0] if picked else None
-            if args.show:                                              # 표시만 0.5초 유지(판정은 그대로)
-                now = time.time()
+            if args.show:
                 if uv is not None:
                     shown_uv = (now, uv)
                 disp_uv = shown_uv[1] if now - shown_uv[0] <= 0.3 else None
-                cv2.imshow("gaze + YOLO", draw_overlay(frame, hold_dets(held_parts, part_dets, now), [],   # 손·머리만
+                cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, [],   # 손·머리만
                                                        disp_uv, label, obj_kind, bearing))
                 cv2.waitKey(1)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
