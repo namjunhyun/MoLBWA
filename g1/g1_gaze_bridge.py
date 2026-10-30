@@ -64,6 +64,38 @@ def object_bearing_deg(T_hc_torso: np.ndarray, uv: tuple[float, float], K: np.nd
     return 180.0 if deg == -180.0 else deg
 
 
+PART_COLOR = {"g1_hand": (0, 220, 0), "g1_face": (0, 200, 255), "g1_torso": (170, 170, 170)}   # BGR
+OBJ_COLOR = (0, 140, 255)
+GAZE_COLOR = (255, 0, 255)
+PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO"}
+
+
+def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
+    """확인 창(--show)용 그림: 부위·물체 박스, 시선 점, 위쪽에 판정·태그 방위. 원본은 건드리지 않고 복사본에 그린다.
+    cv2 기본 글꼴은 한글을 못 그려서 화면 글자는 영어."""
+    import cv2
+    img = frame.copy()
+    for cls, conf, x1, y1, x2, y2 in part_dets:
+        c = PART_COLOR.get(cls, (255, 255, 255))
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), c, 2)
+        cv2.putText(img, f"{PART_NAME.get(cls, cls)} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
+    for cls, conf, x1, y1, x2, y2 in obj_dets:
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), OBJ_COLOR, 2)
+        cv2.putText(img, f"{cls} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, OBJ_COLOR, 1)
+    if uv is not None:
+        p = (int(uv[0]), int(uv[1]))
+        cv2.circle(img, p, 10, GAZE_COLOR, 2)
+        cv2.circle(img, p, 3, GAZE_COLOR, -1)
+    cv2.rectangle(img, (0, 0), (img.shape[1], 40), (30, 30, 30), -1)
+    look = PART_NAME.get(label) or (f"OBJ {obj_kind}" if obj_kind else "-")
+    tag = "TAG none" if bearing is None else f"TAG {bearing:+.0f}deg"
+    cv2.putText(img, f"LOOK: {look}   {tag}   {'GAZE' if uv is not None else 'no gaze'}", (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    return img
+
+
 class _Yolo:
     """gaze_hri/yolo_worker.py 를 자식 프로세스로 돌린다(동기: 프레임마다 보내고 결과를 기다림).
     프레임과 검출이 같은 순간이어야 시선 픽셀과 박스를 비교할 수 있다."""
@@ -109,6 +141,8 @@ def main():
     ap.add_argument("--obj-model", default="",
                     help="물체 YOLO 모델(미지정 시 config obj_yolo.model 또는 ~/yolo-env/yolo11l.pt)")
     ap.add_argument("--no-obj", action="store_true", help="물체 검출 끄기(부위만) — yolo11l.pt 가 아직 없을 때")
+    ap.add_argument("--show", action="store_true",
+                    help="확인 창: 부위·물체 박스 + 시선 점 + 판정. 물체 YOLO를 시선 없을 때도 돌려 fps 가 떨어진다")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -149,15 +183,20 @@ def main():
                 time.sleep(0.005)
                 continue
             T = tags.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-            label = pick_part(yolo(frame), uv)
+            part_dets = yolo(frame)
+            label = pick_part(part_dets, uv)
             bearing = None if T is None else bearing_deg(T)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
-            obj_kind = None
-            if obj_det is not None and uv is not None:                 # 시선이 있을 때만 물체 추론(부하 절반)
+            obj_kind, obj_dets = None, []
+            if obj_det is not None and (uv is not None or args.show):   # 평소엔 시선 있을 때만 추론(부하 절반)
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if ok:
-                    picked = pick_object(obj_det.feed(jpg.tobytes()), uv)
+                    obj_dets = obj_det.feed(jpg.tobytes())
+                    picked = pick_object(obj_dets, uv)
                     obj_kind = picked[0] if picked else None
+            if args.show:
+                cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing))
+                cv2.waitKey(1)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
             sock.sendto(encode({"t": time.time(), "label": label, "bearing_deg": bearing,
                                 "obj_bearing_deg": obj_b, "obj_kind": obj_kind, "valid": uv is not None}), dst)

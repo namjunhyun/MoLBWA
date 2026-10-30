@@ -139,3 +139,23 @@ def test_object_bearing_center_and_offsets():
     # 착용자가 지원이 왼쪽(+y 2 m)에 서서 정면(+x)을 보고 3 m 앞 점 → torso 기준 (3, 2) → atan2(2,3)
     T2 = _cam_at(0.0, 2.0, 0.0)
     assert abs(object_bearing_deg(T2, (320, 240), K, 3.0) - np.degrees(np.arctan2(2, 3))) < 1e-6
+
+
+def test_draw_overlay_marks_boxes_and_gaze_without_touching_input():
+    cv2 = pytest.importorskip("cv2")
+    from g1_gaze_bridge import draw_overlay
+    frame = np.zeros((480, 640, 3), np.uint8)
+    obj = ["bottle", 0.81, 400, 200, 440, 320]
+    out = draw_overlay(frame, [TORSO, HAND], [obj], (270, 320), "g1_hand", "bottle", 12.0)
+    assert out.shape == frame.shape and frame.sum() == 0          # 원본은 그대로(복사본에 그림)
+    assert out[300, 250].any() and out[100, 100].any()             # 손·몸통 박스 테두리
+    assert out[200, 400].any()                                     # 물체 박스 테두리
+    assert out[320, 270].any()                                     # 시선 점
+    assert out[:40].any()                                          # 위쪽 판정 문구
+
+
+def test_draw_overlay_no_gaze_no_dets():
+    pytest.importorskip("cv2")
+    from g1_gaze_bridge import draw_overlay
+    out = draw_overlay(np.zeros((480, 640, 3), np.uint8), [], [], None, None, None, None)
+    assert out.shape == (480, 640, 3)
