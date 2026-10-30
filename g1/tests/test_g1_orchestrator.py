@@ -101,3 +101,16 @@ def test_seq_monotonic():
         orc.feed_part(t, "g1_hand", 0)
     s = [m["seq"] for m in _acts(sent)]
     assert len(s) == 2 and s[0] < s[1]
+
+
+def test_reset_allows_same_part_again():
+    orc, sent = _make()
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_part(t, "g1_hand", 10)
+    for t in _ticks(1.3, 2.6, 0.1):            # 계속 봐도 같은 부위는 떠나기 전 재확정 금지(래치)
+        orc.feed_part(t, "g1_hand", 10)
+    assert len(_acts(sent)) == 1
+    orc.reset()                                 # 초기화 → 래치·누적이 비워져 다시 3초(여기선 1초) 응시하면 또 나간다
+    for t in _ticks(2.7, 4.0, 0.1):
+        orc.feed_part(t, "g1_hand", 10)
+    assert len(_acts(sent)) == 2

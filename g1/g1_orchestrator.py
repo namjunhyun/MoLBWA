@@ -19,9 +19,14 @@ GREET_PARTS = {"g1_face", "g1_hand"}   # 동작 뒤 안부 대화로 이어지�
 class Orchestrator:
     def __init__(self, send_cmd, start_dialog, is_busy, dwell_time=3.0):
         self._send, self._dialog, self._busy = send_cmd, start_dialog, is_busy
-        self._part = LabelDwell(dwell_time=dwell_time)
-        self._obj = LabelDwell(dwell_time=dwell_time)
+        self._dwell_time = dwell_time
         self._seq = int(time.time() * 1000)   # ms 기반 — 노드 재시작 후에도 단조 증가(젯슨이 조용히 거부 안 하게)
+        self.reset()
+
+    def reset(self):
+        """응시 누적·래치(같은 부위 재확정 금지)·부위 우선 창을 비운다 — 패널 '초기화'. seq 는 유지(단조 증가)."""
+        self._part = LabelDwell(dwell_time=self._dwell_time)
+        self._obj = LabelDwell(dwell_time=self._dwell_time)
         self._part_fire_t = -1e9
 
     def feed_part(self, t, label, bearing_deg):

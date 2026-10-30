@@ -138,3 +138,15 @@ def test_bridge_no_tag_blocks_object_trigger(monkeypatch):
     g1_panel._bridge_feed({"t": 1.0, "obj_kind": "cup", "bearing_deg": 10})              # 태그 없음
     g1_panel._bridge_feed({"t": 2.0, "obj_kind": "cup", "obj_bearing_deg": 30.4})        # 정상
     assert calls == [(None, 0), ("cup", 30)]
+
+
+def test_reset_route_stops_dialog_and_resets_orchestrator(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
+    monkeypatch.setattr(g1_panel.dialog, "stop", lambda: calls.append("dlg") or "대화 중지 요청")
+    g1_panel.AUTO["on"] = True
+    code, body = _call("POST", "/reset")
+    assert code == 200 and "초기화" in json.loads(body)["msg"]
+    assert calls == ["dlg", "orc"]
+    assert g1_panel.AUTO["on"] is True            # 자동 교감 상태는 그대로 — 로봇에 명령도 안 보낸다
+    g1_panel.AUTO["on"] = False

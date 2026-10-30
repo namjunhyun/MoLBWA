@@ -261,6 +261,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <h1>지원이 조작 패널 <small style="color:#888">(시선 안경 대신)</small></h1>
 <div class="row"><button class="estop" onclick="c('damp')">⛔ 비상정지</button></div>
 <div class="row ctl"><button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button></div>
+<div class="row ctl"><button onclick="fetch('/reset',{method:'POST'}).then(r=>r.json()).then(j=>document.getElementById('msg').textContent=j.msg)">🔄 초기화 — 대화 끊고 응시 누적 비움 (로봇 동작 없음)</button></div>
 <div class="row ctl"><button onclick="c('stop','정책 중이면: 기본자세로 최대 5분 서 있다가 5초 카운트다운 후 힘이 빠집니다(받쳐야 함). 고수준이면 제자리 정지. 계속할까요?')">■ 정지(기본자세)</button>
 <button onclick="c('release','디벨롭 모드로 내리면 로봇이 스스로 못 섭니다. 하네스가 받치고 있나요?')">디벨롭 모드</button>
 <button onclick="c('highlevel','고수준(기본 보행) 모드로 올립니다. 계속할까요?')">고수준 모드</button></div>
@@ -355,7 +356,7 @@ h1{font-size:22px;margin:0 0 16px}
 #auto{width:100%;padding:28px;font-size:26px;font-weight:800;border:0;border-radius:16px;cursor:pointer;background:#334155;color:#fff}
 #auto.on{background:#7c3aed}#dot{display:inline-block;width:16px;height:16px;border-radius:50%;background:#64748b;margin-right:10px;vertical-align:middle}
 #dot.on{background:#22c55e;box-shadow:0 0 14px #22c55e}
-#talk{width:100%;margin-top:10px;padding:16px;font-size:19px;font-weight:700;border:0;border-radius:14px;cursor:pointer;background:#1f2937;color:#cbd5e1}
+#talk,#reset{width:100%;margin-top:10px;padding:16px;font-size:19px;font-weight:700;border:0;border-radius:14px;cursor:pointer;background:#1f2937;color:#cbd5e1}
 #talk.on{background:#0d9488;color:#fff}
 #status{font-size:34px;font-weight:800;text-align:center;padding:30px 16px;margin:18px 0;border-radius:16px;background:#111827;min-height:44px;line-height:1.35}
 #bubbles{margin:18px 0;min-height:80px;display:flex;flex-direction:column}
@@ -367,6 +368,7 @@ h1{font-size:22px;margin:0 0 16px}
 <h1>지원이 — 시선 교감 데모 <small style="color:#888">(세부 조작은 <a href="/origin" style="color:#60a5fa">/origin</a>)</small></h1>
 <button id="auto" onclick="toggle()"><span id="dot"></span><span id="al">자동 교감 시작</span></button>
 <button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button>
+<button id="reset" onclick="fetch('/reset',{method:'POST'})">🔄 초기화 — 대화 끊고 처음부터 (로봇 동작 없음)</button>
 <div id="status">대기</div>
 <div id="alert"></div>
 <div id="bubbles"></div>
@@ -436,6 +438,13 @@ class H(BaseHTTPRequestHandler):
             AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요" if on else "자동 교감 꺼짐"
             print(f"[auto] {'ON' if on else 'OFF'}", flush=True)
             self._send(json.dumps({"auto_on": AUTO["on"], "msg": AUTO["status"]}))
+            return
+        if self.path == "/reset":           # 초기화: 대화 중지 + 응시 누적·재확정 금지 비움. 로봇엔 아무 명령도 안 보낸다
+            dialog.stop()
+            orc.reset()
+            AUTO["status"] = "🔄 초기화 — 시선을 기다려요" if AUTO["on"] else "🔄 초기화됨 — 대기"
+            print("[auto] 초기화", flush=True)
+            self._send(json.dumps({"msg": AUTO["status"]}))
             return
         if self.path == "/talk":
             try:
