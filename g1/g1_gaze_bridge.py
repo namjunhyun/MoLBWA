@@ -160,7 +160,7 @@ def main():
                     help="물체 YOLO 모델(미지정 시 config obj_yolo.model 또는 ~/yolo-env/yolo11l.pt)")
     ap.add_argument("--no-obj", action="store_true", help="물체 검출 끄기(부위만) — yolo11l.pt 가 아직 없을 때")
     ap.add_argument("--show", action="store_true",
-                    help="확인 창: 부위·물체 박스 + 시선 점 + 판정. 물체 YOLO를 시선 없을 때도 돌려 fps 가 떨어진다")
+                    help="확인 창: 손·머리 박스(굵은 선 = 판정 영역) + 시선 점 + 판정. 몸통·물체 박스는 안 그린다")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -194,7 +194,7 @@ def main():
 
     n = n_label = n_bear = 0
     next_report = time.time() + 2.0
-    held_parts, held_objs, shown_uv = {}, {}, (0.0, None)
+    held_parts, shown_uv = {}, (0.0, None)
     try:
         while src.ok():
             frame, uv, _ = src.frame()
@@ -207,7 +207,7 @@ def main():
             bearing = None if T is None else bearing_deg(T)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
             obj_kind, obj_dets = None, []
-            if obj_det is not None and (uv is not None or args.show):   # 평소엔 시선 있을 때만 추론(부하 절반)
+            if obj_det is not None and uv is not None:                 # 시선이 있을 때만 물체 추론(부하 절반)
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if ok:
                     obj_dets = obj_det.feed(jpg.tobytes())
@@ -218,8 +218,7 @@ def main():
                 if uv is not None:
                     shown_uv = (now, uv)
                 disp_uv = shown_uv[1] if now - shown_uv[0] <= 0.3 else None
-                cv2.imshow("gaze + YOLO", draw_overlay(frame, hold_dets(held_parts, part_dets, now),
-                                                       hold_dets(held_objs, obj_dets, now),
+                cv2.imshow("gaze + YOLO", draw_overlay(frame, hold_dets(held_parts, part_dets, now), [],   # 손·머리만
                                                        disp_uv, label, obj_kind, bearing))
                 cv2.waitKey(1)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다
