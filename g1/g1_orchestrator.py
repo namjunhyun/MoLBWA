@@ -1,7 +1,7 @@
 """시선 부위/물체 분기 오케스트레이터 (순수 상태기계, 소켓·ROS 비의존).
 
-손 dwell 확정 -> 착용자 쪽으로 돌아 손 흔들기(act) 후 안부 대화(greet), 물체 dwell 확정 -> 물체 대화. 부위가 우선.
-얼굴 응시는 아무것도 하지 않는다(2026-10-30 — 시연은 화분·손 두 시나리오만).
+머리(얼굴) dwell 확정 -> 착용자 쪽으로 돌아 손 흔들기 인사(act), 손 dwell 확정 -> 악수(act). 둘 다 동작이 끝나면 안부 대화(greet).
+물체 dwell 확정 -> 물체 대화. 부위가 우선.
 """
 import os
 import sys
@@ -12,10 +12,8 @@ sys.path.insert(0, os.path.join(_ROOT, "ros2_ws", "src", "gaze_hri", "gaze_hri")
 from g1_dwell import LabelDwell  # noqa: E402
 
 PART_PRIORITY_WINDOW = 1.0  # 부위 확정 후 이 시간(초) 안의 물체 확정은 버린다
-GREET_KIND = "greet"        # 손 인사 뒤 이 대화 시나리오(g1_dialog.SCENARIOS)
-IGNORED_PARTS = {"g1_face"}   # 응시해도 반응하지 않는 부위 — 안 본 것과 같게(dwell 리셋)
-# 손 응시 → 손 흔들기. 젯슨 PART_TO_SEGMENT 에서 wave 로 가는 부위가 g1_face 라 그 이름으로 보낸다(젯슨 재배포 없이)
-ACT_PART = {"g1_hand": "g1_face"}
+GREET_KIND = "greet"        # 인사·악수 뒤 이 대화 시나리오(g1_dialog.SCENARIOS)
+GREET_PARTS = {"g1_face", "g1_hand"}   # 동작 뒤 안부 대화로 이어지는 부위 (젯슨: g1_face=wave, g1_hand=handshake)
 
 
 class Orchestrator:
@@ -29,14 +27,14 @@ class Orchestrator:
     def feed_part(self, t, label, bearing_deg):
         if self._busy():
             return  # 바쁠 땐 투입 안 함 -> dwell 창이 max_gap 으로 비워진다
-        got = self._part.update(t, None if label in IGNORED_PARTS else label)
+        got = self._part.update(t, label)
         if got is None:
             return
         self._part_fire_t = t
         self._seq += 1  # 전송마다 단조 증가
-        self._send({"seq": self._seq, "cmd": "act", "part": ACT_PART.get(got, got), "bearing_deg": bearing_deg})
-        if got == "g1_hand":
-            self._dialog(GREET_KIND, bearing_deg, True)   # 손 흔들기가 끝나면 안부 (대화가 기다린다)
+        self._send({"seq": self._seq, "cmd": "act", "part": got, "bearing_deg": bearing_deg})
+        if got in GREET_PARTS:
+            self._dialog(GREET_KIND, bearing_deg, True)   # 인사·악수가 끝나면 안부 (대화가 기다린다)
 
     def feed_object(self, t, kind, bearing_deg):
         if self._busy():

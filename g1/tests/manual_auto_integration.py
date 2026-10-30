@@ -4,7 +4,7 @@
     /usr/bin/python3 g1/tests/manual_auto_integration.py
 
 가짜 젯슨(55070 수신)을 띄우고 g1_panel.listen_bridge 스레드를 돌린 뒤, 55057 로
-손 응시(g1_hand) dwell 을 흘려 손 흔들기 act 가 55070 에 오고 안부 대화가 불리는지, 얼굴 응시는 반응 없는지, 물체(plant) dwell 로
+손 응시(g1_hand) dwell 로 악수 act, 머리 응시(g1_face) dwell 로 손 흔들기 act 가 55070 에 오고 안부 대화가 불리는지, 물체(plant) dwell 로
 dialog.start(가짜로 교체)가 불리는지, auto OFF 면 명령이 끊기는지 본다."""
 import os
 import socket
@@ -58,22 +58,26 @@ def feed(label, obj_kind, sec):
         time.sleep(0.1)
 
 
-print("손(g1_hand) 응시 3.6초 → 손 흔들기…")
+print("손(g1_hand) 응시 3.6초 → 악수…")
 feed("g1_hand", None, 3.6)
 time.sleep(0.4)
 acts = [m for m in got if m.get("cmd") == "act"]
 assert acts, "55070 에 act 명령이 안 왔다"
 print("  → 55070 수신:", acts[-1])
-assert acts[-1]["part"] == "g1_face" and acts[-1]["bearing_deg"] == -30   # 젯슨에서 g1_face = 회전 + wave
-assert dlg_calls and dlg_calls[-1][1].get("kind") == "greet" and dlg_calls[-1][1].get("after_act"), "손 인사 뒤 안부가 안 불렸다"
+assert acts[-1]["part"] == "g1_hand" and acts[-1]["bearing_deg"] == -30   # 젯슨에서 g1_hand = 회전 + handshake
+assert dlg_calls and dlg_calls[-1][1].get("kind") == "greet" and dlg_calls[-1][1].get("after_act"), "악수 뒤 안부가 안 불렸다"
 print("  → dialog.start:", dlg_calls[-1])
 time.sleep(1.5)                                                          # 부위 우선 창 지나기
 
-print("얼굴(g1_face) 응시 3.6초 → 반응 없어야…")
-n_got, n_dlg = len(got), len(dlg_calls)
+print("머리(g1_face) 응시 3.6초 → 손 흔들기…")
+n_dlg = len(dlg_calls)
 feed("g1_face", None, 3.6)
 time.sleep(0.4)
-assert len(got) == n_got and len(dlg_calls) == n_dlg, "얼굴 응시에 반응했다"
+acts = [m for m in got if m.get("cmd") == "act"]
+assert acts[-1]["part"] == "g1_face", "머리 응시에 손 흔들기가 안 나갔다"
+assert len(dlg_calls) > n_dlg and dlg_calls[-1][1].get("kind") == "greet", "손 흔들기 뒤 안부가 안 불렸다"
+print("  → 55070 수신:", acts[-1])
+time.sleep(1.5)
 
 print("물체(plant) 응시 4초…")
 feed(None, "plant", 4.0)

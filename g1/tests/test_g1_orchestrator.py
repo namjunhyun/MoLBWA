@@ -22,20 +22,22 @@ def _acts(sent):
     return [m for m in sent if isinstance(m, dict) and m.get("cmd") == "act"]
 
 
-def test_face_dwell_does_nothing():
+def test_face_dwell_sends_wave_then_greet():
     orc, sent = _make()
-    for t in _ticks(0, 3.0, 0.1):
+    for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_face", -30)
-    assert sent == []                                          # 얼굴은 반응 없음 (시연은 화분·손만)
+    a = _acts(sent)
+    assert len(a) == 1 and a[0]["part"] == "g1_face" and a[0]["bearing_deg"] == -30   # 젯슨에서 g1_face = 회전 + wave
+    assert sent[-1] == ("dlg", "greet", -30, "after_act")                            # 손 흔들기 끝난 뒤 안부
 
 
-def test_hand_dwell_sends_wave_then_greet():
+def test_hand_dwell_sends_handshake_then_greet():
     orc, sent = _make()
     for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_hand", 10)
     a = _acts(sent)
-    assert len(a) == 1 and a[0]["part"] == "g1_face" and a[0]["bearing_deg"] == 10   # 젯슨에서 g1_face = 회전 + wave
-    assert sent[-1] == ("dlg", "greet", 10, "after_act")                            # 손 흔들기 끝난 뒤 안부
+    assert len(a) == 1 and a[0]["part"] == "g1_hand" and a[0]["bearing_deg"] == 10   # 젯슨에서 g1_hand = 회전 + handshake
+    assert sent[-1] == ("dlg", "greet", 10, "after_act")
 
 
 def test_object_dwell_starts_dialog():
@@ -61,12 +63,12 @@ def test_part_priority_over_object():
     assert len(_acts(sent)) == 1 and [m for m in sent if isinstance(m, tuple)] == [("dlg", "greet", -30, "after_act")]
 
 
-def test_face_does_not_block_object():
+def test_face_priority_over_object():
     orc, sent = _make()
     for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_face", -30)
         orc.feed_object(t, "plant", 45)
-    assert sent == [("dlg", "plant", 45)]
+    assert [m for m in sent if isinstance(m, tuple)] == [("dlg", "greet", -30, "after_act")]
 
 
 def test_label_switch_resets_dwell():
