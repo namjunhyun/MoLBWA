@@ -230,7 +230,7 @@ def test_greet_starts_with_hello_and_tells_scene():
     r = Robot()
     d = run(r, ["밥 먹었지", "고마워"], kind="greet", gen=chat)
     assert r.said[0] in SCENARIOS["greet"]["questions"] and r.said[-1] in CLOSINGS
-    assert "얼굴" in d.calls[0][1]["content"] and "인사" in d.calls[0][1]["content"]
+    assert "손" in d.calls[0][1]["content"] and "인사" in d.calls[0][1]["content"]
 
 
 def test_first_line_varies():

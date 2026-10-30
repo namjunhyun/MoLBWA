@@ -22,11 +22,11 @@ def _acts(sent):
     return [m for m in sent if isinstance(m, dict) and m.get("cmd") == "act"]
 
 
-def test_face_dwell_starts_greet_dialog():
+def test_face_dwell_does_nothing():
     orc, sent = _make()
-    for t in _ticks(0, 1.2, 0.1):
+    for t in _ticks(0, 3.0, 0.1):
         orc.feed_part(t, "g1_face", -30)
-    assert sent == [("dlg", "greet", -30)]                     # 얼굴 → 안녕하세요~ 안부 대화, 동작 명령 없음
+    assert sent == []                                          # 얼굴은 반응 없음 (시연은 화분·손만)
 
 
 def test_hand_dwell_sends_wave_then_greet():
@@ -48,7 +48,7 @@ def test_object_dwell_starts_dialog():
 def test_busy_blocks_all_triggers():
     orc, sent = _make(busy=True)
     for t in _ticks(0, 1.2, 0.1):
-        orc.feed_part(t, "g1_face", -30)
+        orc.feed_part(t, "g1_hand", -30)
         orc.feed_object(t, "plant", 45)
     assert sent == []
 
@@ -61,18 +61,18 @@ def test_part_priority_over_object():
     assert len(_acts(sent)) == 1 and [m for m in sent if isinstance(m, tuple)] == [("dlg", "greet", -30, "after_act")]
 
 
-def test_face_priority_over_object():
+def test_face_does_not_block_object():
     orc, sent = _make()
     for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_face", -30)
         orc.feed_object(t, "plant", 45)
-    assert sent == [("dlg", "greet", -30)]
+    assert sent == [("dlg", "plant", 45)]
 
 
 def test_label_switch_resets_dwell():
     orc, sent = _make()
     for t in _ticks(0, 0.6, 0.1):
-        orc.feed_part(t, "g1_face", 0)
+        orc.feed_part(t, "g1_torso", 0)
     for t in _ticks(0.7, 1.2, 0.1):
         orc.feed_part(t, "g1_hand", 0)
     assert _acts(sent) == []
@@ -81,11 +81,11 @@ def test_label_switch_resets_dwell():
 def test_invalid_frames_reset():
     orc, sent = _make()
     for t in _ticks(0, 0.4, 0.1):
-        orc.feed_part(t, "g1_face", 0)
+        orc.feed_part(t, "g1_hand", 0)
     for t in _ticks(0.5, 0.9, 0.1):
         orc.feed_part(t, None, None)
     for t in _ticks(1.0, 1.2, 0.1):
-        orc.feed_part(t, "g1_face", 0)
+        orc.feed_part(t, "g1_hand", 0)
     assert sent == []
 
 
