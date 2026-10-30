@@ -148,9 +148,9 @@ def test_draw_overlay_marks_boxes_and_gaze_without_touching_input():
     obj = ["bottle", 0.81, 400, 200, 440, 320]
     out = draw_overlay(frame, [TORSO, HAND], [obj], (270, 320), "g1_hand", "bottle", 12.0)
     assert out.shape == frame.shape and frame.sum() == 0          # 원본은 그대로(복사본에 그림)
-    assert out[300, 250].any() and out[100, 100].any()             # 손·몸통 박스 테두리
+    assert out[300, 250].any() and not out[100, 100].any()         # 손 박스는 그리고 몸통은 안 그림
     assert out[200, 400].any()                                     # 물체 박스 테두리
-    assert out[320, 270].any()                                     # 시선 점
+    assert out[320, 270].any() and out[320 - 28, 270].any()        # 시선 십자 + 원(반지름 28)
     assert out[:40].any()                                          # 위쪽 판정 문구
 
 

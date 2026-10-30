@@ -64,9 +64,9 @@ def object_bearing_deg(T_hc_torso: np.ndarray, uv: tuple[float, float], K: np.nd
     return 180.0 if deg == -180.0 else deg
 
 
-PART_COLOR = {"g1_hand": (0, 220, 0), "g1_face": (0, 200, 255), "g1_torso": (170, 170, 170)}   # BGR
+PART_COLOR = {"g1_hand": (255, 200, 0), "g1_face": (0, 255, 255)}   # BGR. 몸통은 안 그림(판정엔 계속 씀)
 OBJ_COLOR = (0, 140, 255)
-GAZE_COLOR = (255, 0, 255)
+GAZE_COLOR = (0, 255, 0)                  # gaze_on_scene 씬 창과 같은 초록 원+십자
 PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO"}
 
 
@@ -76,7 +76,9 @@ def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
     import cv2
     img = frame.copy()
     for cls, conf, x1, y1, x2, y2 in part_dets:
-        c = PART_COLOR.get(cls, (255, 255, 255))
+        c = PART_COLOR.get(cls)
+        if c is None:
+            continue
         cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), c, 2)
         cv2.putText(img, f"{PART_NAME.get(cls, cls)} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
@@ -86,8 +88,9 @@ def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, OBJ_COLOR, 1)
     if uv is not None:
         p = (int(uv[0]), int(uv[1]))
-        cv2.circle(img, p, 10, GAZE_COLOR, 2)
-        cv2.circle(img, p, 3, GAZE_COLOR, -1)
+        cv2.circle(img, p, 28, GAZE_COLOR, 3)
+        cv2.drawMarker(img, p, GAZE_COLOR, cv2.MARKER_CROSS, 22, 2)
+        cv2.putText(img, f"gaze ({p[0]},{p[1]})", (p[0] + 34, p[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, GAZE_COLOR, 2)
     cv2.rectangle(img, (0, 0), (img.shape[1], 40), (30, 30, 30), -1)
     look = PART_NAME.get(label) or (f"OBJ {obj_kind}" if obj_kind else "-")
     tag = "TAG none" if bearing is None else f"TAG {bearing:+.0f}deg"
