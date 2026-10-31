@@ -84,6 +84,13 @@ def hold_dets(held: dict, dets: list, now: float, ttl: float = 0.5) -> list:
     return [d for t, ds in held.values() if now - t <= ttl for d in ds]
 
 
+def scaled_K(K: np.ndarray, s: float) -> np.ndarray:
+    """영상을 s 배 키웠을 때의 내부행렬 (fx·fy·cx·cy 만 s 배)."""
+    K2 = np.array(K, float)
+    K2[:2] *= s
+    return K2
+
+
 def hold_value(st: dict, v, now: float, ttl: float):
     """v 가 None 이면 ttl 초 안의 마지막 값. 태그를 잠깐 놓친 순간 확정되면 방위가 0° 로 가 돌지 않던 문제(2026-10-30)."""
     if v is not None:
@@ -187,6 +194,8 @@ def main():
     cfg = yaml.safe_load(open(args.config))
     K = load_intrinsics()
     tags = TagBundleDetector(cfg, K)
+    # 55mm 태그가 2~3m 에선 한 변 13~14px — 원본에서 못 찾으면 2배로 키워 한 번 더 (2026-10-31 실측 21%→61%, 방위 차 ≤0.9°)
+    tags2 = TagBundleDetector(cfg, scaled_K(K, 2))
     obj_dist = float(cfg.get("attend", {}).get("object_dist_m", 1.5))   # 스테레오 깊이 연결 전 가정 거리
     yolo = _Yolo(cfg["yolo"])                                           # 부위 YOLO(g1_parts.pt)
     obj_det = None                                                      # 물체 YOLO(config obj_yolo, 지금 YOLO-World) — 별도 subprocess
@@ -213,7 +222,10 @@ def main():
             if frame is None:
                 time.sleep(0.005)
                 continue
-            T = tags.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            T = tags.detect(gray)
+            if T is None:
+                T = tags2.detect(cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR))
             now = time.time()
             part_dets = hold_dets(held_parts, yolo(frame), now)        # YOLO 가 손·머리를 한두 프레임 놓쳐도 0.5초 유지
             label = pick_part(part_dets, uv)                           # → 판정 비율이 깜빡임에 깎이지 않는다

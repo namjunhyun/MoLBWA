@@ -212,3 +212,11 @@ def test_obj_margin_same_in_judgement_and_display():
     import g1_gaze_bridge
     import obj_gaze_detector
     assert g1_gaze_bridge.OBJ_MARGIN_PX == obj_gaze_detector.OBJ_MARGIN_PX   # 그린 굵은 선 = 실제 판정 영역
+
+
+def test_scaled_K_for_upscaled_tag_detection():
+    # 2026-10-31: 태그가 13~14px 이면 2배 확대 재검출 21%→61~69%. 확대 영상엔 fx·fy·cx·cy 도 2배인 K 를 쓴다
+    from g1_gaze_bridge import scaled_K
+    K = np.array([[461.24, 0, 320], [0, 461.24, 240], [0, 0, 1.0]])
+    K2 = scaled_K(K, 2)
+    assert np.allclose(K2, [[922.48, 0, 640], [0, 922.48, 480], [0, 0, 1]]) and K[0, 0] == 461.24
