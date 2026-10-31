@@ -227,11 +227,18 @@ def listen_bridge():
     """브리지(55057) 수신 → 오케스트레이터 투입. 예외가 나도 스레드는 죽지 않는다."""
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("0.0.0.0", PORT_BRIDGE))
+    seen, next_t = {}, time.time() + 2.0      # 2초마다 받은 판정·바쁨 요약 (자동 교감이 왜 안 나가는지 볼 때)
     while True:
         try:
             m = decode(rx.recvfrom(4096)[0])
             if m:
                 _bridge_feed(m)
+                k = m.get("label") or (m.get("obj_kind") and f"obj:{m['obj_kind']}") or "-"
+                seen[k] = seen.get(k, 0) + 1
+            if time.time() >= next_t and AUTO["on"]:
+                print(f"[bridge] 2초 수신 {seen} · 바쁨 {is_busy()} (로봇 {state.get('state')}, 말 {bool(state.get('speaking'))}, "
+                      f"대화 {dialog.running})", flush=True)
+                seen, next_t = {}, time.time() + 2.0
         except Exception as e:   # 자동 콜백·디코드 예외로 데몬 스레드가 조용히 죽는 것 방지
             print(f"[bridge] 예외 무시하고 계속: {e!r}", flush=True)
 
