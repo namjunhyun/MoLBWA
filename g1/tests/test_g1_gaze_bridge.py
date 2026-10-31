@@ -90,7 +90,7 @@ def test_config_loads_four_tag_bundle():
         assert n @ np.r_[pos[:2], 0.0] > 0, t["id"]
         c = obj[t["id"]].mean(axis=0)
         assert np.allclose(c, pos)
-    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand", "g1_torso"}
+    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand"}   # 몸통은 판정 안 함(새 모델엔 클래스도 없음)
 
 
 @pytest.mark.parametrize("tag_id,bear", [(10, 10.0), (11, 80.0), (12, -100.0), (13, 170.0), (13, -170.0)])
