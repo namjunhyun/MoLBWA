@@ -143,7 +143,15 @@ def dialog_attend(text):
     return True
 
 
-dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic, synth=g1_tts.synth)
+def _dialog_ended():
+    """대화가 끝나면(마무리 인사·중지) 초기화 버튼과 같이 — 응시 누적·재확정 잠금을 비우고 다음 시선을 기다린다 (2026-10-31)."""
+    orc.reset()
+    AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요" if AUTO["on"] else "대기"
+    print("[auto] 대화 끝 → 초기화", flush=True)
+
+
+dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic, synth=g1_tts.synth,
+                          on_end=_dialog_ended)
 
 
 # ── 자동 교감(시선 → 명령) ───────────────────────────────────────────────

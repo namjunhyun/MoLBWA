@@ -356,3 +356,15 @@ def test_first_questions_do_not_describe_what_robot_cannot_see():
             assert "화분" in q or "안녕하세요" in q
             assert good_question(q) and not any(w in q for w in ("표정", "싱그럽", "드시는 거 보니", "가까이 있네요"))
         assert not any(f.startswith("그분") for f in sc["follow"])
+
+
+def test_on_end_called_when_dialog_finishes():
+    # 2026-10-31: "대화해줘서 고마워"로 끝나면 패널이 초기화(응시 대기)로 — on_end 로 알린다
+    ended = []
+    r = Robot()
+    d = Dialog(r.say, on_end=lambda: ended.append(True))
+    q = ["물 주는 게 낙이지", "이야기 들어줘서 고마워"]
+    d._listen = lambda mode: q.pop(0) if q else ""
+    d.gen = lambda model, msgs, fallback, max_sent=2: fallback
+    d._run("mic", False, "plant")
+    assert ended == [True] and not d.running

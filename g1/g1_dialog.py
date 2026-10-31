@@ -166,12 +166,13 @@ def split_sents(s: str) -> list:
 
 class Dialog:
     def __init__(self, say, attend=None, busy=None, mic_dev="default", min_rms=300, answer_sec=20.0, synth=None,
-                 ask=None, rec_dir=None):
+                 ask=None, rec_dir=None, on_end=None):
         """say(text)->재생 길이(초), attend(text)->bool(같이 보기 마지막 동작에 첫 질문을 붙여 보냄), busy()->로봇이 동작·말하는 중.
         synth(text) 를 주면 고정·대비 문장을 미리 합성해 둔다(warm) — 시연 중 TTS 가 죽어도 이 문장들은 캐시에서 나온다.
         ask() 는 지원이가 질문을 말할 때마다 불린다(양팔 벌리기 open_arms — 라이브러리에 생기면 패널이 연결)."""
         self.say_fn, self.attend_fn, self.busy = say, attend, busy or (lambda: False)
         self.synth_fn, self.ask_fn = synth, ask
+        self.on_end = on_end             # 대화가 끝나면(마무리·중지·오류) 부른다 — 패널이 응시 대기로 초기화
         self.rng = random.Random()
         self.alert = ""                  # 위험 신호 — 패널이 빨갛게 띄운다 (진행자 확인용)
         self.mic_dev, self.min_rms, self.answer_sec = mic_dev, min_rms, answer_sec
@@ -310,6 +311,8 @@ class Dialog:
         finally:
             self._log("(대화 끝)" if not self._stop else "(대화 중지됨)")
             self.running = False
+            if self.on_end is not None:
+                self.on_end()
 
     def reply(self, sc, hist, last, follow_i=0):
         """대화 전체를 보고 공감(+ 이어지는 질문). last 면 공감만. 실패하면 공감 대비 + 대비 질문."""

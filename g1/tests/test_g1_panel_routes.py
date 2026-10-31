@@ -150,3 +150,12 @@ def test_reset_route_stops_dialog_and_resets_orchestrator(monkeypatch):
     assert calls == ["dlg", "orc"]
     assert g1_panel.AUTO["on"] is True            # 자동 교감 상태는 그대로 — 로봇에 명령도 안 보낸다
     g1_panel.AUTO["on"] = False
+
+
+def test_dialog_end_resets_orchestrator(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
+    g1_panel.AUTO["on"] = True
+    g1_panel._dialog_ended()
+    assert calls == ["orc"] and "시선" in g1_panel.AUTO["status"]
+    g1_panel.AUTO["on"] = False
