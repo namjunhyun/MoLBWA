@@ -17,8 +17,12 @@ GREET_PARTS = {"g1_face"}   # 동작 뒤 안부 대화로 이어지는 부위 �
 
 
 class Orchestrator:
-    def __init__(self, send_cmd, start_dialog, is_busy, dwell_time=3.0):
+    def __init__(self, send_cmd, start_dialog, is_busy, dwell_time=3.0, can_preempt=None, preempt=None):
+        """can_preempt() -> 지금 대화를 끊어도 되나(대화 중 + 로봇이 말·동작 안 함), preempt() -> 대화를 끝내고 성공 여부.
+        둘 다 주면 대화 중에도 '다른' 물체를 dwell 하면 그 시나리오로 넘어간다 (2026-10-31: 인사 뒤 꽃)."""
         self._send, self._dialog, self._busy = send_cmd, start_dialog, is_busy
+        self._can_preempt, self._preempt = can_preempt, preempt
+        self._active_kind = None              # 지금(마지막으로) 시작한 대화 kind — 같은 대화로는 끼어들지 않는다
         self._dwell_time = dwell_time
         self._seq = int(time.time() * 1000)   # ms 기반 — 노드 재시작 후에도 단조 증가(젯슨이 조용히 거부 안 하게)
         self.reset()
@@ -28,6 +32,7 @@ class Orchestrator:
         self._part = LabelDwell(dwell_time=self._dwell_time)
         self._obj = LabelDwell(dwell_time=self._dwell_time)
         self._part_fire_t = -1e9
+        self._active_kind = None
 
     def feed_part(self, t, label, bearing_deg):
         if self._busy():
@@ -39,12 +44,22 @@ class Orchestrator:
         self._seq += 1  # 전송마다 단조 증가
         self._send({"seq": self._seq, "cmd": "act", "part": got, "bearing_deg": bearing_deg})
         if got in GREET_PARTS:
+            self._active_kind = GREET_KIND
             self._dialog(GREET_KIND, bearing_deg, True)   # 인사·악수가 끝나면 안부 (대화가 기다린다)
 
     def feed_object(self, t, kind, bearing_deg):
         if self._busy():
+            # 대화 중이라도 듣는 차례(로봇이 말·동작 안 함)면, 지금 대화와 다른 물체 dwell 은 받는다 → 확정되면 끼어들기
+            if not (self._can_preempt and self._preempt and self._can_preempt()):
+                return
+            got = self._obj.update(t, None if kind == self._active_kind else kind)
+            if got is None or not self._preempt():
+                return
+            self._active_kind = got
+            self._dialog(got, bearing_deg, False)
             return
         got = self._obj.update(t, kind)
         if got is None or t - self._part_fire_t < PART_PRIORITY_WINDOW:
             return  # 부위 우선
+        self._active_kind = got
         self._dialog(got, bearing_deg, False)

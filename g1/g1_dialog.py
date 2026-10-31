@@ -310,9 +310,11 @@ class Dialog:
             self._log(f"(오류 {type(e).__name__}: {e})")
         finally:
             self._log("(대화 끝)" if not self._stop else "(대화 중지됨)")
-            self.running = False
-            if self.on_end is not None:
-                self.on_end()
+            try:
+                if self.on_end is not None:   # running 을 내리기 전에 — 끼어들기가 running=False 를 '정리 끝'으로 기다린다
+                    self.on_end()
+            finally:
+                self.running = False
 
     def reply(self, sc, hist, last, follow_i=0):
         """대화 전체를 보고 공감(+ 이어지는 질문). last 면 공감만. 실패하면 공감 대비 + 대비 질문."""

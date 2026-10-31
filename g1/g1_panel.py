@@ -203,7 +203,22 @@ def is_busy():
     return robot_busy() or dialog.running
 
 
-orc = Orchestrator(_auto_send, _auto_dialog, is_busy)
+def _can_preempt():
+    """대화 중인데 로봇이 말·동작을 안 하는 때(대답을 듣는 차례) — 이때만 꽃 응시로 대화를 넘긴다."""
+    return dialog.running and not robot_busy()
+
+
+def _preempt_dialog(timeout=3.0):
+    """지금 대화를 끝내고(마무리 인사 없이) 정리될 때까지 기다린다. 성공하면 True."""
+    dialog.stop()
+    t0 = time.time()
+    while dialog.running and time.time() - t0 < timeout:
+        time.sleep(0.05)
+    print(f"[auto] 대화 넘김 (꽃 응시) — {'성공' if not dialog.running else '시간 초과'}", flush=True)
+    return not dialog.running
+
+
+orc = Orchestrator(_auto_send, _auto_dialog, is_busy, can_preempt=_can_preempt, preempt=_preempt_dialog)
 
 
 def _bridge_feed(m):

@@ -114,3 +114,45 @@ def test_reset_allows_same_part_again():
     for t in _ticks(2.7, 4.0, 0.1):
         orc.feed_part(t, "g1_hand", 10)
     assert len(_acts(sent)) == 2
+
+
+def _make_preempt(can=True, ok=True):
+    sent, pre = [], []
+    orc = Orchestrator(sent.append, lambda k, b, after: sent.append(("dlg", k, b)), lambda: True, dwell_time=1.0,
+                       can_preempt=lambda: can, preempt=lambda: pre.append(True) or ok)
+    return orc, sent, pre
+
+
+def test_flower_preempts_greet_dialog():
+    # 2026-10-31: 인사 뒤 안부 대화 중이라도 꽃을 3초 보면 대화를 끝내고 꽃 시나리오로 (초기화 없이)
+    orc, sent, pre = _make_preempt()
+    orc._active_kind = "greet"
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_object(t, "plant", 45)
+    assert pre == [True] and sent == [("dlg", "plant", 45)]
+
+
+def test_no_preempt_while_robot_moving_or_same_dialog_or_parts():
+    orc, sent, pre = _make_preempt(can=False)              # 로봇이 말하거나 움직이는 중
+    orc._active_kind = "greet"
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_object(t, "plant", 45)
+    assert pre == [] and sent == []
+    orc, sent, pre = _make_preempt()
+    orc._active_kind = "plant"                              # 이미 꽃 대화 중
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_object(t, "plant", 45)
+    assert pre == [] and sent == []
+    orc, sent, pre = _make_preempt()
+    orc._active_kind = "plant"                              # 대화 중 로봇 손·머리는 끼어들지 않는다
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_part(t, "g1_hand", 10)
+    assert pre == [] and sent == []
+
+
+def test_preempt_failed_does_not_start():
+    orc, sent, pre = _make_preempt(ok=False)                # 대화가 제때 안 끝나면 시작하지 않는다
+    orc._active_kind = "greet"
+    for t in _ticks(0, 1.2, 0.1):
+        orc.feed_object(t, "plant", 45)
+    assert pre and sent == []
