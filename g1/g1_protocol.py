@@ -41,7 +41,7 @@ def _turn(tb: int) -> list:
     return [] if tb == 0 else [f"turn_l{tb}" if tb > 0 else f"turn_r{-tb}"]
 
 
-ATTEND_GESTURES = ("celebrate", "wave")
+ATTEND_GESTURES = ("celebrate", "wave", "look")   # look = 물체 쪽으로 돌아보기만 (2026-10-31)
 
 
 def plan_attend(obj_bearing_deg: float, user_bearing_deg: float, gesture: str = "celebrate") -> list:
@@ -51,6 +51,8 @@ def plan_attend(obj_bearing_deg: float, user_bearing_deg: float, gesture: str = 
     if gesture not in ATTEND_GESTURES:
         raise ValueError(f"모르는 동작 {gesture!r}")
     to = _quant(obj_bearing_deg)
+    if gesture == "look":                                    # 가리키기·되돌아보기·동작 없이 물체 쪽으로만. 정면이면 제자리
+        return _turn(to) or ["idle"]
     return _turn(to) + ["point"] + _turn(_quant(user_bearing_deg - to)) + [gesture]
 
 

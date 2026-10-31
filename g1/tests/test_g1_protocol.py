@@ -67,3 +67,11 @@ def test_plan_msg_dispatch():
                 {"cmd": "attend", "obj_bearing_deg": 0, "user_bearing_deg": 0, "gesture": "x"}):
         with pytest.raises((ValueError, TypeError)):
             plan_msg(bad)
+
+
+def test_plan_attend_look_turns_only():
+    # 2026-10-31: 꽃을 보면 지원이도 꽃 쪽으로 돌아보기만 — 가리키기·되돌아보기·박수 없음
+    from g1_protocol import plan_attend
+    assert plan_attend(60, -30, "look") == ["turn_l60"]
+    assert plan_attend(-44, 90, "look") == ["turn_r45"]
+    assert plan_attend(3, 90, "look") == ["idle"]          # 거의 정면이면 제자리(빈 목록 대신 idle)

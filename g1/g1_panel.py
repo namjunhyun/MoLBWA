@@ -139,7 +139,7 @@ DLG = {"bear": (60, -30)}
 def dialog_attend(text):
     if not server_up():
         return False                      # 정책 꺼짐 → 동작 없이 말만
-    send_attend(DLG["bear"][0], DLG["bear"][1], "celebrate", text)
+    send_attend(DLG["bear"][0], DLG["bear"][1], "look", text)   # 2026-10-31: 꽃 쪽으로 돌아보기만 하고 첫 질문(박수·가리키기 없음)
     return True
 
 
