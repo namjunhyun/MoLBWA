@@ -148,7 +148,7 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 
 # ── 자동 교감(시선 → 명령) ───────────────────────────────────────────────
 # 브리지(55057)가 부위 라벨·물체 kind·방위를 보낸다. 오케스트레이터가 dwell 로 확정해
-# 머리 → 손 흔들기 인사, 손 → 악수(act) 뒤 안부 대화(greet), 물체 → 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
+# 머리 → 손 흔들기 인사 뒤 안부 대화(greet), 손 → 악수(act)만, 물체 → 같이 보기 + 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
 AUTO = {"on": False, "status": "대기"}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
 LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)

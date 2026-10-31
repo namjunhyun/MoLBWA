@@ -31,13 +31,13 @@ def test_face_dwell_sends_wave_then_greet():
     assert sent[-1] == ("dlg", "greet", -30, "after_act")                            # 손 흔들기 끝난 뒤 안부
 
 
-def test_hand_dwell_sends_handshake_then_greet():
+def test_hand_dwell_sends_handshake_only():
     orc, sent = _make()
     for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_hand", 10)
     a = _acts(sent)
     assert len(a) == 1 and a[0]["part"] == "g1_hand" and a[0]["bearing_deg"] == 10   # 젯슨에서 g1_hand = 회전 + handshake
-    assert sent[-1] == ("dlg", "greet", 10, "after_act")
+    assert not [m for m in sent if isinstance(m, tuple)]   # 2026-10-31: 악수만 — 반가워요·안부 대화 없음
 
 
 def test_object_dwell_starts_dialog():
@@ -60,7 +60,7 @@ def test_part_priority_over_object():
     for t in _ticks(0, 1.2, 0.1):
         orc.feed_part(t, "g1_hand", -30)
         orc.feed_object(t, "plant", 45)
-    assert len(_acts(sent)) == 1 and [m for m in sent if isinstance(m, tuple)] == [("dlg", "greet", -30, "after_act")]
+    assert len(_acts(sent)) == 1 and [m for m in sent if isinstance(m, tuple)] == []   # 악수만, 꽃 대화는 부위 우선으로 막힘
 
 
 def test_face_priority_over_object():

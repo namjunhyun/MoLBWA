@@ -1,6 +1,6 @@
 """시선 부위/물체 분기 오케스트레이터 (순수 상태기계, 소켓·ROS 비의존).
 
-머리(얼굴) dwell 확정 -> 착용자 쪽으로 돌아 손 흔들기 인사(act), 손 dwell 확정 -> 악수(act). 둘 다 동작이 끝나면 안부 대화(greet).
+머리(얼굴) dwell 확정 -> 착용자 쪽으로 돌아 손 흔들기 인사(act) 후 안부 대화(greet). 손 dwell 확정 -> 악수(act)만 (2026-10-31: 반가워요·대화 없음).
 물체 dwell 확정 -> 물체 대화. 부위가 우선.
 """
 import os
@@ -13,7 +13,7 @@ from g1_dwell import LabelDwell  # noqa: E402
 
 PART_PRIORITY_WINDOW = 1.0  # 부위 확정 후 이 시간(초) 안의 물체 확정은 버린다
 GREET_KIND = "greet"        # 인사·악수 뒤 이 대화 시나리오(g1_dialog.SCENARIOS)
-GREET_PARTS = {"g1_face", "g1_hand"}   # 동작 뒤 안부 대화로 이어지는 부위 (젯슨: g1_face=wave, g1_hand=handshake)
+GREET_PARTS = {"g1_face"}   # 동작 뒤 안부 대화로 이어지는 부위 — 머리(wave)만. 손(handshake)은 악수만 (2026-10-31)
 
 
 class Orchestrator:
