@@ -199,3 +199,24 @@ def test_dialog_end_without_thanks_does_not_reset(monkeypatch):
     g1_panel.AUTO["on"], g1_panel.AUTO["held_off"] = False, False
     g1_panel._dialog_ended()
     assert calls == [] and g1_panel.AUTO["on"] is False
+
+
+def test_missing_tag_uses_last_bearing_and_updates_after_turn(monkeypatch):
+    # 2026-10-31: 판정 순간 태그를 놓쳐도 최근 본 착용자 방위로 돈다. 돈 뒤엔 돈 만큼 빼서 기억(정면 근처로)
+    parts = []
+    monkeypatch.setattr(g1_panel.orc, "feed_part", lambda t, label, b: parts.append(b))
+    monkeypatch.setattr(g1_panel.orc, "feed_object", lambda *a: None)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
+    g1_panel._bridge_feed({"t": 1000.0, "bearing_deg": 56.4})       # 태그 보임
+    g1_panel._bridge_feed({"t": 1000.0, "bearing_deg": None})       # 태그 놓침 → 기억한 56
+    assert parts == [56, 56]
+    monkeypatch.setattr(g1_panel, "send", lambda m: 1)
+    g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, False
+    g1_panel._auto_send({"cmd": "act", "part": "g1_hand", "bearing_deg": 56})   # 젯슨: turn_l60 + 악수
+    g1_panel.AUTO["on"] = False
+    g1_panel._bridge_feed({"t": 1000.0, "bearing_deg": None})
+    assert parts[-1] == -4                                           # 60° 돌았으니 착용자는 이제 -4°
+    clock["now"] = 1031.0
+    g1_panel._bridge_feed({"t": 1031.0, "bearing_deg": None})       # 30초 넘게 못 봄 → 0 (모름)
+    assert parts[-1] == 0

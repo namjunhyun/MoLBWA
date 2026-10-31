@@ -14,7 +14,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from g1_protocol import PART_TO_SEGMENT, PORT_BRIDGE, PORT_CMD, PORT_STATE, decode, encode, plan, plan_attend
+from g1_protocol import (PART_TO_SEGMENT, PORT_BRIDGE, PORT_CMD, PORT_STATE, _quant, _wrap, decode, encode, plan,
+                         plan_attend)
 from g1_orchestrator import Orchestrator
 import g1_dialog
 import g1_say
@@ -140,6 +141,7 @@ def dialog_attend(text):
     if not server_up():
         return False                      # 정책 꺼짐 → 동작 없이 말만
     send_attend(DLG["bear"][0], DLG["bear"][1], "look", text)   # 2026-10-31: 꽃 쪽으로 돌아보기만 하고 첫 질문(박수·가리키기 없음)
+    _turned(DLG["bear"][0])                        # 꽃 쪽으로 돈 만큼 착용자 방위가 바뀐다
     return True
 
 
@@ -167,7 +169,14 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 # 머리 → 손 흔들기 인사 뒤 안부 대화(greet), 손 → 악수(act)만, 물체 → 같이 보기 + 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
 AUTO = {"on": False, "status": "대기", "held_off": False}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
-LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)
+LAST = {"user_bearing": 0, "t": 0.0}           # 최근 착용자 방위(태그 놓쳤을 때·같이 보기 복귀용)와 그 시각
+BEARING_MEMORY_S = 30.0                         # 태그를 이만큼 못 보면 착용자 방위를 모르는 것으로(0°)
+
+
+def _turned(by_deg):
+    """지원이가 by_deg 만큼(양자화된 회전) 돌았다 → 기억한 착용자 방위를 그만큼 빼 둔다(지원이 기준이 바뀌므로)."""
+    LAST["user_bearing"] = int(round(_wrap(LAST["user_bearing"] - _quant(by_deg))))
+    LAST["t"] = time.time()
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
 PART_STATUS = {"g1_face": "👋 머리를 보고 손 흔들기 인사", "g1_hand": "🤝 손을 보고 악수",
                "g1_torso": "🙆 몸을 보고 양팔 벌리기"}
@@ -182,6 +191,9 @@ def _auto_send(cmd):
         print(f"[auto] act 생략(대화 모드): {cmd['part']}", flush=True)
         return
     seq = send({"cmd": cmd["cmd"], "part": cmd["part"], "bearing_deg": cmd["bearing_deg"]})   # send() 가 seq 재부여
+    if isinstance(cmd["bearing_deg"], (int, float)):
+        LAST["user_bearing"] = int(cmd["bearing_deg"])
+        _turned(cmd["bearing_deg"])                # 착용자 쪽으로 돌았으니 이제 착용자는 거의 정면
     AUTO["status"] = PART_STATUS.get(cmd["part"], cmd["part"])
     print(f"[auto] act seq {seq}: {cmd['part']} @ {cmd['bearing_deg']}°", flush=True)
 
@@ -215,9 +227,11 @@ def _bridge_feed(m):
     """브리지 메시지 1건 → 오케스트레이터 투입. 부위 먼저(부위 우선), 물체 다음."""
     t = m.get("t") or time.time()
     ub = m.get("bearing_deg")
-    ub_i = int(round(ub)) if isinstance(ub, (int, float)) else 0
     if isinstance(ub, (int, float)):
-        LAST["user_bearing"] = ub_i
+        ub_i = LAST["user_bearing"] = int(round(ub))
+        LAST["t"] = time.time()
+    else:   # 태그를 놓친 순간 — 0° 로 보내면 지원이가 안 돈다(2026-10-31). 최근 본 방위가 있으면 그걸로
+        ub_i = LAST["user_bearing"] if time.time() - LAST["t"] <= BEARING_MEMORY_S else 0
     label = m.get("label")
     orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
     ob = m.get("obj_bearing_deg")

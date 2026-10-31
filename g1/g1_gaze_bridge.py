@@ -91,6 +91,15 @@ def scaled_K(K: np.ndarray, s: float) -> np.ndarray:
     return K2
 
 
+def median_recent(buf: list, v, now: float, win: float = 1.0):
+    """최근 win 초 값들의 중앙값. 작은 태그 한 장이면 방위가 56°↔124° 로 한 프레임씩 뒤집혀서(2026-10-31) 튀는 값을 뺀다.
+    v=None 이면 넣지 않고 남은 값으로. 남은 값이 없으면 None."""
+    if v is not None:
+        buf.append((now, v))
+    buf[:] = [x for x in buf if now - x[0] <= win]
+    return float(np.median([b for _, b in buf])) if buf else None
+
+
 def hold_value(st: dict, v, now: float, ttl: float):
     """v 가 None 이면 ttl 초 안의 마지막 값. 태그를 잠깐 놓친 순간 확정되면 방위가 0° 로 가 돌지 않던 문제(2026-10-30)."""
     if v is not None:
@@ -215,7 +224,7 @@ def main():
 
     n = n_label = n_bear = 0
     next_report = time.time() + 2.0
-    held_parts, held_bearing, shown_uv = {}, {}, (0.0, None)
+    held_parts, held_bearing, bear_buf, shown_uv = {}, {}, [], (0.0, None)
     try:
         while src.ok():
             frame, uv, _ = src.frame()
@@ -229,7 +238,7 @@ def main():
             now = time.time()
             part_dets = hold_dets(held_parts, yolo(frame), now)        # YOLO 가 손·머리를 한두 프레임 놓쳐도 0.5초 유지
             label = pick_part(part_dets, uv)                           # → 판정 비율이 깜빡임에 깎이지 않는다
-            bearing = hold_value(held_bearing, None if T is None else bearing_deg(T), now, 2.0)
+            bearing = hold_value(held_bearing, median_recent(bear_buf, None if T is None else bearing_deg(T), now), now, 2.0)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
             obj_kind, obj_dets = None, []
             if obj_det is not None and (uv is not None or args.show):  # 평소엔 시선 있을 때만(부하 절반), 창 켜면 꽃 박스 보이게 항상

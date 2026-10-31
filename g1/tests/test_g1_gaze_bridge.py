@@ -220,3 +220,12 @@ def test_scaled_K_for_upscaled_tag_detection():
     K = np.array([[461.24, 0, 320], [0, 461.24, 240], [0, 0, 1.0]])
     K2 = scaled_K(K, 2)
     assert np.allclose(K2, [[922.48, 0, 640], [0, 922.48, 480], [0, 0, 1]]) and K[0, 0] == 461.24
+
+
+def test_bearing_median_rejects_single_flip():
+    # 작은 태그 한 장이면 56°↔124° 로 한 프레임씩 뒤집힌다 — 최근 1초 중앙값이면 튀는 값이 빠진다
+    from g1_gaze_bridge import median_recent
+    buf = []
+    out = [median_recent(buf, b, 0.1 * i) for i, b in enumerate([56, 57, 56, 124, 56, 57])]
+    assert out[3] == 56.5 and max(out) < 60
+    assert median_recent(buf, None, 0.6) is not None and median_recent(buf, None, 2.0) is None
