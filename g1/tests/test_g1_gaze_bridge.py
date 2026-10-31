@@ -93,7 +93,7 @@ def test_config_loads_four_tag_bundle():
     assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand"}   # 몸통 없음, 꽃은 obj_yolo(YOLO-World)
 
 
-@pytest.mark.parametrize("tag_id,bear", [(10, 10.0), (11, 80.0), (12, -100.0), (13, 170.0), (13, -170.0)])
+@pytest.mark.parametrize("tag_id,bear", [(13, 10.0), (11, 80.0), (12, -100.0), (10, 170.0), (10, -170.0)])   # 2026-10-31: 가슴=13, 등=10
 def test_single_tag_pnp_gives_bearing(tag_id, bear):
     """Review Focus #4: 태그 한 장만 보여도 PnP -> bearing 이 나온다. 그 면 앞 2 m 에서 본 코너를
     만들어 TagBundleDetector 와 같은 solvePnP(ITERATIVE) 를 돌린다 (apriltag 검출만 빼고 같은 경로)."""

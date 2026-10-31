@@ -170,8 +170,10 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 AUTO = {"on": False, "status": "대기", "held_off": False}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
 LAST = {"user_bearing": 0, "t": 0.0,           # 최근 착용자 방위(태그 놓쳤을 때·같이 보기 복귀용)와 그 시각
-        "obj_bearing": None, "obj_t": 0.0}     # 최근 꽃(물체) 방위와 그 시각
-BEARING_MEMORY_S = 30.0                         # 태그를 이만큼 못 보면 착용자 방위를 모르는 것으로(0°)
+        "obj_bearing": None, "obj_t": 0.0,     # 등록한 꽃(물체) 방위와 그 시각
+        "obj_recent": []}                      # 등록 후보: 최근 1초 꽃 방위 (t, deg)
+BEARING_MEMORY_S = 5.0                          # 태그를 이만큼 못 보면 착용자 방위를 모르는 것으로(0°). 30초는 자리를 옮긴 뒤
+                                                # 예전 방위로 엉뚱하게 돌았다(2026-10-31) — 잠깐 빠지는 것만 메운다
 OBJ_MEMORY_S = 1800.0                           # 꽃 위치 등록: 로봇·꽃이 한 번 같이 보이면 30분 기억(돌면 돈 만큼 빼서 갱신, 2026-10-31)
 
 
@@ -241,11 +243,14 @@ def _bridge_feed(m):
     ob = m.get("obj_bearing_deg")
     # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 등록해 둔 꽃 방위(로봇·꽃이 같이 보였을 때), 없으면 None:
     # 돌아보기 없이 대화만 (2026-10-31: 꽃을 보는 동안 로봇이 화면 밖이라 '@ None°'로 시작해 꽃 쪽으로 안 돌았다)
-    if isinstance(ob, (int, float)):
-        LAST["obj_bearing"], LAST["obj_t"] = int(round(ob)), time.time()
-        ob_i = LAST["obj_bearing"]
-    else:
-        ob_i = LAST["obj_bearing"] if time.time() - LAST["obj_t"] <= OBJ_MEMORY_S else None
+    now = time.time()
+    if isinstance(ob, (int, float)):               # 등록은 엄격하게: 1초 안 3번 이상, 흔들림 15° 이내일 때만(뒤집힘 값 배제)
+        rec = [x for x in LAST["obj_recent"] if now - x[0] <= 1.0] + [(now, float(ob))]
+        LAST["obj_recent"] = rec
+        vals = [v for _, v in rec]
+        if len(vals) >= 3 and max(vals) - min(vals) <= 15.0:
+            LAST["obj_bearing"], LAST["obj_t"] = int(round(sorted(vals)[len(vals) // 2])), now
+    ob_i = LAST["obj_bearing"] if LAST["obj_bearing"] is not None and now - LAST["obj_t"] <= OBJ_MEMORY_S else None
     orc.feed_object(t, m.get("obj_kind"), ob_i)
 
 

@@ -135,9 +135,11 @@ def test_bridge_no_tag_still_triggers_object_without_bearing(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
     monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: calls.append((kind, b)))
+    g1_panel.LAST["obj_bearing"], g1_panel.LAST["obj_recent"] = None, []
     g1_panel._bridge_feed({"t": 1.0, "obj_kind": "plant", "bearing_deg": 10})            # 태그 없음 → 방위 None (돌아보기 없이 대화만)
-    g1_panel._bridge_feed({"t": 2.0, "obj_kind": "plant", "obj_bearing_deg": 30.4})      # 정상
-    assert calls == [("plant", None), ("plant", 30)]   # 2026-10-31: 태그가 없어도 꽃 대화는 시작
+    for b in (30.4, 30.1, 29.8):                                                       # 안정된 3번 → 등록
+        g1_panel._bridge_feed({"t": 2.0, "obj_kind": "plant", "obj_bearing_deg": b})
+    assert calls[0] == ("plant", None) and calls[-1] == ("plant", 30)   # 2026-10-31: 태그가 없어도 꽃 대화는 시작
 
 
 def test_reset_route_stops_dialog_and_resets_orchestrator(monkeypatch):
@@ -217,8 +219,8 @@ def test_missing_tag_uses_last_bearing_and_updates_after_turn(monkeypatch):
     g1_panel.AUTO["on"] = False
     g1_panel._bridge_feed({"t": 1000.0, "bearing_deg": None})
     assert parts[-1] == -4                                           # 60° 돌았으니 착용자는 이제 -4°
-    clock["now"] = 1031.0
-    g1_panel._bridge_feed({"t": 1031.0, "bearing_deg": None})       # 30초 넘게 못 봄 → 0 (모름)
+    clock["now"] = 1006.0
+    g1_panel._bridge_feed({"t": 1006.0, "bearing_deg": None})       # 5초 넘게 못 봄 → 0 (모름, 자리를 옮겼을 수 있다)
     assert parts[-1] == 0
 
 
@@ -230,9 +232,36 @@ def test_flower_bearing_registered_and_turn_compensated(monkeypatch):
     monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: objs.append((kind, b)))
     clock = {"now": 2000.0}
     monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
-    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": 40.2})   # 로봇과 꽃이 같이 보임 → 등록
+    g1_panel.LAST["obj_bearing"], g1_panel.LAST["obj_recent"] = None, []
+    for b in (40.2, 41.0, 39.5):                                                          # 로봇과 꽃이 같이 보임(1초에 3번, 흔들림 ≤15°) → 등록
+        g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": b})
     clock["now"] = 2300.0
     g1_panel._bridge_feed({"t": 2300.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 5분 뒤 태그 없이 꽃만 → 40
     g1_panel._turned(45)                                                                 # 지원이가 왼쪽 45° 돌았다
     g1_panel._bridge_feed({"t": 2300.0, "obj_kind": "plant", "obj_bearing_deg": None})
-    assert objs == [("plant", 40), ("plant", 40), ("plant", -5)]
+    assert objs[2:] == [("plant", 40), ("plant", 40), ("plant", -5)]
+
+
+def test_flower_not_registered_from_jumpy_bearings(monkeypatch):
+    # 튀는 값(뒤집힘 56↔124 등)으로는 등록하지 않는다 — 1초 안 3번 이상, 흔들림 15° 이내일 때만
+    objs = []
+    monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
+    monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: objs.append(b))
+    monkeypatch.setattr(g1_panel.time, "time", lambda: 3000.0)
+    g1_panel.LAST["obj_bearing"], g1_panel.LAST["obj_recent"] = None, []
+    for b in (56, 124, 57):
+        g1_panel._bridge_feed({"t": 3000.0, "obj_kind": "plant", "obj_bearing_deg": b})
+    assert g1_panel.LAST["obj_bearing"] is None and objs[-1] is None
+
+
+def test_user_bearing_memory_is_short(monkeypatch):
+    # 30초 기억은 자리를 옮긴 뒤 예전 방위로 돌았다(2026-10-31) → 5초만 메운다
+    parts = []
+    monkeypatch.setattr(g1_panel.orc, "feed_part", lambda t, label, b: parts.append(b))
+    monkeypatch.setattr(g1_panel.orc, "feed_object", lambda *a: None)
+    clock = {"now": 4000.0}
+    monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
+    g1_panel._bridge_feed({"t": 4000.0, "bearing_deg": 60.0})
+    clock["now"] = 4006.0
+    g1_panel._bridge_feed({"t": 4006.0, "bearing_deg": None})
+    assert parts[-1] == 0
