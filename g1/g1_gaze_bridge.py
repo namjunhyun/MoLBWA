@@ -224,7 +224,7 @@ def main():
 
     n = n_label = n_bear = 0
     next_report = time.time() + 2.0
-    held_parts, held_bearing, bear_buf, shown_uv = {}, {}, [], (0.0, None)
+    held_parts, held_bearing, held_pose, bear_buf, shown_uv = {}, {}, {}, [], (0.0, None)
     try:
         while src.ok():
             frame, uv, _ = src.frame()
@@ -239,7 +239,9 @@ def main():
             part_dets = hold_dets(held_parts, yolo(frame), now)        # YOLO 가 손·머리를 한두 프레임 놓쳐도 0.5초 유지
             label = pick_part(part_dets, uv)                           # → 판정 비율이 깜빡임에 깎이지 않는다
             bearing = hold_value(held_bearing, median_recent(bear_buf, None if T is None else bearing_deg(T), now), now, 2.0)
-            obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
+            # 꽃을 보는 동안 태그가 한두 프레임 빠져도 1.5초 안의 자세로 꽃 방위 (2026-10-31: 트리거 순간 None → 안 돌았다)
+            T_obj = hold_value(held_pose, T, now, 1.5)
+            obj_b = None if (T_obj is None or uv is None) else object_bearing_deg(T_obj, uv, K, obj_dist)
             obj_kind, obj_dets = None, []
             if obj_det is not None and (uv is not None or args.show):  # 평소엔 시선 있을 때만(부하 절반), 창 켜면 꽃 박스 보이게 항상
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])

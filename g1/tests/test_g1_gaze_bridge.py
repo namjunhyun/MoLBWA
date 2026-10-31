@@ -229,3 +229,13 @@ def test_bearing_median_rejects_single_flip():
     out = [median_recent(buf, b, 0.1 * i) for i, b in enumerate([56, 57, 56, 124, 56, 57])]
     assert out[3] == 56.5 and max(out) < 60
     assert median_recent(buf, None, 0.6) is not None and median_recent(buf, None, 2.0) is None
+
+
+def test_recent_pose_keeps_tag_pose_briefly():
+    # 꽃을 보는 동안 태그가 한두 프레임 빠져도 1.5초 안의 자세로 꽃 방위를 계산한다
+    from g1_gaze_bridge import hold_value
+    st = {}
+    T = np.eye(4)
+    assert hold_value(st, T, 0.0, 1.5) is T
+    assert hold_value(st, None, 1.0, 1.5) is T
+    assert hold_value(st, None, 2.0, 1.5) is None

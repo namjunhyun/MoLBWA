@@ -169,14 +169,17 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 # 머리 → 손 흔들기 인사 뒤 안부 대화(greet), 손 → 악수(act)만, 물체 → 같이 보기 + 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
 AUTO = {"on": False, "status": "대기", "held_off": False}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
-LAST = {"user_bearing": 0, "t": 0.0}           # 최근 착용자 방위(태그 놓쳤을 때·같이 보기 복귀용)와 그 시각
+LAST = {"user_bearing": 0, "t": 0.0,           # 최근 착용자 방위(태그 놓쳤을 때·같이 보기 복귀용)와 그 시각
+        "obj_bearing": None, "obj_t": 0.0}     # 최근 꽃(물체) 방위와 그 시각
 BEARING_MEMORY_S = 30.0                         # 태그를 이만큼 못 보면 착용자 방위를 모르는 것으로(0°)
+OBJ_MEMORY_S = 3.0                              # 꽃 방위는 짧게(고개를 돌리면 바뀐다) — 응시 3초 안의 값만
 
 
 def _turned(by_deg):
     """지원이가 by_deg 만큼(양자화된 회전) 돌았다 → 기억한 착용자 방위를 그만큼 빼 둔다(지원이 기준이 바뀌므로)."""
     LAST["user_bearing"] = int(round(_wrap(LAST["user_bearing"] - _quant(by_deg))))
     LAST["t"] = time.time()
+    LAST["obj_bearing"] = None                     # 꽃 방위는 지원이 기준이 바뀌어 무효
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
 PART_STATUS = {"g1_face": "👋 머리를 보고 손 흔들기 인사", "g1_hand": "🤝 손을 보고 악수",
                "g1_torso": "🙆 몸을 보고 양팔 벌리기"}
@@ -235,9 +238,14 @@ def _bridge_feed(m):
     label = m.get("label")
     orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
     ob = m.get("obj_bearing_deg")
-    # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 0° 로 속이지 않고 None 으로: 돌아보기 없이 대화만 (2026-10-31,
-    # 예전엔 트리거를 막았는데 55mm 태그가 3m 에서 0% 라 꽃 시나리오가 아예 안 나갔다)
-    orc.feed_object(t, m.get("obj_kind"), int(round(ob)) if isinstance(ob, (int, float)) else None)
+    # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 최근 OBJ_MEMORY_S 초 안의 꽃 방위, 그것도 없으면 None:
+    # 돌아보기 없이 대화만 (2026-10-31: 트리거 순간 한 프레임만 태그가 빠져도 '@ None°'로 시작해 꽃 쪽으로 안 돌았다)
+    if isinstance(ob, (int, float)):
+        LAST["obj_bearing"], LAST["obj_t"] = int(round(ob)), time.time()
+        ob_i = LAST["obj_bearing"]
+    else:
+        ob_i = LAST["obj_bearing"] if time.time() - LAST["obj_t"] <= OBJ_MEMORY_S else None
+    orc.feed_object(t, m.get("obj_kind"), ob_i)
 
 
 def listen_bridge():

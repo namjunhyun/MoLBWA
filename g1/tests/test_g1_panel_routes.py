@@ -220,3 +220,17 @@ def test_missing_tag_uses_last_bearing_and_updates_after_turn(monkeypatch):
     clock["now"] = 1031.0
     g1_panel._bridge_feed({"t": 1031.0, "bearing_deg": None})       # 30초 넘게 못 봄 → 0 (모름)
     assert parts[-1] == 0
+
+
+def test_missing_obj_bearing_uses_recent_value(monkeypatch):
+    # 2026-10-31: 꽃 대화가 '@ None°'로 시작해 꽃 쪽으로 안 돌았다 — 트리거 순간 태그가 빠져도 최근 3초 꽃 방위를 쓴다
+    objs = []
+    monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
+    monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: objs.append((kind, b)))
+    clock = {"now": 2000.0}
+    monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
+    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": 40.2})
+    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 태그 빠짐 → 40
+    clock["now"] = 2004.0
+    g1_panel._bridge_feed({"t": 2004.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 3초 넘음 → None(대화만)
+    assert objs == [("plant", 40), ("plant", 40), ("plant", None)]
