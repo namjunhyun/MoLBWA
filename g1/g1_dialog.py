@@ -178,6 +178,7 @@ class Dialog:
         self.mic_dev, self.min_rms, self.answer_sec = mic_dev, min_rms, answer_sec
         self.rec_dir = rec_dir           # 주면 들은 소리를 wav 로 남긴다 (인식 실패 원인 확인용)
         self.log, self.running, self._stop = [], False, False
+        self.thanked = False             # 이번 대화를 "고마워"로 맺었나 — 패널이 이때만 다음 시나리오로 넘긴다
         self._typed = None
         self.env = load_env()
         self.fell = False
@@ -204,7 +205,7 @@ class Dialog:
         if kind not in SCENARIOS:
             return f"모르는 시나리오 {kind!r}"
         self.env = load_env()
-        self.running, self._stop, self._typed, self.log, self.alert = True, False, None, [], ""
+        self.running, self._stop, self._typed, self.log, self.alert, self.thanked = True, False, None, [], "", False
         threading.Thread(target=self._run, args=(mode, with_attend, kind, after_act), daemon=True).start()
         return f"대화 시작 ({SCENARIOS[kind]['name']})"
 
@@ -305,13 +306,14 @@ class Dialog:
                 hist.append(("assistant", text))
                 if last:
                     self._say("마무리", self.rng.choice(CLOSINGS))
+                    self.thanked = is_thanks(ans) and not self._stop
                     return
         except Exception as e:
             self._log(f"(오류 {type(e).__name__}: {e})")
         finally:
             self._log("(대화 끝)" if not self._stop else "(대화 중지됨)")
             try:
-                if self.on_end is not None:   # running 을 내리기 전에 — 끼어들기가 running=False 를 '정리 끝'으로 기다린다
+                if self.on_end is not None:   # running 을 내리기 전에 — running=False 면 정리까지 끝난 것
                     self.on_end()
             finally:
                 self.running = False

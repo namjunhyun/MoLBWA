@@ -144,7 +144,11 @@ def dialog_attend(text):
 
 
 def _dialog_ended():
-    """대화가 끝나면(마무리 인사·중지) 초기화 버튼과 같이 — 응시 누적·재확정 잠금을 비우고 다음 시선을 기다린다 (2026-10-31)."""
+    """대화가 "대화해줘서 고마워"로 끝났을 때만 초기화 버튼과 같이 — 응시 누적·재확정 잠금을 비우고 다음 시나리오를 받는다.
+    대답 없음·최대 횟수·위험 신호·오류·중지로 끝난 대화는 넘기지 않는다(초기화 버튼으로) (2026-10-31)."""
+    if not dialog.thanked:
+        print("[auto] 대화 끝 (고마워 아님) — 다음 시나리오로 넘기지 않음. 넘기려면 초기화", flush=True)
+        return
     orc.reset()
     if AUTO.get("held_off"):              # 비상정지·정지·직접 끔 뒤라면 다시 켜지 않는다(시선만으로 로봇이 움직이게 되므로)
         print("[auto] 대화 끝 → 초기화 (자동 교감은 꺼진 채 — 정지·직접 끔 뒤)", flush=True)
@@ -204,22 +208,7 @@ def is_busy():
     return robot_busy() or dialog.running
 
 
-def _can_preempt():
-    """대화 중인데 로봇이 말·동작을 안 하는 때(대답을 듣는 차례) — 이때만 꽃 응시로 대화를 넘긴다."""
-    return dialog.running and not robot_busy()
-
-
-def _preempt_dialog(timeout=3.0):
-    """지금 대화를 끝내고(마무리 인사 없이) 정리될 때까지 기다린다. 성공하면 True."""
-    dialog.stop()
-    t0 = time.time()
-    while dialog.running and time.time() - t0 < timeout:
-        time.sleep(0.05)
-    print(f"[auto] 대화 넘김 (꽃 응시) — {'성공' if not dialog.running else '시간 초과'}", flush=True)
-    return not dialog.running
-
-
-orc = Orchestrator(_auto_send, _auto_dialog, is_busy, can_preempt=_can_preempt, preempt=_preempt_dialog)
+orc = Orchestrator(_auto_send, _auto_dialog, is_busy)
 
 
 def _bridge_feed(m):

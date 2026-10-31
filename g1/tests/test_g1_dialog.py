@@ -367,4 +367,13 @@ def test_on_end_called_when_dialog_finishes():
     d._listen = lambda mode: q.pop(0) if q else ""
     d.gen = lambda model, msgs, fallback, max_sent=2: fallback
     d._run("mic", False, "plant")
-    assert ended == [True] and not d.running
+    assert ended == [True] and not d.running and d.thanked      # "고마워"로 맺음 → 패널이 다음 시나리오로
+
+
+def test_thanked_only_when_user_says_thanks():
+    # 2026-10-31: 다음 시나리오로 넘어가는 기준은 "대화해줘서 고마워"뿐 — 대답 없음·최대 횟수 마무리는 아님
+    r = Robot()
+    d = Dialog(r.say)
+    d._listen = lambda mode: ""                                   # 두 번 대답 없음 → 마무리
+    d._run("mic", False, "plant")
+    assert not d.thanked

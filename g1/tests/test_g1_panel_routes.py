@@ -156,6 +156,7 @@ def test_dialog_end_resets_orchestrator(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
     g1_panel.AUTO["on"], g1_panel.AUTO["held_off"] = False, False
+    monkeypatch.setattr(g1_panel.dialog, "thanked", True)
     g1_panel._dialog_ended()
     assert calls == ["orc"] and g1_panel.AUTO["on"] is True and "시선" in g1_panel.AUTO["status"]   # 대화 끝 → 자동 교감 시작
     g1_panel.AUTO["on"] = False
@@ -166,6 +167,7 @@ def test_dialog_end_does_not_rearm_after_estop_or_manual_off(monkeypatch):
     monkeypatch.setattr(g1_panel, "ctl", lambda cmd: "ok")
     monkeypatch.setattr(g1_panel.orc, "reset", lambda: None)
     monkeypatch.setattr(g1_panel.dialog, "stop", lambda: "대화 중지 요청")
+    monkeypatch.setattr(g1_panel.dialog, "thanked", True)
     g1_panel.AUTO["on"] = True
     _call("POST", "/ctl/damp")
     g1_panel._dialog_ended()
@@ -187,3 +189,13 @@ def test_auto_dialog_without_bearing_talks_without_attend(monkeypatch):
     g1_panel._auto_dialog("plant", 40)           # 태그 있음 → 돌아보고 대화
     g1_panel.AUTO["on"] = False
     assert calls == [("plant", False), ("plant", True)]
+
+
+def test_dialog_end_without_thanks_does_not_reset(monkeypatch):
+    # "고마워" 없이 끝난 대화(대답 없음·오류·중지)는 다음 시나리오로 넘기지 않는다
+    calls = []
+    monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
+    monkeypatch.setattr(g1_panel.dialog, "thanked", False)
+    g1_panel.AUTO["on"], g1_panel.AUTO["held_off"] = False, False
+    g1_panel._dialog_ended()
+    assert calls == [] and g1_panel.AUTO["on"] is False
