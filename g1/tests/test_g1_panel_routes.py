@@ -222,15 +222,17 @@ def test_missing_tag_uses_last_bearing_and_updates_after_turn(monkeypatch):
     assert parts[-1] == 0
 
 
-def test_missing_obj_bearing_uses_recent_value(monkeypatch):
-    # 2026-10-31: 꽃 대화가 '@ None°'로 시작해 꽃 쪽으로 안 돌았다 — 트리거 순간 태그가 빠져도 최근 3초 꽃 방위를 쓴다
+def test_flower_bearing_registered_and_turn_compensated(monkeypatch):
+    # 2026-10-31: 꽃을 보는 동안 로봇이 화면 밖이면 태그가 없어 꽃 방위를 못 구한다 → 로봇·꽃이 한 번 같이 보일 때 등록,
+    # 오래 기억하고 지원이가 돌면 돈 만큼 빼서 갱신
     objs = []
     monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
     monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: objs.append((kind, b)))
     clock = {"now": 2000.0}
     monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
-    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": 40.2})
-    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 태그 빠짐 → 40
-    clock["now"] = 2004.0
-    g1_panel._bridge_feed({"t": 2004.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 3초 넘음 → None(대화만)
-    assert objs == [("plant", 40), ("plant", 40), ("plant", None)]
+    g1_panel._bridge_feed({"t": 2000.0, "obj_kind": "plant", "obj_bearing_deg": 40.2})   # 로봇과 꽃이 같이 보임 → 등록
+    clock["now"] = 2300.0
+    g1_panel._bridge_feed({"t": 2300.0, "obj_kind": "plant", "obj_bearing_deg": None})   # 5분 뒤 태그 없이 꽃만 → 40
+    g1_panel._turned(45)                                                                 # 지원이가 왼쪽 45° 돌았다
+    g1_panel._bridge_feed({"t": 2300.0, "obj_kind": "plant", "obj_bearing_deg": None})
+    assert objs == [("plant", 40), ("plant", 40), ("plant", -5)]

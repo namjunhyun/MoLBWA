@@ -172,14 +172,15 @@ TALK = {"on": False}                           # 대화 모드: 모션(act·atte
 LAST = {"user_bearing": 0, "t": 0.0,           # 최근 착용자 방위(태그 놓쳤을 때·같이 보기 복귀용)와 그 시각
         "obj_bearing": None, "obj_t": 0.0}     # 최근 꽃(물체) 방위와 그 시각
 BEARING_MEMORY_S = 30.0                         # 태그를 이만큼 못 보면 착용자 방위를 모르는 것으로(0°)
-OBJ_MEMORY_S = 3.0                              # 꽃 방위는 짧게(고개를 돌리면 바뀐다) — 응시 3초 안의 값만
+OBJ_MEMORY_S = 1800.0                           # 꽃 위치 등록: 로봇·꽃이 한 번 같이 보이면 30분 기억(돌면 돈 만큼 빼서 갱신, 2026-10-31)
 
 
 def _turned(by_deg):
     """지원이가 by_deg 만큼(양자화된 회전) 돌았다 → 기억한 착용자 방위를 그만큼 빼 둔다(지원이 기준이 바뀌므로)."""
     LAST["user_bearing"] = int(round(_wrap(LAST["user_bearing"] - _quant(by_deg))))
     LAST["t"] = time.time()
-    LAST["obj_bearing"] = None                     # 꽃 방위는 지원이 기준이 바뀌어 무효
+    if LAST["obj_bearing"] is not None:            # 꽃도 지원이 기준이 바뀐 만큼 빼 둔다
+        LAST["obj_bearing"] = int(round(_wrap(LAST["obj_bearing"] - _quant(by_deg))))
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
 PART_STATUS = {"g1_face": "👋 머리를 보고 손 흔들기 인사", "g1_hand": "🤝 손을 보고 악수",
                "g1_torso": "🙆 몸을 보고 양팔 벌리기"}
@@ -238,8 +239,8 @@ def _bridge_feed(m):
     label = m.get("label")
     orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
     ob = m.get("obj_bearing_deg")
-    # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 최근 OBJ_MEMORY_S 초 안의 꽃 방위, 그것도 없으면 None:
-    # 돌아보기 없이 대화만 (2026-10-31: 트리거 순간 한 프레임만 태그가 빠져도 '@ None°'로 시작해 꽃 쪽으로 안 돌았다)
+    # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 등록해 둔 꽃 방위(로봇·꽃이 같이 보였을 때), 없으면 None:
+    # 돌아보기 없이 대화만 (2026-10-31: 꽃을 보는 동안 로봇이 화면 밖이라 '@ None°'로 시작해 꽃 쪽으로 안 돌았다)
     if isinstance(ob, (int, float)):
         LAST["obj_bearing"], LAST["obj_t"] = int(round(ob)), time.time()
         ob_i = LAST["obj_bearing"]
@@ -262,7 +263,7 @@ def listen_bridge():
                 seen[k] = seen.get(k, 0) + 1
             if time.time() >= next_t and AUTO["on"]:
                 print(f"[bridge] 2초 수신 {seen} · 바쁨 {is_busy()} (로봇 {state.get('state')}, 말 {bool(state.get('speaking'))}, "
-                      f"대화 {dialog.running})", flush=True)
+                      f"대화 {dialog.running}) · 기억 착용자 {LAST['user_bearing']}° 꽃 {LAST['obj_bearing']}°", flush=True)
                 seen, next_t = {}, time.time() + 2.0
         except Exception as e:   # 자동 콜백·디코드 예외로 데몬 스레드가 조용히 죽는 것 방지
             print(f"[bridge] 예외 무시하고 계속: {e!r}", flush=True)
