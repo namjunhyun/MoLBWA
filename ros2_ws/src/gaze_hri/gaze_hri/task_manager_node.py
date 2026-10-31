@@ -160,6 +160,9 @@ class TaskManager(Node):
         self.declare_parameter("place_band_margin_out", 0.03)
         self.declare_parameter("place_min_x", 0.14)          # arm_server min_x 0.12 + 여유 (팔 앞쪽만)
         self.declare_parameter("place_max_yaw_deg", 60.0)    # GUI 초록 띠(±60°)와 같게 (arm_server 한계 70°)
+        # 2026-10-31: 띠 위 놓을 점 높이. 광선 점의 z 를 그대로 쓰다가 0.197m 로 보내 병을 공중에서 놓았다.
+        # target_resolver 의 놓기 높이(grasp_height 0.045 + place_clearance 0.02)와 같게.
+        self.declare_parameter("place_height", 0.065)
         self._band = None             # {"anchor", "arm", "t0", "pts"}
         self._band_log_t = 0.0        # 진단 로그·안내 1초에 한 번
         self._snapped_t = 0.0         # 광선이 물체에 붙은 마지막 시각 — 그동안은 띠 확정을 안 한다(컵 = 따르기)
@@ -780,7 +783,7 @@ class TaskManager(Node):
             best = None
             for t in np.linspace(0.3, 1.6, 131):
                 q = h + d * t
-                q3 = np.array([q[0], q[1], p[2]])
+                q3 = np.array([q[0], q[1], float(self.get_parameter("place_height").value)])
                 if np.linalg.norm(q - self.pick_point[:2]) < max(self.min_separation, 0.05):
                     continue
                 if any(np.linalg.norm(q - np.asarray(o[:2])) < 0.08 for o in others):
