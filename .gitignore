@@ -46,3 +46,6 @@ ros2_ws/src/orbslam3_ros2/
 # 설정 수동 백업 / 잘못 찍힌 캘리브 백업 (로컬 보관용)
 *.bak_*
 calibration/gaze_scene_extrinsic_*.json
+
+# g1: export_policy_npz.py 가 자기 폴더에 쓰는 산출물
+g1/deploy/catalog.json

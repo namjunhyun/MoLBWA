@@ -1,0 +1,34 @@
+# 데모 2(G1 교감) 브리지 설정. anchor 블록은 arm/config.yaml 과 같은 형식(arm/anchor.py 가 읽는다).
+anchor:
+  tag_family: tag36h11
+  tag_size_m: 0.055                 # MEASURE: 검은 테두리 바깥 한 변 (2026-10-30 55mm 로 교체 — 인쇄 후 실측값으로)
+  # G1 몸통 4면, torso_link 기준 [m] (+x 정면, +y 왼쪽, +z 위). MEASURE: 실측 전 자리값.
+  # right/up = 그 태그를 정면에서 보는 사람 기준 오른쪽/위. 법선(right x up)이 몸 바깥을 향한다.
+  bundle:
+    - {id: 10, pos: [ 0.10,  0.00, 0.20], right: [ 0,  1, 0], up: [0, 0, 1]}   # 앞
+    - {id: 11, pos: [ 0.00,  0.11, 0.20], right: [-1,  0, 0], up: [0, 0, 1]}   # 왼
+    - {id: 12, pos: [ 0.00, -0.11, 0.20], right: [ 1,  0, 0], up: [0, 0, 1]}   # 오른
+    - {id: 13, pos: [-0.10,  0.00, 0.20], right: [ 0, -1, 0], up: [0, 0, 1]}   # 뒤
+  ambiguity_max_m: 0.02
+  min_tags_for_latch: 1             # 정면 응시에선 한 장만 보인다 (Review Focus #4)
+  # ponytail: 단일 태그 flip 허용 — bin 이 45° 라 정면 flip 오차는 작다. 판정 실패율 높으면 면당 2장+비동일평면으로
+  require_noncoplanar: false
+  max_reproj_px: 3.0
+
+yolo:
+  python: "~/yolo-env/bin/python"
+  # 2026-10-31: 안경 실영상 510장으로 미세조정(검증 mAP50 머리 0.98·손 0.95, 사람 오검출 0). 합성 전용 구모델은 g1_parts.pt
+  model: "~/yolo-env/g1_parts_real_v1.pt"
+  conf: 0.25
+  classes: [g1_face, g1_hand]       # 새 모델엔 몸통이 없다(판정에서도 뺐음). 꽃은 obj_yolo(YOLO-World)가 판정·표시
+
+# 물체 YOLO(시선이 향한 물건 → 대화 kind). classes 는 obj_gaze_detector.OBJ_TO_KIND 에 있어야 한다. --no-obj 로 끌 수 있다.
+# 2026-10-31: COCO yolo11l → YOLO-World(classes = 검출 프롬프트). 먼 꽃다발 84장 0.25↑ 57%→68%, 가까운 꽃병 98%, 로봇 장면 오검출 0, 16ms
+obj_yolo:
+  model: "~/yolo-env/yolov8l-worldv2.pt"
+  conf: 0.25
+  classes: [flowers, bouquet, flower vase]
+
+# 같이 보기: 착용자가 보는 물체까지 가정 거리 (스테레오 깊이 연결 전). 지원이 기준 물체 방위 계산에 쓴다
+attend:
+  object_dist_m: 1.5
