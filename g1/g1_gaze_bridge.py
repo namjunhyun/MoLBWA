@@ -71,6 +71,7 @@ def object_bearing_deg(T_hc_torso: np.ndarray, uv: tuple[float, float], K: np.nd
 
 PART_COLOR = {"g1_hand": (255, 200, 0), "g1_face": (0, 255, 255), "flower": (0, 140, 255)}   # BGR. 꽃은 표시만(판정은 물체 YOLO)
 OBJ_COLOR = (0, 140, 255)
+OBJ_MARGIN_PX = 30                        # obj_gaze_detector.OBJ_MARGIN_PX 와 같게 (순환 import 피하려고 따로 둠)
 GAZE_COLOR = (0, 255, 0)                  # gaze_on_scene 씬 창과 같은 초록 원+십자
 PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO", "flower": "FLOWER"}
 
@@ -105,8 +106,10 @@ def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
         cv2.rectangle(img, (int(x1 - m), int(y1 - m)), (int(x2 + m), int(y2 + m)), c, 2)
         cv2.putText(img, f"{PART_NAME.get(cls, cls)} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 1)
-    for cls, conf, x1, y1, x2, y2 in obj_dets:
-        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), OBJ_COLOR, 2)
+    for cls, conf, x1, y1, x2, y2 in obj_dets:                    # 꽃(물체): 얇은 선 = YOLO 박스, 굵은 선 = 판정 영역
+        m = OBJ_MARGIN_PX
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), OBJ_COLOR, 1)
+        cv2.rectangle(img, (int(x1 - m), int(y1 - m)), (int(x2 + m), int(y2 + m)), OBJ_COLOR, 2)
         cv2.putText(img, f"{cls} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, OBJ_COLOR, 1)
     if uv is not None:

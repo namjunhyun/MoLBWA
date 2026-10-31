@@ -42,3 +42,11 @@ def test_object_bearing_center_pixel_identity_T():
     # T=I 이면 주점 중심 박스의 광선은 +z 뿐 → torso x=0,y=0 → 방위 0
     b = object_bearing([300, 220, 340, 260], K, 1.5, np.eye(4))
     assert b == 0 and isinstance(b, int)
+
+
+def test_pick_object_margin_absorbs_gaze_error():
+    # 2026-10-31: 꽃 판정 박스도 시선 오차만큼 키운다 (손·머리와 같은 30px)
+    d = [["flowers", 0.8, 100, 100, 160, 200]]
+    assert pick_object(d, (100 - 25, 150)) is not None
+    assert pick_object(d, (100 - 25, 150), margin=0) is None
+    assert pick_object(d, (100 - 45, 150)) is None

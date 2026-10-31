@@ -206,3 +206,9 @@ def test_config_obj_yolo_is_world_with_flower_prompts():
     o = cfg["obj_yolo"]
     assert "world" in o["model"]                                   # 2026-10-31: 먼 꽃다발 COCO 57% → World 68%
     assert o["classes"] and all(OBJ_TO_KIND.get(c) == "plant" for c in o["classes"])
+
+
+def test_obj_margin_same_in_judgement_and_display():
+    import g1_gaze_bridge
+    import obj_gaze_detector
+    assert g1_gaze_bridge.OBJ_MARGIN_PX == obj_gaze_detector.OBJ_MARGIN_PX   # 그린 굵은 선 = 실제 판정 영역

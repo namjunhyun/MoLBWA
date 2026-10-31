@@ -19,12 +19,16 @@ OBJ_TO_KIND = {"potted plant": "plant", "vase": "plant",                     # C
                "flowers": "plant", "bouquet": "plant", "flower vase": "plant"}  # YOLO-World 프롬프트 (2026-10-31)
 
 
-def pick_object(dets: list, uv: tuple[float, float] | None) -> tuple[str, list[float]] | None:
-    """uv 를 포함하고 OBJ_TO_KIND 에 있는 박스 중 conf 최고를 (kind, box_xyxy)로. 없으면 None."""
+OBJ_MARGIN_PX = 30   # 꽃 판정 박스도 시선 오차만큼 키운다 (손·머리 PART_MARGIN_PX 와 같게, 2026-10-31)
+
+
+def pick_object(dets: list, uv: tuple[float, float] | None, margin: float = OBJ_MARGIN_PX) -> tuple[str, list[float]] | None:
+    """uv 를 포함(사방 margin px 확장)하고 OBJ_TO_KIND 에 있는 박스 중 conf 최고를 (kind, box_xyxy)로. 없으면 None."""
     if uv is None:
         return None
     u, v = uv
-    hits = [d for d in dets if d[0] in OBJ_TO_KIND and d[2] <= u <= d[4] and d[3] <= v <= d[5]]
+    m = margin
+    hits = [d for d in dets if d[0] in OBJ_TO_KIND and d[2] - m <= u <= d[4] + m and d[3] - m <= v <= d[5] + m]
     if not hits:
         return None
     d = max(hits, key=lambda d: d[1])
