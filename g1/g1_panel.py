@@ -146,8 +146,12 @@ def dialog_attend(text):
 def _dialog_ended():
     """대화가 끝나면(마무리 인사·중지) 초기화 버튼과 같이 — 응시 누적·재확정 잠금을 비우고 다음 시선을 기다린다 (2026-10-31)."""
     orc.reset()
-    AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요" if AUTO["on"] else "대기"
-    print("[auto] 대화 끝 → 초기화", flush=True)
+    if AUTO.get("held_off"):              # 비상정지·정지·직접 끔 뒤라면 다시 켜지 않는다(시선만으로 로봇이 움직이게 되므로)
+        print("[auto] 대화 끝 → 초기화 (자동 교감은 꺼진 채 — 정지·직접 끔 뒤)", flush=True)
+        return
+    AUTO["on"] = True                     # 대화 끝 → 다른 걸 보면 다음 시나리오로 바로 이어지게 (2026-10-31)
+    AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요"
+    print("[auto] 대화 끝 → 초기화 · 자동 교감 ON", flush=True)
 
 
 dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic, synth=g1_tts.synth,
@@ -157,7 +161,7 @@ dialog = g1_dialog.Dialog(say_text, dialog_attend, robot_busy, mic_dev=args.mic,
 # ── 자동 교감(시선 → 명령) ───────────────────────────────────────────────
 # 브리지(55057)가 부위 라벨·물체 kind·방위를 보낸다. 오케스트레이터가 dwell 로 확정해
 # 머리 → 손 흔들기 인사 뒤 안부 대화(greet), 손 → 악수(act)만, 물체 → 같이 보기 + 물체 대화를 낸다. auto OFF 면 아무 명령도 안 나간다(수동 버튼이 대신 쓴다).
-AUTO = {"on": False, "status": "대기"}        # status = /demo 큰 문구(현재 교감 상태)
+AUTO = {"on": False, "status": "대기", "held_off": False}        # status = /demo 큰 문구(현재 교감 상태)
 TALK = {"on": False}                           # 대화 모드: 모션(act·attend) 없이 대화만 — 웹 토글(/talk)
 LAST = {"user_bearing": 0}                     # 최근 착용자 방위(대화 '같이 보기' 복귀용)
 AUTO_DIALOG_MODE = "mic"                        # 자동 대화 듣기 방식(mic/keyboard)
@@ -269,7 +273,7 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <h1>지원이 조작 패널 <small style="color:#888">(시선 안경 대신)</small></h1>
 <div class="row"><button class="estop" onclick="c('damp')">⛔ 비상정지</button></div>
 <div class="row ctl"><button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button></div>
-<div class="row ctl"><button onclick="fetch('/reset',{method:'POST'}).then(r=>r.json()).then(j=>document.getElementById('msg').textContent=j.msg)">🔄 초기화 — 대화 끊고 응시 누적 비움 (로봇 동작 없음)</button></div>
+<div class="row ctl"><button onclick="fetch('/reset',{method:'POST'}).then(r=>r.json()).then(j=>document.getElementById('msg').textContent=j.msg)">🔄 초기화 — 대화 끊고 응시 누적 비움 + 자동 교감 시작</button></div>
 <div class="row ctl"><button onclick="c('stop','정책 중이면: 기본자세로 최대 5분 서 있다가 5초 카운트다운 후 힘이 빠집니다(받쳐야 함). 고수준이면 제자리 정지. 계속할까요?')">■ 정지(기본자세)</button>
 <button onclick="c('release','디벨롭 모드로 내리면 로봇이 스스로 못 섭니다. 하네스가 받치고 있나요?')">디벨롭 모드</button>
 <button onclick="c('highlevel','고수준(기본 보행) 모드로 올립니다. 계속할까요?')">고수준 모드</button></div>
@@ -376,7 +380,7 @@ h1{font-size:22px;margin:0 0 16px}
 <h1>지원이 — 시선 교감 데모 <small style="color:#888">(세부 조작은 <a href="/origin" style="color:#60a5fa">/origin</a>)</small></h1>
 <button id="auto" onclick="toggle()"><span id="dot"></span><span id="al">자동 교감 시작</span></button>
 <button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button>
-<button id="reset" onclick="fetch('/reset',{method:'POST'})">🔄 초기화 — 대화 끊고 처음부터 (로봇 동작 없음)</button>
+<button id="reset" onclick="fetch('/reset',{method:'POST'})">🔄 초기화 — 대화 끊고 처음부터 + 자동 교감 시작</button>
 <div id="status">대기</div>
 <div id="alert"></div>
 <div id="bubbles"></div>
@@ -430,6 +434,7 @@ class H(BaseHTTPRequestHandler):
                 return
             if cmd in STOP_CMDS:   # 멈춤/정책 내림 → 자동 교감 해제(정책 되살릴 때 다음 응시에 로봇이 또 움직이지 않게)
                 AUTO["on"] = False
+                AUTO["held_off"] = True   # 대화가 끝나도 다시 켜지 않는다 — 사람이 켜거나 초기화를 눌러야
                 AUTO["status"] = "자동 교감 꺼짐 (정지)"
             msg = ctl(cmd)
             print(f"[ctl] {cmd}: {msg}", flush=True)
@@ -443,6 +448,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_error(400)
                 return
             AUTO["on"] = on
+            AUTO["held_off"] = not on        # 직접 끄면 대화가 끝나도 다시 켜지 않는다
             AUTO["status"] = "자동 교감 켜짐 — 시선을 기다려요" if on else "자동 교감 꺼짐"
             print(f"[auto] {'ON' if on else 'OFF'}", flush=True)
             self._send(json.dumps({"auto_on": AUTO["on"], "msg": AUTO["status"]}))
@@ -450,8 +456,9 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/reset":           # 초기화: 대화 중지 + 응시 누적·재확정 금지 비움. 로봇엔 아무 명령도 안 보낸다
             dialog.stop()
             orc.reset()
-            AUTO["status"] = "🔄 초기화 — 시선을 기다려요" if AUTO["on"] else "🔄 초기화됨 — 대기"
-            print("[auto] 초기화", flush=True)
+            AUTO["on"], AUTO["held_off"] = True, False   # 초기화하면 자동 교감 시작 (2026-10-31)
+            AUTO["status"] = "🔄 초기화 — 자동 교감 켜짐, 시선을 기다려요"
+            print("[auto] 초기화 · 자동 교감 ON", flush=True)
             self._send(json.dumps({"msg": AUTO["status"]}))
             return
         if self.path == "/talk":

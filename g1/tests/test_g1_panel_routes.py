@@ -144,18 +144,36 @@ def test_reset_route_stops_dialog_and_resets_orchestrator(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
     monkeypatch.setattr(g1_panel.dialog, "stop", lambda: calls.append("dlg") or "대화 중지 요청")
-    g1_panel.AUTO["on"] = True
+    g1_panel.AUTO["on"] = False
     code, body = _call("POST", "/reset")
     assert code == 200 and "초기화" in json.loads(body)["msg"]
     assert calls == ["dlg", "orc"]
-    assert g1_panel.AUTO["on"] is True            # 자동 교감 상태는 그대로 — 로봇에 명령도 안 보낸다
+    assert g1_panel.AUTO["on"] is True            # 2026-10-31: 초기화하면 자동 교감 시작 (로봇에 명령은 안 보낸다)
     g1_panel.AUTO["on"] = False
 
 
 def test_dialog_end_resets_orchestrator(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
-    g1_panel.AUTO["on"] = True
+    g1_panel.AUTO["on"], g1_panel.AUTO["held_off"] = False, False
     g1_panel._dialog_ended()
-    assert calls == ["orc"] and "시선" in g1_panel.AUTO["status"]
+    assert calls == ["orc"] and g1_panel.AUTO["on"] is True and "시선" in g1_panel.AUTO["status"]   # 대화 끝 → 자동 교감 시작
+    g1_panel.AUTO["on"] = False
+
+
+def test_dialog_end_does_not_rearm_after_estop_or_manual_off(monkeypatch):
+    # 비상정지·정지·직접 끔 뒤에 대화가 끝나도 자동 교감이 다시 켜지면 안 된다(시선만으로 로봇이 다시 움직임)
+    monkeypatch.setattr(g1_panel, "ctl", lambda cmd: "ok")
+    monkeypatch.setattr(g1_panel.orc, "reset", lambda: None)
+    monkeypatch.setattr(g1_panel.dialog, "stop", lambda: "대화 중지 요청")
+    g1_panel.AUTO["on"] = True
+    _call("POST", "/ctl/damp")
+    g1_panel._dialog_ended()
+    assert g1_panel.AUTO["on"] is False
+    _call("POST", "/auto", json.dumps({"on": True}).encode())
+    _call("POST", "/auto", json.dumps({"on": False}).encode())
+    g1_panel._dialog_ended()
+    assert g1_panel.AUTO["on"] is False
+    _call("POST", "/reset")                        # 사람이 초기화를 누르면 다시 켠다
+    assert g1_panel.AUTO["on"] is True
     g1_panel.AUTO["on"] = False
