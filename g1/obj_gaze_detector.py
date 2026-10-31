@@ -15,7 +15,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 # YOLO(COCO) 라벨 -> 대화 kind (spec §3.3). 물체 대화는 화분만 남김(2026-10-30 — 물병·가족사진·휴대폰 제외)
-OBJ_TO_KIND = {"potted plant": "plant", "vase": "plant"}
+OBJ_TO_KIND = {"potted plant": "plant", "vase": "plant",                     # COCO 라벨
+               "flowers": "plant", "bouquet": "plant", "flower vase": "plant"}  # YOLO-World 프롬프트 (2026-10-31)
 
 
 def pick_object(dets: list, uv: tuple[float, float] | None) -> tuple[str, list[float]] | None:

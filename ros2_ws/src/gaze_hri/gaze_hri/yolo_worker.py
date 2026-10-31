@@ -29,8 +29,13 @@ def main():
     out = sys.stdout
     sys.stdout = sys.stderr            # 라이브러리 출력이 프로토콜을 오염시키지 않게
 
-    from ultralytics import YOLO
-    model = YOLO(model_path)
+    if "world" in model_path.lower():  # YOLO-World: 클래스 이름이 곧 검출 프롬프트 (예: flowers,bouquet,flower vase)
+        from ultralytics import YOLOWorld
+        model = YOLOWorld(model_path)
+        model.set_classes(classes)
+    else:
+        from ultralytics import YOLO
+        model = YOLO(model_path)
     names = model.names
     ids = [i for i, n in names.items() if n in classes]
     model.predict(np.zeros((480, 640, 3), np.uint8), verbose=False)    # 워밍업

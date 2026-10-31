@@ -90,7 +90,7 @@ def test_config_loads_four_tag_bundle():
         assert n @ np.r_[pos[:2], 0.0] > 0, t["id"]
         c = obj[t["id"]].mean(axis=0)
         assert np.allclose(c, pos)
-    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand", "flower"}   # 몸통 없음, 꽃은 표시용
+    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand"}   # 몸통 없음, 꽃은 obj_yolo(YOLO-World)
 
 
 @pytest.mark.parametrize("tag_id,bear", [(10, 10.0), (11, 80.0), (12, -100.0), (13, 170.0), (13, -170.0)])
@@ -197,3 +197,12 @@ def test_flower_box_drawn_without_margin_and_not_a_part():
     out = draw_overlay(np.zeros((480, 640, 3), np.uint8), [fl], [], None, None, None, None)
     assert out[250, 300].any()                                  # 박스 테두리
     assert not out[250, 300 - 20].any()                         # 판정 여백(굵은 선)은 안 그림
+
+
+def test_config_obj_yolo_is_world_with_flower_prompts():
+    import yaml
+    from obj_gaze_detector import OBJ_TO_KIND
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "..", "config.yaml")))
+    o = cfg["obj_yolo"]
+    assert "world" in o["model"]                                   # 2026-10-31: 먼 꽃다발 COCO 57% → World 68%
+    assert o["classes"] and all(OBJ_TO_KIND.get(c) == "plant" for c in o["classes"])

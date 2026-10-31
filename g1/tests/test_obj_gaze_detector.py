@@ -31,7 +31,9 @@ def test_pick_object_prefers_higher_conf():
 
 
 def test_obj_to_kind_values():
-    assert OBJ_TO_KIND == {"potted plant": "plant", "vase": "plant"}          # 물병·가족사진·휴대폰 제외(2026-10-30)
+    assert set(OBJ_TO_KIND.values()) == {"plant"}                               # 물병·가족사진·휴대폰 제외(2026-10-30)
+    for k in ("potted plant", "vase", "flowers", "bouquet", "flower vase"):     # COCO 라벨 + YOLO-World 프롬프트(10-31)
+        assert OBJ_TO_KIND[k] == "plant"
     assert pick_object([["cup", 0.9, 0, 0, 640, 480], ["cell phone", 0.9, 0, 0, 640, 480]], (320, 240)) is None
 
 

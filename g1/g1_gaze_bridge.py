@@ -186,14 +186,15 @@ def main():
     tags = TagBundleDetector(cfg, K)
     obj_dist = float(cfg.get("attend", {}).get("object_dist_m", 1.5))   # 스테레오 깊이 연결 전 가정 거리
     yolo = _Yolo(cfg["yolo"])                                           # 부위 YOLO(g1_parts.pt)
-    obj_det = None                                                      # 물체 YOLO(yolo11l.pt) — 별도 subprocess
+    obj_det = None                                                      # 물체 YOLO(config obj_yolo, 지금 YOLO-World) — 별도 subprocess
     if not args.no_obj:
         ocfg = cfg.get("obj_yolo", {})
         obj_model = args.obj_model or ocfg.get("model", "~/yolo-env/yolo11l.pt")
+        obj_cls = ocfg.get("classes") or list(OBJ_TO_KIND)            # YOLO-World 면 이게 검출 프롬프트
         obj_det = ObjectDetector(ocfg.get("python", cfg["yolo"]["python"]), model=obj_model,
-                                 conf=float(ocfg.get("conf", 0.3)))
+                                 conf=float(ocfg.get("conf", 0.3)), classes=obj_cls)
         obj_det.start()
-        log.info("물체 YOLO: %s (classes=%s)", obj_model, ",".join(OBJ_TO_KIND))
+        log.info("물체 YOLO: %s (classes=%s)", obj_model, ",".join(obj_cls))
     src = GazeSource(use_ros=True, tag_direct=True, scene_topic=args.scene_topic,
                      gaze_px_port=args.gaze_px_port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -216,7 +217,7 @@ def main():
             bearing = hold_value(held_bearing, None if T is None else bearing_deg(T), now, 2.0)
             obj_b = None if (T is None or uv is None) else object_bearing_deg(T, uv, K, obj_dist)
             obj_kind, obj_dets = None, []
-            if obj_det is not None and uv is not None:                 # 시선이 있을 때만 물체 추론(부하 절반)
+            if obj_det is not None and (uv is not None or args.show):  # 평소엔 시선 있을 때만(부하 절반), 창 켜면 꽃 박스 보이게 항상
                 ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if ok:
                     obj_dets = obj_det.feed(jpg.tobytes())
@@ -226,7 +227,7 @@ def main():
                 if uv is not None:
                     shown_uv = (now, uv)
                 disp_uv = shown_uv[1] if now - shown_uv[0] <= 0.3 else None
-                cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, [],   # 손·머리만
+                cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, obj_dets,   # 손·머리 + 꽃(YOLO-World)
                                                        disp_uv, label, obj_kind, bearing))
                 cv2.waitKey(1)
             # 무효여도 매 프레임 보낸다 — dwell 이 '안 봄'을 알아야 리셋된다

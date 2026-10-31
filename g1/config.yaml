@@ -20,13 +20,14 @@ yolo:
   # 2026-10-31: 안경 실영상 510장으로 미세조정(검증 mAP50 머리 0.98·손 0.95, 사람 오검출 0). 합성 전용 구모델은 g1_parts.pt
   model: "~/yolo-env/g1_parts_real_v1.pt"
   conf: 0.25
-  classes: [g1_face, g1_hand, flower]   # 새 모델엔 몸통이 없다(판정에서도 뺐음). flower 는 확인 창 표시용 — 꽃 판정은 obj_yolo
+  classes: [g1_face, g1_hand]       # 새 모델엔 몸통이 없다(판정에서도 뺐음). 꽃은 obj_yolo(YOLO-World)가 판정·표시
 
-# 물체 YOLO(시선이 향한 물건 → 대화 kind). classes 는 obj_gaze_detector.OBJ_TO_KIND 키를 그대로 쓴다.
-# model: 아직 ~/yolo-env 에 없다 — `yolo settings` 로 받거나 ultralytics 가 자동 내려받게 한다. --no-obj 로 끌 수 있다.
+# 물체 YOLO(시선이 향한 물건 → 대화 kind). classes 는 obj_gaze_detector.OBJ_TO_KIND 에 있어야 한다. --no-obj 로 끌 수 있다.
+# 2026-10-31: COCO yolo11l → YOLO-World(classes = 검출 프롬프트). 먼 꽃다발 84장 0.25↑ 57%→68%, 가까운 꽃병 98%, 로봇 장면 오검출 0, 16ms
 obj_yolo:
-  model: "~/yolo-env/yolo11l.pt"
-  conf: 0.3
+  model: "~/yolo-env/yolov8l-worldv2.pt"
+  conf: 0.25
+  classes: [flowers, bouquet, flower vase]
 
 # 같이 보기: 착용자가 보는 물체까지 가정 거리 (스테레오 깊이 연결 전). 지원이 기준 물체 방위 계산에 쓴다
 attend:
