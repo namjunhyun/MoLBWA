@@ -188,10 +188,11 @@ def _auto_dialog(kind, bearing, after_act=False):
     if not AUTO["on"]:
         return
     greet = kind == "greet"
-    if not greet:
+    look = not greet and bearing is not None                   # 물체 방위를 알 때만 같이 보기(돌아보기)
+    if look:
         DLG["bear"] = (int(bearing), LAST["user_bearing"])     # 같이 보기: (물체, 착용자) 방위
     talk = TALK["on"]                                          # 대화 모드: 같이 보기·손 흔들기 없이 → 기다릴 동작도 없다
-    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=not greet and not talk, kind=kind, after_act=after_act and not talk)
+    msg = dialog.start(AUTO_DIALOG_MODE, with_attend=look and not talk, kind=kind, after_act=after_act and not talk)
     AUTO["status"] = ("👋 손 흔들어 인사하고 안부 나누는 중" if after_act and not talk else
                       "👋 안녕하세요~ 안부 나누는 중" if greet else
                       f"💬 {g1_dialog.SCENARIOS.get(kind, {}).get('name', kind)} 이야기 나누는 중")
@@ -231,11 +232,9 @@ def _bridge_feed(m):
     label = m.get("label")
     orc.feed_part(t, label if label in PART_TO_SEGMENT else None, ub_i)   # 같은 틱 부위 먼저
     ob = m.get("obj_bearing_deg")
-    # 몸통 태그 소실(방위 None)이면 물체 방향을 알 수 없다 → 0° 로 속이지 말고 물체 트리거를 막는다
-    if isinstance(ob, (int, float)):
-        orc.feed_object(t, m.get("obj_kind"), int(round(ob)))
-    else:
-        orc.feed_object(t, None, 0)
+    # 몸통 태그 소실(방위 None)이면 물체 방향을 모른다 → 0° 로 속이지 않고 None 으로: 돌아보기 없이 대화만 (2026-10-31,
+    # 예전엔 트리거를 막았는데 55mm 태그가 3m 에서 0% 라 꽃 시나리오가 아예 안 나갔다)
+    orc.feed_object(t, m.get("obj_kind"), int(round(ob)) if isinstance(ob, (int, float)) else None)
 
 
 def listen_bridge():

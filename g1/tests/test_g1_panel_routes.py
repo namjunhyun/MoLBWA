@@ -131,13 +131,13 @@ def test_talk_mode_blocks_manual_motion(monkeypatch):
     assert sent == []
 
 
-def test_bridge_no_tag_blocks_object_trigger(monkeypatch):
+def test_bridge_no_tag_still_triggers_object_without_bearing(monkeypatch):
     calls = []
     monkeypatch.setattr(g1_panel.orc, "feed_part", lambda *a: None)
     monkeypatch.setattr(g1_panel.orc, "feed_object", lambda t, kind, b: calls.append((kind, b)))
-    g1_panel._bridge_feed({"t": 1.0, "obj_kind": "cup", "bearing_deg": 10})              # 태그 없음
-    g1_panel._bridge_feed({"t": 2.0, "obj_kind": "cup", "obj_bearing_deg": 30.4})        # 정상
-    assert calls == [(None, 0), ("cup", 30)]
+    g1_panel._bridge_feed({"t": 1.0, "obj_kind": "plant", "bearing_deg": 10})            # 태그 없음 → 방위 None (돌아보기 없이 대화만)
+    g1_panel._bridge_feed({"t": 2.0, "obj_kind": "plant", "obj_bearing_deg": 30.4})      # 정상
+    assert calls == [("plant", None), ("plant", 30)]   # 2026-10-31: 태그가 없어도 꽃 대화는 시작
 
 
 def test_reset_route_stops_dialog_and_resets_orchestrator(monkeypatch):
@@ -177,3 +177,13 @@ def test_dialog_end_does_not_rearm_after_estop_or_manual_off(monkeypatch):
     _call("POST", "/reset")                        # 사람이 초기화를 누르면 다시 켠다
     assert g1_panel.AUTO["on"] is True
     g1_panel.AUTO["on"] = False
+
+
+def test_auto_dialog_without_bearing_talks_without_attend(monkeypatch):
+    calls = []
+    monkeypatch.setattr(g1_panel.dialog, "start", lambda mode, with_attend, kind, after_act=False: calls.append((kind, with_attend)) or "ok")
+    g1_panel.AUTO["on"], g1_panel.TALK["on"] = True, False
+    g1_panel._auto_dialog("plant", None)         # 태그 없음 → 꽃 쪽으로 못 돌아보니 대화만
+    g1_panel._auto_dialog("plant", 40)           # 태그 있음 → 돌아보고 대화
+    g1_panel.AUTO["on"] = False
+    assert calls == [("plant", False), ("plant", True)]
