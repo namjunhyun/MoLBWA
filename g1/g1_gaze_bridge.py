@@ -69,10 +69,10 @@ def object_bearing_deg(T_hc_torso: np.ndarray, uv: tuple[float, float], K: np.nd
     return 180.0 if deg == -180.0 else deg
 
 
-PART_COLOR = {"g1_hand": (255, 200, 0), "g1_face": (0, 255, 255)}   # BGR. 몸통은 안 그림(판정엔 계속 씀)
+PART_COLOR = {"g1_hand": (255, 200, 0), "g1_face": (0, 255, 255), "flower": (0, 140, 255)}   # BGR. 꽃은 표시만(판정은 물체 YOLO)
 OBJ_COLOR = (0, 140, 255)
 GAZE_COLOR = (0, 255, 0)                  # gaze_on_scene 씬 창과 같은 초록 원+십자
-PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO"}
+PART_NAME = {"g1_hand": "HAND", "g1_face": "FACE", "g1_torso": "TORSO", "flower": "FLOWER"}
 
 
 def hold_dets(held: dict, dets: list, now: float, ttl: float = 0.5) -> list:
@@ -100,7 +100,7 @@ def draw_overlay(frame, part_dets, obj_dets, uv, label, obj_kind, bearing):
         c = PART_COLOR.get(cls)
         if c is None:
             continue
-        m = PART_MARGIN_PX                                      # 굵은 테두리 = 판정 영역, 얇은 선 = YOLO 박스
+        m = PART_MARGIN_PX if cls in PART_PRIORITY else 0       # 굵은 테두리 = 판정 영역(손·머리만), 얇은 선 = YOLO 박스
         cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), c, 1)
         cv2.rectangle(img, (int(x1 - m), int(y1 - m)), (int(x2 + m), int(y2 + m)), c, 2)
         cv2.putText(img, f"{PART_NAME.get(cls, cls)} {conf:.2f}", (int(x1), max(52, int(y1) - 5)),

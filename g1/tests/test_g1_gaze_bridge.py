@@ -90,7 +90,7 @@ def test_config_loads_four_tag_bundle():
         assert n @ np.r_[pos[:2], 0.0] > 0, t["id"]
         c = obj[t["id"]].mean(axis=0)
         assert np.allclose(c, pos)
-    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand"}   # 몸통은 판정 안 함(새 모델엔 클래스도 없음)
+    assert set(cfg["yolo"]["classes"]) == {"g1_face", "g1_hand", "flower"}   # 몸통 없음, 꽃은 표시용
 
 
 @pytest.mark.parametrize("tag_id,bear", [(10, 10.0), (11, 80.0), (12, -100.0), (13, 170.0), (13, -170.0)])
@@ -187,3 +187,13 @@ def test_hold_value_keeps_last_bearing_briefly():
     assert hold_value(st, None, 1.5, 2.0) == -16.0     # 태그 잠깐 놓쳐도 직전 방위
     assert hold_value(st, None, 2.5, 2.0) is None      # 오래되면 버린다(0° 로 속이지 않게)
     assert hold_value(st, 30.0, 3.0, 2.0) == 30.0
+
+
+def test_flower_box_drawn_without_margin_and_not_a_part():
+    pytest.importorskip("cv2")
+    from g1_gaze_bridge import draw_overlay
+    fl = ["flower", 0.9, 300, 200, 360, 300]
+    assert pick_part([fl], (330, 250)) is None                  # 꽃은 부위 판정 대상이 아니다(물체 YOLO 가 맡음)
+    out = draw_overlay(np.zeros((480, 640, 3), np.uint8), [fl], [], None, None, None, None)
+    assert out[250, 300].any()                                  # 박스 테두리
+    assert not out[250, 300 - 20].any()                         # 판정 여백(굵은 선)은 안 그림
