@@ -253,6 +253,11 @@ def main():
                 if uv is not None:
                     shown_uv = (now, uv)
                 disp_uv = shown_uv[1] if now - shown_uv[0] <= 0.3 else None
+                if not getattr(main, "_win", False):                            # 첫 표시: 창 2배(WIN_SCALE)
+                    sc = float(os.environ.get("WIN_SCALE", "2"))
+                    cv2.namedWindow("gaze + YOLO", cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow("gaze + YOLO", int(frame.shape[1] * sc), int(frame.shape[0] * sc))
+                    main._win = True
                 cv2.imshow("gaze + YOLO", draw_overlay(frame, part_dets, obj_dets,   # 손·머리 + 꽃(YOLO-World)
                                                        disp_uv, label, obj_kind, bearing))
                 cv2.waitKey(1)
