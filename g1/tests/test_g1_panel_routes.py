@@ -219,9 +219,9 @@ def test_missing_tag_uses_last_bearing_and_updates_after_turn(monkeypatch):
     g1_panel.AUTO["on"] = False
     g1_panel._bridge_feed({"t": 1000.0, "bearing_deg": None})
     assert parts[-1] == -4                                           # 60° 돌았으니 착용자는 이제 -4°
-    clock["now"] = 1006.0
-    g1_panel._bridge_feed({"t": 1006.0, "bearing_deg": None})       # 5초 넘게 못 봄 → 0 (모름, 자리를 옮겼을 수 있다)
-    assert parts[-1] == 0
+    clock["now"] = 1600.0
+    g1_panel._bridge_feed({"t": 1600.0, "bearing_deg": None})       # 10분 못 봐도 마지막 방위 유지(2026-11-02 요청)
+    assert parts[-1] == -4
 
 
 def test_flower_bearing_registered_and_turn_compensated(monkeypatch):
@@ -254,14 +254,17 @@ def test_flower_not_registered_from_jumpy_bearings(monkeypatch):
     assert g1_panel.LAST["obj_bearing"] is None and objs[-1] is None
 
 
-def test_user_bearing_memory_is_short(monkeypatch):
-    # 30초 기억은 자리를 옮긴 뒤 예전 방위로 돌았다(2026-10-31) → 5초만 메운다
+def test_user_bearing_memory_keeps_latest(monkeypatch):
+    # 2026-11-02 대회장: 멀리선 태그가 3%만 잡힌다 → 마지막으로 본 방위를 계속 쓰고, 새로 보면 최신으로 갱신
     parts = []
     monkeypatch.setattr(g1_panel.orc, "feed_part", lambda t, label, b: parts.append(b))
     monkeypatch.setattr(g1_panel.orc, "feed_object", lambda *a: None)
     clock = {"now": 4000.0}
     monkeypatch.setattr(g1_panel.time, "time", lambda: clock["now"])
     g1_panel._bridge_feed({"t": 4000.0, "bearing_deg": 60.0})
-    clock["now"] = 4006.0
-    g1_panel._bridge_feed({"t": 4006.0, "bearing_deg": None})
-    assert parts[-1] == 0
+    clock["now"] = 4300.0
+    g1_panel._bridge_feed({"t": 4300.0, "bearing_deg": None})
+    assert parts[-1] == 60
+    g1_panel._bridge_feed({"t": 4300.0, "bearing_deg": -30.0})       # 새로 보면 최신
+    g1_panel._bridge_feed({"t": 4300.0, "bearing_deg": None})
+    assert parts[-1] == -30
