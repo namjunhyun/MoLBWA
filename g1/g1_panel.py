@@ -313,6 +313,10 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <div class="row"><button class="estop" onclick="c('damp')">⛔ 비상정지</button></div>
 <div class="row ctl"><button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button></div>
 <div class="row ctl"><button onclick="fetch('/reset',{method:'POST'}).then(r=>r.json()).then(j=>document.getElementById('msg').textContent=j.msg)">🔄 초기화 — 대화 끊고 응시 누적 비움 + 자동 교감 시작</button></div>
+<h3 style="margin:14px 0 2px">💬 대화만 <small style="color:#888">(동작 없이 바로 시작 · 마이크로 듣기 · 자동 교감이 꺼져 있어야)</small></h3>
+<div class="row"><button style="background:#059669;color:#fff" onclick="dq('greet')">👋 안부 대화</button>
+<button style="background:#059669;color:#fff" onclick="dq('plant')">🪴 꽃 대화</button>
+<button style="background:#374151;color:#eee" onclick="dlg('stop')">■ 대화 중지</button></div>
 <div class="row ctl"><button onclick="c('stop','정책 중이면: 기본자세로 최대 5분 서 있다가 5초 카운트다운 후 힘이 빠집니다(받쳐야 함). 고수준이면 제자리 정지. 계속할까요?')">■ 정지(기본자세)</button>
 <button onclick="c('release','디벨롭 모드로 내리면 로봇이 스스로 못 섭니다. 하네스가 받치고 있나요?')">디벨롭 모드</button>
 <button onclick="c('highlevel','고수준(기본 보행) 모드로 올립니다. 계속할까요?')">고수준 모드</button></div>
@@ -380,6 +384,8 @@ async function dlg(op){const q={};if(op==='start'){q.mode=document.getElementByI
 q.obj_bearing_deg=+o.value;q.user_bearing_deg=+b.value}if(op==='answer'){q.text=document.getElementById('dans').value;document.getElementById('dans').value=''}
 if(op==='mictest')document.getElementById('msg').textContent='마이크 3초 녹음 중… 말해 보세요';
 const r=await fetch('/dialog/'+op,{method:'POST',body:JSON.stringify(q)});document.getElementById('msg').textContent=(await r.json()).msg}
+async function dq(k){const r=await fetch('/dialog/start',{method:'POST',body:JSON.stringify({mode:'mic',kind:k,with_attend:false})});
+document.getElementById('msg').textContent=(await r.json()).msg}
 async function upwav(){const f=document.getElementById('wavf').files[0];if(!f)return;document.getElementById('msg').textContent='올리는 중…';
 const r=await fetch('/say_wav',{method:'POST',body:f});document.getElementById('msg').textContent=(await r.json()).msg}
 async function attend(g){const q={obj_bearing_deg:+o.value,user_bearing_deg:+b.value,gesture:g};
