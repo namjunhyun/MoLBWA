@@ -164,6 +164,17 @@ def test_dialog_end_resets_orchestrator(monkeypatch):
     g1_panel.AUTO["on"] = False
 
 
+def test_free_chat_end_leaves_gaze_alone(monkeypatch):
+    # 자유 대화는 시선 교감과 무관 — "고마워"로 끝나도 초기화·자동 교감 켜기 안 함 (2026-11-06)
+    calls = []
+    monkeypatch.setattr(g1_panel.orc, "reset", lambda: calls.append("orc"))
+    monkeypatch.setattr(g1_panel.dialog, "thanked", True)
+    monkeypatch.setattr(g1_panel.dialog, "kind", "free", raising=False)
+    g1_panel.AUTO["on"], g1_panel.AUTO["held_off"] = False, False
+    g1_panel._dialog_ended()
+    assert calls == [] and g1_panel.AUTO["on"] is False
+
+
 def test_dialog_end_does_not_rearm_after_estop_or_manual_off(monkeypatch):
     # 비상정지·정지·직접 끔 뒤에 대화가 끝나도 자동 교감이 다시 켜지면 안 된다(시선만으로 로봇이 다시 움직임)
     monkeypatch.setattr(g1_panel, "ctl", lambda cmd: "ok")

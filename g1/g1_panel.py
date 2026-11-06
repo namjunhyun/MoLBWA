@@ -148,6 +148,9 @@ def dialog_attend(text):
 def _dialog_ended():
     """대화가 "대화해줘서 고마워"로 끝났을 때만 초기화 버튼과 같이 — 응시 누적·재확정 잠금을 비우고 다음 시나리오를 받는다.
     대답 없음·최대 횟수·위험 신호·오류·중지로 끝난 대화는 넘기지 않는다(초기화 버튼으로) (2026-10-31)."""
+    if getattr(dialog, "kind", None) == "free":    # 자유 대화는 시선 교감과 무관 — 초기화·자동 켜기 안 함 (2026-11-06)
+        print("[free] 자유 대화 끝", flush=True)
+        return
     if not dialog.thanked:
         print("[auto] 대화 끝 (고마워 아님) — 다음 시나리오로 넘기지 않음. 넘기려면 초기화", flush=True)
         return
@@ -313,9 +316,8 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <div class="row"><button class="estop" onclick="c('damp')">⛔ 비상정지</button></div>
 <div class="row ctl"><button id="talk" onclick="ttalk()">🗣 대화 모드 꺼짐 — 동작+대화</button></div>
 <div class="row ctl"><button onclick="fetch('/reset',{method:'POST'}).then(r=>r.json()).then(j=>document.getElementById('msg').textContent=j.msg)">🔄 초기화 — 대화 끊고 응시 누적 비움 + 자동 교감 시작</button></div>
-<h3 style="margin:14px 0 2px">💬 대화만 <small style="color:#888">(동작 없이 바로 시작 · 마이크로 듣기 · 자동 교감이 꺼져 있어야)</small></h3>
-<div class="row"><button style="background:#059669;color:#fff" onclick="dq('greet')">👋 안부 대화</button>
-<button style="background:#059669;color:#fff" onclick="dq('plant')">🪴 꽃 대화</button>
+<h3 style="margin:14px 0 2px">💬 자유 대화 <small style="color:#888">(주제 없이 · 동작 없음 · 마이크로 듣기 · "고마워"로 끝 · 자동 교감이 꺼져 있어야)</small></h3>
+<div class="row"><button style="background:#059669;color:#fff" onclick="dq('free')">💬 자유 대화 시작</button>
 <button style="background:#374151;color:#eee" onclick="dlg('stop')">■ 대화 중지</button></div>
 <div class="row ctl"><button onclick="c('stop','정책 중이면: 기본자세로 최대 5분 서 있다가 5초 카운트다운 후 힘이 빠집니다(받쳐야 함). 고수준이면 제자리 정지. 계속할까요?')">■ 정지(기본자세)</button>
 <button onclick="c('release','디벨롭 모드로 내리면 로봇이 스스로 못 섭니다. 하네스가 받치고 있나요?')">디벨롭 모드</button>

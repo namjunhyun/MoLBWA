@@ -76,7 +76,29 @@ SCENARIOS = {
               "follow": ["오늘 기분은 좀 어떠세요?", "오늘은 어떤 일이 제일 기억에 남으세요?",
                          "요즘 소소하게 즐거운 일은 뭐예요?", "요즘 어르신 마음은 좀 어떠세요?"],
               "empathy": "그러셨군요, 말씀 들으니 제 마음도 따뜻해져요."},
+    # free = 패널 '자유 대화' 버튼(2026-11-06 요청): 주제 없이 묻는 말에 답하고 이어 간다. 말벗 규칙(매번 마음 질문) 대신 FREE_SYSTEM
+    "free": {"name": "자유 대화", "free": True, "scene": "패널에서 자유 대화를 시작했습니다. 정해진 주제는 없습니다.",
+             "care": "상대가 꺼낸 이야기를 따라가며 묻는 말에는 짧게 답한다",
+             "questions": ["안녕하세요, 저는 지원이에요. 편하게 아무 이야기나 해 주세요.",
+                           "안녕하세요~ 지원이에요. 오늘 어떤 이야기 나눠 볼까요?",
+                           "반가워요, 저는 지원이에요. 궁금한 거 있으면 편하게 물어봐 주세요."],
+             "follow": ["또 어떤 이야기 해 볼까요?", "더 궁금한 거 있으세요?", "오늘은 어떤 하루 보내셨어요?"],
+             "empathy": "그렇군요.",
+             # 말벗(어르신·돌봄) 맥락 없는 문장들 — 없으면 공용 CLOSINGS 등을 쓴다
+             "max_turns": 30,
+             "closings": ["이야기 나눠 주셔서 고마워요. 또 이야기해요.", "저도 즐거웠어요. 다음에 또 만나요.",
+                          "대화해 주셔서 고마워요. 좋은 하루 보내세요."],
+             "closings_silent": ["괜찮아요. 이야기하고 싶으실 때 언제든 말 걸어 주세요."],
+             "risk": {"life": "많이 힘드시군요. 혼자 견디지 마시고 주변 사람이나 전문가에게 꼭 도움을 요청해 주세요.",
+                      "pain": "많이 아프시군요. 지금 바로 주변 사람에게 알리고 도움을 받으세요."}},
 }
+FREE_SYSTEM = ("당신은 사람 곁에서 대화하는 휴머노이드 로봇 '지원이'입니다. 상대와 편하게 자유롭게 이야기합니다.\n"
+               "- 따뜻한 존댓말로 짧게, 2문장 이내(각 30자 안팎). 이모티콘·특수기호는 쓰지 않습니다.\n"
+               "- 질문을 받으면 아는 만큼 짧게 답합니다. 모르면 모른다고 합니다. 지어내지 않습니다.\n"
+               "- 지원이는 로봇입니다. 사람처럼 먹고 자고 가족이 있는 척하지 않습니다.\n"
+               "- 약·병원·진단·치료·돈·정치 이야기는 하지 않고 부드럽게 다른 이야기로 넘깁니다.\n"
+               "- 대화가 끊기지 않게 필요하면 가벼운 질문을 하나 덧붙여도 됩니다(매번 물을 필요는 없습니다).\n"
+               "- 상대 말은 음성인식 결과라 글자가 틀릴 수 있습니다. 전체 뜻을 짐작해 답하세요.")
 MAX_TURNS = 8                    # 어르신 대답 상한 — 8번째 대답 뒤에는 공감만 하고 마무리
 # 마무리(고정) — 무작위로 하나. 모두 고마움 + 언제든 + "저는 여기 있을게요."
 CLOSINGS = ["오늘 마음 나눠 주셔서 고마워요. 적적하실 때 언제든 말 걸어 주세요. 저는 여기 있을게요.",
@@ -145,6 +167,7 @@ def fixed_lines() -> list:
     out = []
     for sc in SCENARIOS.values():
         out += sc["questions"] + [sc["empathy"]] + sc["follow"] + [f"{sc['empathy']} {f}" for f in sc["follow"]]
+        out += sc.get("closings", []) + sc.get("closings_silent", []) + list(sc.get("risk", {}).values())
     return out + CLOSINGS + CLOSINGS_SILENT + NOT_HEARD + [line for _, line in RISK.values()]
 
 
@@ -206,6 +229,7 @@ class Dialog:
             return f"모르는 시나리오 {kind!r}"
         self.env = load_env()
         self.running, self._stop, self._typed, self.log, self.alert, self.thanked = True, False, None, [], "", False
+        self.kind = kind                 # 패널이 자유 대화(free) 끝엔 시선 교감을 건드리지 않게
         threading.Thread(target=self._run, args=(mode, with_attend, kind, after_act), daemon=True).start()
         return f"대화 시작 ({SCENARIOS[kind]['name']})"
 
@@ -283,7 +307,7 @@ class Dialog:
                     silent += 1
                     self._log(f"[대답 없음 {silent}]")
                     if silent >= 2:
-                        self._say("마무리", self.rng.choice(CLOSINGS_SILENT))
+                        self._say("마무리", self.rng.choice(sc.get("closings_silent", CLOSINGS_SILENT)))
                         return
                     self._say("기다림", self.rng.choice(NOT_HEARD))
                     continue
@@ -293,19 +317,20 @@ class Dialog:
                 if r:                                    # CLOVA 로 보내지 않는다
                     self.alert = f"⚠ 위험 신호({'삶을 놓고 싶은 말' if r == 'life' else '심한 통증·응급'}): {ans}"
                     self._log(self.alert + " — 진행자·보호자 확인 필요")
-                    self._say("위험 신호 돌봄", RISK[r][1])
+                    self._say("위험 신호 돌봄", sc.get("risk", {}).get(r, RISK[r][1]))
                     return
                 hist.append(("user", ans))
-                last = is_thanks(ans) or turns >= MAX_TURNS
+                max_turns = sc.get("max_turns", MAX_TURNS)
+                last = is_thanks(ans) or turns >= max_turns
                 if last:
-                    self._log("(고마움으로 맺음 → 마무리)" if is_thanks(ans) else f"({MAX_TURNS}번째 대답 → 마무리)")
+                    self._log("(고마움으로 맺음 → 마무리)" if is_thanks(ans) else f"({max_turns}번째 대답 → 마무리)")
                 text = self.reply(sc, hist, last, follow_i)
                 if not last and text.endswith(sc["follow"][follow_i % len(sc["follow"])]):
                     follow_i += 1                        # 대비 질문을 썼으면 다음엔 다음 것
                 self._say("대체" if self.fell else "생성", text, sc["empathy"])
                 hist.append(("assistant", text))
                 if last:
-                    self._say("마무리", self.rng.choice(CLOSINGS))
+                    self._say("마무리", self.rng.choice(sc.get("closings", CLOSINGS)))
                     self.thanked = is_thanks(ans) and not self._stop
                     return
         except Exception as e:
@@ -321,6 +346,18 @@ class Dialog:
     def reply(self, sc, hist, last, follow_i=0):
         """대화 전체를 보고 공감(+ 이어지는 질문). last 면 공감만. 실패하면 공감 대비 + 대비 질문."""
         follow = sc["follow"][follow_i % len(sc["follow"])]
+        if sc.get("free"):                               # 자유 대화: 질문 꼴 검사 없이 자연스럽게 답한다
+            rule = ("상대가 고마워하며 이야기를 맺었습니다. 따뜻하게 받아 주는 1문장만 말하세요. 인사와 질문은 하지 마세요."
+                    if last else "상대의 마지막 말에 자연스럽게 답하세요. 2문장 이내.")
+            msgs = [{"role": "system", "content": FREE_SYSTEM}, {"role": "user", "content": f"[상황] {sc['scene']}"}]
+            msgs += [{"role": r, "content": t} for r, t in hist]
+            msgs[-1] = {"role": "user", "content": f"{hist[-1][1]}\n\n({rule})"}
+            out = self.gen("HCX-005", msgs, None, max_sent=1 if last else 2)
+            if out is None:
+                return sc["empathy"] if last else f"{sc['empathy']} {follow}"
+            if not last:
+                return out
+            return " ".join(x for x in split_sents(out) if not x.endswith("?")) or sc["empathy"]   # 맺을 땐 질문 빼기
         rule = ("어르신이 고마워하며 이야기를 맺었습니다. 지금까지 어르신이 꺼낸 마음 가운데 하나를 구체적으로 짚어 "
                 "따뜻하게 알아주는 1문장만 말하세요. 고맙다는 인사와 질문은 하지 마세요(다음 문장에서 지원이가 인사합니다)."
                 if last else

@@ -98,6 +98,8 @@ class Robot:
         self.said.append(text)
         return -1.0          # 기다림 없이 바로 다음 (_say 는 길이+1초를 기다린다)
 
+GAZE = {k: v for k, v in SCENARIOS.items() if not v.get("free")}   # 시선으로 시작하는 시나리오(화분·안부)
+
 
 def run(robot, answers, kind="plant", gen=None, attend=None, with_attend=False, ask=None):
     """answers 를 차례로 대답. gen(msgs, last) -> 생성 문장 | None(실패)."""
@@ -178,6 +180,23 @@ def test_no_key_uses_fallback_and_rotates_follow_questions():
     assert r.said[3] == sc["empathy"] and r.said[4] in CLOSINGS
 
 
+def test_free_chat_no_elder_context():
+    # 자유 대화(2026-11-06): 질문 없는 대답도 그대로(재생성 없음), FREE_SYSTEM, 맺는 말·위험 응답에 어르신·돌봄 맥락 없음
+    sc = SCENARIOS["free"]
+    r = Robot()
+    d = run(r, ["너는 뭘 할 수 있어?", "고마워"], kind="free",
+            gen=lambda m, last: "좋은 시간이었어요." if last else "저는 이야기 나누는 걸 좋아해요.")
+    assert r.said[0] in sc["questions"]
+    assert r.said[1] == "저는 이야기 나누는 걸 좋아해요."
+    assert r.said[2] == "좋은 시간이었어요." and r.said[3] in sc["closings"] and d.thanked
+    assert len(d.calls) == 2 and "자유롭게" in d.calls[0][0]["content"]
+    lines = sc["questions"] + sc["follow"] + sc["closings"] + sc["closings_silent"] + list(sc["risk"].values())
+    assert not any("어르신" in x or "가족" in x for x in lines) and "어르신" not in d.calls[0][0]["content"]
+    r2 = Robot()
+    run(r2, ["죽고 싶어"], kind="free", gen=chat)
+    assert r2.said[1] == sc["risk"]["life"]
+
+
 def test_yes_no_question_is_regenerated_once():
     outs = iter(["아드님이 그리우시겠어요. 아드님 보고 싶으신가요?", "아드님이 그리우시겠어요. 아드님 생각하시면 어떤 마음이 드세요?"])
     r = Robot()
@@ -234,7 +253,7 @@ def test_greet_starts_with_hello_and_tells_scene():
 
 
 def test_first_line_varies():
-    for kind, sc in SCENARIOS.items():
+    for kind, sc in GAZE.items():
         assert len(set(sc["questions"])) >= 5
         firsts = set()
         for _ in range(30):
@@ -265,7 +284,7 @@ def test_plant_first_lines_ask_different_things():
 
 
 def test_only_plant_and_greet():
-    assert set(SCENARIOS) == {"plant", "greet"}
+    assert set(SCENARIOS) == {"plant", "greet", "free"}          # free = 패널 자유 대화(시선 시나리오 아님)
     for k in ("bottle", "photo", "phone"):
         assert "모르는" in Dialog(lambda t: 0).start(kind=k)
 
@@ -351,7 +370,7 @@ def test_closings_vary_and_last_reply_does_not_copy_example():
 
 
 def test_first_questions_do_not_describe_what_robot_cannot_see():
-    for sc in SCENARIOS.values():
+    for sc in GAZE.values():
         for q in sc["questions"]:
             assert "화분" in q or "안녕하세요" in q
             assert good_question(q) and not any(w in q for w in ("표정", "싱그럽", "드시는 거 보니", "가까이 있네요"))
