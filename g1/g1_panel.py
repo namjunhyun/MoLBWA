@@ -47,7 +47,8 @@ def listen_state():
 
 
 STOP_CMDS = {"damp", "stop", "release", "shutdown"}   # 멈춤/정책 내림 성격 → 자동 교감 해제
-CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "shutdown", "status"}
+CTL = {"damp", "stop", "release", "highlevel", "start", "start_dry", "handover", "handback", "shutdown", "status",
+       "button_toggle"}                         # 버튼 누르기(고수준 + arm_sdk) 켜기/떼기 2026-11-16
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
        "-o", "ControlPath=/tmp/g1_panel_%r@%h", "-o", "ControlPersist=600"]
 
@@ -327,6 +328,8 @@ input[type=range]{width:100%}#deg{font-size:32px;font-weight:700}#st{padding:10p
 <div class="row ctl"><button style="background:#b45309!important" onclick="c('handover','고수준으로 서 있는 상태에서 바로 우리 정책으로 넘깁니다(실기 미검증). 하네스를 걸었나요? 비상정지 담당과 주변 2m 확인했나요? 로봇이 가만히 서 있나요?')">⇄ 고수준 → 정책 인계 (하네스 필수)</button>
 <button style="background:#0e7490!important" onclick="c('handback','우리 정책에서 고수준(보행 컨트롤러)으로 넘깁니다(실기 미검증). 로봇이 가만히 서 있나요? 하네스·비상정지 담당 확인했나요?')">⇄ 정책 → 고수준 반납 (하네스 필수)</button></div>
 <div class="row ctl"><button style="background:#4d7c0f!important" onclick="c('shutdown','고수준에 넘긴 뒤 서기 → 앉기 → 제로토크로 끕니다(실기 미검증). 하네스는 앉을 만큼 길게 걸었나요? 주변 2m 확인했나요?')">🏠 종료: 반납 → 앉기 → 제로토크 (하네스 필수)</button></div>
+<h3 style="margin:14px 0 2px">🔘 버튼 누르기 <small style="color:#888">(고수준 모드에서만 · 리모컨으로 책상 앞에 세운 뒤 · 한 번 = 누르고 유지, 다시 = 손 떼기)</small></h3>
+<div class="row ctl"><button id="btnpress" style="background:#be185d!important" onclick="bt()">🔘 버튼 누르기 / ✋ 손 떼기</button></div>
 <div id="robot">로봇: ?</div>
 <svg width="200" height="200" viewBox="-100 -100 200 200"><circle r="90" fill="none" stroke="#444"/>
 <path d="M-8 6 L0 -14 L8 6 Z" fill="#aaa"/><text y="30" fill="#888" font-size="11" text-anchor="middle">지원이(정면=위)</text>
@@ -386,6 +389,8 @@ async function dlg(op){const q={};if(op==='start'){q.mode=document.getElementByI
 q.obj_bearing_deg=+o.value;q.user_bearing_deg=+b.value}if(op==='answer'){q.text=document.getElementById('dans').value;document.getElementById('dans').value=''}
 if(op==='mictest')document.getElementById('msg').textContent='마이크 3초 녹음 중… 말해 보세요';
 const r=await fetch('/dialog/'+op,{method:'POST',body:JSON.stringify(q)});document.getElementById('msg').textContent=(await r.json()).msg}
+function bt(){const on=document.getElementById('robot').textContent.includes('버튼누르기=');
+c('button_toggle',on?null:'오른손으로 책상 위 버튼을 누르고 유지합니다(실기 미검증). 고수준 모드로 서 있나요? 손이 책상 앞 모서리보다 뒤에 있나요? 하네스·비상정지 담당 확인했나요?')}
 async function dq(k){const r=await fetch('/dialog/start',{method:'POST',body:JSON.stringify({mode:'mic',kind:k,with_attend:false})});
 document.getElementById('msg').textContent=(await r.json()).msg}
 async function upwav(){const f=document.getElementById('wavf').files[0];if(!f)return;document.getElementById('msg').textContent='올리는 중…';

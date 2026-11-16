@@ -1,6 +1,9 @@
 """Jetson 쪽 조작 명령 (조작 패널이 SSH 로 부른다). Python 3.8.
 
-    python3 g1_ctl.py status|release|highlevel|damp|stop|start|start_dry
+    python3 g1_ctl.py status|release|highlevel|damp|stop|start|start_dry|button_toggle
+
+button_toggle : 버튼 누르기(고수준 + arm_sdk, g1_button.py). 안 돌면 시작(오른손으로 책상 위 버튼을 누르고 유지), 돌면 손 떼기.
+            damp·stop 은 먼저 버튼 누르기를 멈춰 팔을 Unitree 에 돌려준다
 
 status    : 모드 이름('ai' = 고수준, '' = 디벨롭/R&D) + 정책 서버 실행 여부
 release   : 디벨롭 모드 (MotionSwitcher.ReleaseMode) — 이후 로봇은 스스로 못 선다(하네스)
@@ -40,6 +43,46 @@ def server_pid():
         return None
 
 
+BPIDF = "/tmp/g1_button.pid"
+BLOG = os.path.join(HERE, "button.log")
+
+
+def button_pid():
+    try:
+        pid = int(open(BPIDF).read())
+        if b"g1_button" not in open(f"/proc/{pid}/cmdline", "rb").read():
+            return None
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def button_toggle(policy_pid):
+    """버튼 누르기(고수준 + arm_sdk): 안 돌면 시작(누르고 유지), 돌면 SIGUSR1 로 떼기."""
+    bp = button_pid()
+    if bp:
+        os.kill(bp, signal.SIGUSR1)
+        return f"손 떼기 요청 ({bp}) — 역순으로 돌아간 뒤 끝(약 6초). 로그 {BLOG}"
+    if policy_pid:
+        return "거부: 정책 서버(저수준)가 돌고 있다 — 버튼 누르기는 고수준 모드에서만"
+    p = subprocess.Popen(["python3", os.path.join(HERE, "g1_button.py")], cwd=HERE,
+                         stdout=open(BLOG, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    open(BPIDF, "w").write(str(p.pid))
+    time.sleep(3.0)                                 # 거부(모드·lowstate)면 곧 끝난다 → 이유를 돌려준다
+    if p.poll() is not None:
+        tail = [l for l in open(BLOG).read().splitlines() if l.strip()]
+        return "버튼 누르기 시작 실패: " + (tail[-1] if tail else f"코드 {p.returncode}")
+    return f"버튼 누르기 시작 ({p.pid}) — 손을 올려 누른 뒤 유지. 다시 누르면 손 떼기. 로그 {BLOG}"
+
+
+def stop_button():
+    bp = button_pid()
+    if bp:
+        os.kill(bp, signal.SIGTERM)                 # 팔을 지금 자세에서 Unitree 에 바로 돌려준다(0.5 s)
+        time.sleep(0.7)
+    return bp
+
+
 def dds():
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     out = subprocess.run(["ip", "-4", "-o", "addr"], stdout=subprocess.PIPE, universal_newlines=True).stdout
@@ -65,6 +108,10 @@ def mode_name(m):
 
 def main(cmd):
     pid = server_pid()
+    if cmd == "button_toggle":
+        return button_toggle(pid)
+    if cmd in ("damp", "stop"):
+        stop_button()                               # 버튼 누르기 중이면 팔부터 Unitree 에 돌려준다
     if cmd in ("damp", "stop") and pid:            # 정책 서버가 돌면 DDS 를 열지 않고 신호만 (가장 빠른 경로)
         os.kill(pid, signal.SIGTERM if cmd == "damp" else signal.SIGINT)
         return f"정책 서버 {pid} 에 {'SIGTERM(댐핑)' if cmd == 'damp' else 'SIGINT(기본자세 유지 후 종료)'}"
@@ -84,7 +131,8 @@ def main(cmd):
         return f"mode=디벨롭(정책 실행 중) server={pid}"
     dds(); m = switcher(); name = mode_name(m)
     if cmd == "status":
-        return f"mode={name or '디벨롭'} server={pid or '-'}"
+        bp = button_pid()
+        return f"mode={name or '디벨롭'} server={pid or '-'}" + (f" 버튼누르기={bp}" if bp else "")
     if cmd == "release":
         m.ReleaseMode()
         time.sleep(1.0)
