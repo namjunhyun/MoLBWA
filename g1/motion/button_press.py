@@ -35,7 +35,7 @@ def seg(a, b, n):
     return [a + smooth_step((k + 1) / n) * (b - a) for k in range(n)]
 
 
-def build(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08, clear=0.15, lift_x=0.12,
+def build(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08, clear=0.15, lift_x=0.12, desk_edge=0.12,
           t_move=2.0, t_down=1.0):
     """궤적은 '들어 올린 자세 L'(손 = 골반 앞 lift_x, 책상 위 clear, 손바닥 아래)에서 시작한다. 실기 시작 자세(Unitree 고수준
     서기)는 모르므로 젯슨이 실제 현재 자세 → L 을 관절 보간한다(운용 조건: 손이 책상 앞 모서리보다 뒤에 있게 세운다)."""
@@ -72,7 +72,6 @@ def build(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08
     clr = min_clearance(allr, arm)
     bodies = [mj.mj_name2id(arm.m, mj.mjtObj.mjOBJ_BODY, f"{SIDE}_{b}") for b in
               ("elbow_link", "wrist_roll_link", "wrist_pitch_link", "wrist_yaw_link")]
-    desk_edge = 0.12
     low = 9.0
     for r in rows_a:                               # 접근 구간(누르기 전): 팔꿈치·손목·손바닥 아랫면이 책상 윗면보다 위
         arm.set(r)
@@ -84,7 +83,8 @@ def build(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08
     ci = [7 + CSV_JOINTS.index(n) for n in NAMES]
     out = {"joint_names": NAMES, "fps": FPS, "q_lift": rows_a[0, ci].round(5).tolist(),
            "approach": rows_a[:, ci].round(5).tolist(), "press": rows_d[:, ci].round(5).tolist(),
-           "params": dict(desk=desk, btn_h=btn_h, btn_x=btn_x, btn_y=btn_y, depth=depth, above=above, lift_x=lift_x),
+           "params": dict(desk=desk, btn_h=btn_h, btn_x=btn_x, btn_y=btn_y, depth=depth, above=above, lift_x=lift_x,
+                         clear=clear, desk_edge=desk_edge),
            "check": {"lift_err_mm": round(lift_err, 1), "press_err_mm": round(err_mm, 1), "palm_tilt_deg": round(tilt, 1),
                      "arm_torso_clear_m": round(clr["R-torso"], 3), "arm_above_desk_min_m": round(low, 3),
                      "joint_speed_max_rad_s": round(jmax, 2), "hand_thickness_m": round(float(th), 3)}}
@@ -94,10 +94,11 @@ def build(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    for k, v in dict(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08, lift_x=0.12).items():
+    for k, v in dict(desk=0.70, btn_h=0.04, btn_x=0.20, btn_y=-0.25, depth=0.01, above=0.08, lift_x=0.12, clear=0.15,
+                     desk_edge=0.12).items():
         ap.add_argument(f"--{k}", type=float, default=v)
     a = ap.parse_args()
-    res = build(a.desk, a.btn_h, a.btn_x, a.btn_y, a.depth, a.above, lift_x=a.lift_x)
+    res = build(a.desk, a.btn_h, a.btn_x, a.btn_y, a.depth, a.above, clear=a.clear, lift_x=a.lift_x, desk_edge=a.desk_edge)
     json.dump(res, open(a.out, "w"))
     c = res["check"]
     print(f"{a.out}: 접근 {len(res['approach'])} + 누르기 {len(res['press'])} 프레임 | {c}")
